@@ -2,6 +2,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from langchain_core.tools import tool
+from .metadata import attach_tool_risk
 
 MAX_FILE_READ_CHARS = 4000
 MAX_DIRECTORY_ENTRIES = 200
@@ -85,7 +86,7 @@ def create_list_directory_tool(allowed_roots: Sequence[Path]):
     """创建带路径范围约束的目录读取工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("list_directory", extras={"risk": "read"})
+    @tool("list_directory")
     def list_directory(path: str = ".") -> str:
         """
         列出允许访问范围内指定目录的文件和子目录。
@@ -120,14 +121,14 @@ def create_list_directory_tool(allowed_roots: Sequence[Path]):
 
         return "\n".join(lines)
 
-    return list_directory
+    return attach_tool_risk(list_directory, "read")
 
 
 def create_read_text_file_tool(allowed_roots: Sequence[Path]):
     """创建带路径范围约束的文本文件读取工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("read_text_file", extras={"risk": "read"})
+    @tool("read_text_file")
     def read_text_file(path: str, max_chars: int = MAX_FILE_READ_CHARS) -> str:
         """
         读取允许访问范围内的文本文件内容。
@@ -159,14 +160,14 @@ def create_read_text_file_tool(allowed_roots: Sequence[Path]):
             f"{truncated_content}"
         )
 
-    return read_text_file
+    return attach_tool_risk(read_text_file, "read")
 
 
 def create_write_text_file_tool(allowed_roots: Sequence[Path]):
     """创建受路径范围限制的整文件写入工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("write_text_file", extras={"risk": "write"})
+    @tool("write_text_file")
     def write_text_file(
         path: str,
         content: str,
@@ -192,14 +193,14 @@ def create_write_text_file_tool(allowed_roots: Sequence[Path]):
             f"字符数：{len(content)}"
         )
 
-    return write_text_file
+    return attach_tool_risk(write_text_file, "write")
 
 
 def create_replace_in_file_tool(allowed_roots: Sequence[Path]):
     """创建基于文本替换的文件编辑工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("replace_in_file", extras={"risk": "write"})
+    @tool("replace_in_file")
     def replace_in_file(
         path: str,
         old_text: str,
@@ -246,4 +247,4 @@ def create_replace_in_file_tool(allowed_roots: Sequence[Path]):
             f"替换次数：{replaced_count}"
         )
 
-    return replace_in_file
+    return attach_tool_risk(replace_in_file, "write")

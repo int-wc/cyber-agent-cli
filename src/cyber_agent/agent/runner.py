@@ -179,8 +179,13 @@ class AgentRunner:
         )
 
     def _tool_requires_approval(self, tool: BaseTool) -> bool:
-        tool_risk = (tool.extras or {}).get("risk", "read")
+        tool_risk = self._get_tool_risk(tool)
         return tool_risk in {"write", "execute"}
+
+    def _get_tool_risk(self, tool: BaseTool) -> str:
+        """读取工具风险级别，兼容当前工具元数据结构。"""
+        tool_metadata = tool.metadata or {}
+        return str(tool_metadata.get("risk", "read"))
 
     def _invoke_tool(
         self,
@@ -205,7 +210,7 @@ class AgentRunner:
                     {
                         "tool_name": tool_name,
                         "tool_call": tool_call,
-                        "risk": (tool.extras or {}).get("risk", "unknown"),
+                        "risk": self._get_tool_risk(tool),
                     },
                 )
 

@@ -85,8 +85,53 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("授权模式", result.output)
-        self.assertIn("自动批准", result.output)
+        self.assertIn("当前模式：authorized", result.output)
+        self.assertIn("审批策略：auto", result.output)
+
+    def test_ui_cli_mode_will_not_launch_tui(self) -> None:
+        """
+        测试：显式指定 --ui cli 时，即使存在 TUI 入口也应保持命令行交互。
+        """
+        cli_runner = CliRunner()
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch(
+                "cyber_agent.cli.tui.launch_textual_chat",
+                side_effect=AssertionError("不应启动 TUI"),
+            ):
+                result = cli_runner.invoke(
+                    app,
+                    ["--ui", "cli"],
+                    input="quit\n",
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("再见", result.output)
+
+    def test_ui_tui_mode_can_launch_tui_entry(self) -> None:
+        """
+        测试：显式指定 --ui tui 时，应优先进入 TUI 入口。
+        """
+        cli_runner = CliRunner()
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent.cli.tui.launch_textual_chat") as mock_launch:
+                result = cli_runner.invoke(app, ["--ui", "tui"])
+
+        self.assertEqual(result.exit_code, 0)
+        mock_launch.assert_called_once()
+
+    def test_ui_gui_mode_is_rejected(self) -> None:
+        """
+        测试：GUI 已移除后，旧的 --ui gui 参数应直接报错。
+        """
+        cli_runner = CliRunner()
+
+        result = cli_runner.invoke(app, ["--ui", "gui"], input="quit\n")
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("不支持的界面模式", result.output)
+        self.assertIn("auto, tui, cli", result.output)
 
     def test_doctor_can_show_extra_allowed_path_and_registered_tool(self) -> None:
         """

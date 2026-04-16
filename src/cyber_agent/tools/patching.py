@@ -6,6 +6,7 @@ from typing import Literal
 from langchain_core.tools import tool
 
 from .filesystem import display_path, normalize_allowed_roots, resolve_permitted_path
+from .metadata import attach_tool_risk
 
 HUNK_HEADER_RE = re.compile(
     r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
@@ -210,7 +211,7 @@ def create_apply_unified_patch_tool(allowed_roots: list[Path]):
     """创建统一补丁应用工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("apply_unified_patch", extras={"risk": "write"})
+    @tool("apply_unified_patch")
     def apply_unified_patch(patch_text: str) -> str:
         """
         应用 unified diff 补丁到允许访问范围内的文本文件。
@@ -231,4 +232,4 @@ def create_apply_unified_patch_tool(allowed_roots: list[Path]):
 
         return "\n".join(results)
 
-    return apply_unified_patch
+    return attach_tool_risk(apply_unified_patch, "write")

@@ -7,6 +7,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from .filesystem import normalize_allowed_roots, resolve_permitted_path
+from .metadata import attach_tool_risk
 
 MAX_COMMAND_OUTPUT_CHARS = 4000
 MAX_TOOL_TIMEOUT_SECONDS = 120
@@ -78,7 +79,7 @@ def create_run_shell_command_tool(allowed_roots: Sequence[Path]):
     """创建受工作目录范围约束的 Shell 命令执行工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
-    @tool("run_shell_command", extras={"risk": "execute"})
+    @tool("run_shell_command")
     def run_shell_command(
         command: str,
         working_directory: str = ".",
@@ -127,7 +128,7 @@ def create_run_shell_command_tool(allowed_roots: Sequence[Path]):
             completed_process=completed_process,
         )
 
-    return run_shell_command
+    return attach_tool_risk(run_shell_command, "execute")
 
 
 def create_run_registered_tool_tool(command_registry: Mapping[str, Path | str]):
@@ -135,7 +136,7 @@ def create_run_registered_tool_tool(command_registry: Mapping[str, Path | str]):
     normalized_registry = normalize_command_registry(command_registry)
     registered_tool_names = ", ".join(sorted(normalized_registry)) or "无"
 
-    @tool("run_registered_tool", extras={"risk": "execute"})
+    @tool("run_registered_tool")
     def run_registered_tool(
         tool_name: str,
         arguments: list[str] | None = None,
@@ -182,4 +183,4 @@ def create_run_registered_tool_tool(command_registry: Mapping[str, Path | str]):
             completed_process=completed_process,
         )
 
-    return run_registered_tool
+    return attach_tool_risk(run_registered_tool, "execute")

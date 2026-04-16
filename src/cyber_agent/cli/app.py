@@ -1,9 +1,11 @@
 import re
+import sys
 from pathlib import Path
 
 import typer
 from click.exceptions import Abort
 from langchain_core.tools import BaseTool
+from rich.console import Console
 
 from ..agent.approval import (
     ApprovalDecision,
@@ -28,6 +30,12 @@ from ..tools import (
     resolve_allowed_roots,
     resolve_command_registry,
 )
+from .interactive import (
+    EXIT_COMMANDS,
+    InteractionUiMode,
+    get_interaction_ui_mode_label,
+    parse_interaction_ui_mode,
+)
 from .render import CliRenderer
 
 app = typer.Typer(
@@ -35,9 +43,10 @@ app = typer.Typer(
     help="一个支持工具调用的命令行智能体原型。",
 )
 
-EXIT_COMMANDS = {"quit", "exit", "q", "/quit", "/exit", ":q"}
 TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 renderer = CliRenderer()
+_cli_prompt_session = None
+_prompt_toolkit_disabled = False
 
 
 def parse_registered_tool_specs(tool_specs: list[str] | None) -> dict[str, Path]:
@@ -80,6 +89,7 @@ def build_runtime_context(
     allow_paths: list[str] | None,
     tool_specs: list[str] | None,
     approval_policy: ApprovalPolicy,
+    ui_mode: InteractionUiMode,
 ) -> dict[str, object]:
     """统一构建 CLI 运行上下文，避免多处分散解析。"""
     local_config = load_local_cli_config()
@@ -104,6 +114,7 @@ def build_runtime_context(
         "command_registry": command_registry,
         "tools": tools,
         "approval_policy": approval_policy,
+        "ui_mode": ui_mode,
     }
 
 
@@ -131,9 +142,13 @@ def sync_runtime_context_from_runner(
     runtime_context["tools"] = list(runner.tools)
 
 
-def print_banner(runner: AgentRunner, runtime_context: dict[str, object]) -> None:
+def print_banner(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
     """输出交互模式欢迎信息。"""
-    renderer.print_banner(
+    cli_renderer.print_banner(
         mode=runner.mode,
         service=settings.get_service(),
         model=settings.openai_model,
@@ -142,14 +157,17 @@ def print_banner(runner: AgentRunner, runtime_context: dict[str, object]) -> Non
     )
 
 
-def print_help() -> None:
+def print_help(cli_renderer: CliRenderer = renderer) -> None:
     """输出交互模式内建命令。"""
-    renderer.print_help()
+    cli_renderer.print_help()
 
 
-def print_tools(runner: AgentRunner) -> None:
+def print_tools(
+    runner: AgentRunner,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
     """输出默认工具清单。"""
-    renderer.print_tools(
+    cli_renderer.print_tools(
         describe_tools(
             runner.mode,
             runner.extra_allowed_paths,
@@ -158,7 +176,11 @@ def print_tools(runner: AgentRunner) -> None:
     )
 
 
-def print_status(runner: AgentRunner, runtime_context: dict[str, object]) -> None:
+def print_status(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
     """输出便于试用排障的运行状态。"""
     api_key_configured = (
         "已配置"
@@ -172,7 +194,7 @@ def print_status(runner: AgentRunner, runtime_context: dict[str, object]) -> Non
     registered_tool_lines = "\n".join(
         describe_command_registry(runner.command_registry)
     ) or "无"
-    renderer.print_status(
+    cli_renderer.print_status(
         [
             ("模式", f"{get_mode_label(runner.mode)} ({runner.mode.value})"),
             (
@@ -185,6 +207,11 @@ def print_status(runner: AgentRunner, runtime_context: dict[str, object]) -> Non
             ("工作目录", str(Path.cwd())),
             ("会话轮数", str(runner.get_turn_count())),
             ("默认工具数", str(len(runner.tools))),
+            (
+                "界面",
+                f"{get_interaction_ui_mode_label(runtime_context['ui_mode'])}"
+                f" ({runtime_context['ui_mode'].value})",
+            ),
             ("OPENAI_API_KEY", api_key_configured),
             ("本地配置文件", str(runtime_context["local_config_path"])),
             ("已保存允许目录", saved_allowed_path_lines),
@@ -194,17 +221,23 @@ def print_status(runner: AgentRunner, runtime_context: dict[str, object]) -> Non
     )
 
 
-def print_allowed_roots(runner: AgentRunner) -> None:
+def print_allowed_roots(
+    runner: AgentRunner,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
     """输出当前会话允许访问的目录根路径。"""
-    renderer.print_allowed_roots(describe_allowed_roots(runner.allowed_roots))
+    cli_renderer.print_allowed_roots(describe_allowed_roots(runner.allowed_roots))
 
 
-def print_local_config(runtime_context: dict[str, object]) -> None:
+def print_local_config(
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
     """输出当前工作目录下的本地配置内容。"""
     saved_allowed_path_lines = "\n".join(
         describe_allowed_roots(runtime_context["saved_allowed_paths"])
     ) or "无"
-    renderer.print_status(
+    cli_renderer.print_status(
         [
             ("本地配置文件", str(runtime_context["local_config_path"])),
             ("已保存允许目录", saved_allowed_path_lines),
@@ -216,6 +249,7 @@ def add_allowed_path(
     raw_path: str,
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
 ) -> None:
     """为当前会话动态增加允许访问目录，并同步刷新工具范围。"""
     if not raw_path.strip():
@@ -225,15 +259,16 @@ def add_allowed_path(
     sync_runtime_context_from_runner(runtime_context, runner)
 
     if was_added:
-        renderer.print_info(f"已添加允许访问目录：{added_path}")
+        cli_renderer.print_info(f"已添加允许访问目录：{added_path}")
         return
-    renderer.print_info(f"目录已在允许访问范围内：{added_path}")
+    cli_renderer.print_info(f"目录已在允许访问范围内：{added_path}")
 
 
 def add_persisted_allowed_path(
     raw_path: str,
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
 ) -> None:
     """将目录持久化到本地配置，并同步更新当前会话。"""
     if not raw_path.strip():
@@ -252,17 +287,17 @@ def add_persisted_allowed_path(
 
     if was_persisted:
         if runner.mode is AgentMode.AUTHORIZED:
-            renderer.print_info(f"已写入本地配置并加入当前会话：{persisted_path}")
+            cli_renderer.print_info(f"已写入本地配置并加入当前会话：{persisted_path}")
             return
-        renderer.print_info(
+        cli_renderer.print_info(
             f"已写入本地配置：{persisted_path}。切换到授权模式后会自动生效。"
         )
         return
 
     if runner.mode is AgentMode.AUTHORIZED:
-        renderer.print_info(f"目录已存在于本地配置和当前会话中：{persisted_path}")
+        cli_renderer.print_info(f"目录已存在于本地配置和当前会话中：{persisted_path}")
         return
-    renderer.print_info(f"目录已存在于本地配置中：{persisted_path}")
+    cli_renderer.print_info(f"目录已存在于本地配置中：{persisted_path}")
 
 
 def render_agent_event(event_type: str, payload: object) -> None:
@@ -308,7 +343,7 @@ def create_approval_handler(runtime_context: dict[str, object]):
     def approval_handler(tool: BaseTool, tool_call: dict) -> ApprovalDecision:
         policy = runtime_context["approval_policy"]
         tool_name = str(tool_call.get("name", tool.name))
-        risk = str((tool.extras or {}).get("risk", "unknown"))
+        risk = str((tool.metadata or {}).get("risk", "unknown"))
 
         if policy is ApprovalPolicy.AUTO:
             return ApprovalDecision(True, "当前审批策略为自动批准。")
@@ -334,6 +369,7 @@ def handle_builtin_command(
     user_input: str,
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
 ) -> bool | None:
     """处理交互模式下的内建命令，返回是否继续会话。"""
     stripped_input = user_input.strip()
@@ -341,24 +377,24 @@ def handle_builtin_command(
     tokens = normalized_input.split()
 
     if normalized_input in EXIT_COMMANDS:
-        renderer.print_info("👋 再见！")
+        cli_renderer.print_info("👋 再见！")
         return False
     if normalized_input == "/help":
-        print_help()
+        print_help(cli_renderer)
         return True
     if normalized_input == "/tools":
-        print_tools(runner)
+        print_tools(runner, cli_renderer)
         return True
     if normalized_input == "/status":
-        print_status(runner, runtime_context)
+        print_status(runner, runtime_context, cli_renderer)
         return True
     if normalized_input == "/config":
-        print_local_config(runtime_context)
+        print_local_config(runtime_context, cli_renderer)
         return True
     if normalized_input.startswith("/config "):
         config_remainder = stripped_input[len("/config"):].strip()
         if config_remainder.lower() == "allow-path":
-            print_local_config(runtime_context)
+            print_local_config(runtime_context, cli_renderer)
             return True
         if config_remainder.lower().startswith("allow-path"):
             allow_path_remainder = config_remainder[len("allow-path"):].strip()
@@ -369,50 +405,51 @@ def handle_builtin_command(
                         persisted_path,
                         runner,
                         runtime_context,
+                        cli_renderer,
                     )
                 except ValueError as exc:
-                    renderer.print_error(str(exc))
+                    cli_renderer.print_error(str(exc))
                 return True
-            renderer.print_error("不支持的 /config allow-path 子命令。")
+            cli_renderer.print_error("不支持的 /config allow-path 子命令。")
             return True
-        renderer.print_error("不支持的 /config 子命令。")
+        cli_renderer.print_error("不支持的 /config 子命令。")
         return True
     if normalized_input == "/allow-path":
-        print_allowed_roots(runner)
+        print_allowed_roots(runner, cli_renderer)
         return True
     if normalized_input.startswith("/allow-path "):
         remainder = stripped_input[len("/allow-path"):].strip()
         if not remainder:
-            renderer.print_error("请提供要添加的目录路径。")
+            cli_renderer.print_error("请提供要添加的目录路径。")
             return True
 
         if remainder.lower().startswith("add "):
             remainder = remainder[4:].strip()
 
         try:
-            add_allowed_path(remainder, runner, runtime_context)
+            add_allowed_path(remainder, runner, runtime_context, cli_renderer)
         except ValueError as exc:
-            renderer.print_error(str(exc))
+            cli_renderer.print_error(str(exc))
         return True
     if normalized_input == "/clear":
         runner.reset()
-        renderer.print_info("会话上下文已清空。")
+        cli_renderer.print_info("会话上下文已清空。")
         return True
     if normalized_input == "/mode":
-        renderer.print_mode_notice(runner.mode, switched=False)
+        cli_renderer.print_mode_notice(runner.mode, switched=False)
         return True
     if len(tokens) == 2 and tokens[0] == "/mode":
         try:
             target_mode = parse_agent_mode(tokens[1])
         except ValueError as exc:
-            renderer.print_error(str(exc))
+            cli_renderer.print_error(str(exc))
             return True
         runner.switch_mode(target_mode)
         sync_runtime_context_from_runner(runtime_context, runner)
-        renderer.print_mode_notice(target_mode, switched=True)
+        cli_renderer.print_mode_notice(target_mode, switched=True)
         return True
     if normalized_input == "/approval":
-        renderer.print_approval_policy_notice(
+        cli_renderer.print_approval_policy_notice(
             runtime_context["approval_policy"],
             switched=False,
         )
@@ -421,13 +458,34 @@ def handle_builtin_command(
         try:
             target_policy = parse_approval_policy(tokens[1])
         except ValueError as exc:
-            renderer.print_error(str(exc))
+            cli_renderer.print_error(str(exc))
             return True
         runtime_context["approval_policy"] = target_policy
-        renderer.print_approval_policy_notice(target_policy, switched=True)
+        cli_renderer.print_approval_policy_notice(target_policy, switched=True)
         return True
 
     return None
+
+
+def capture_builtin_command_output(
+    user_input: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    *,
+    styled: bool = True,
+) -> tuple[bool | None, str]:
+    """执行内建命令并捕获文本结果，供其他界面复用。"""
+
+    capture_console = Console(record=True, width=100)
+    capture_renderer = CliRenderer(console=capture_console)
+    result = handle_builtin_command(
+        user_input,
+        runner,
+        runtime_context,
+        capture_renderer,
+    )
+    output = capture_console.export_text(styles=styled).strip()
+    return result, output
 
 
 def run_chat_loop(
@@ -436,12 +494,35 @@ def run_chat_loop(
     show_banner: bool = True,
 ) -> None:
     """运行类似 Claude Code 的交互式命令行循环。"""
+    ui_mode = runtime_context.get("ui_mode", InteractionUiMode.AUTO)
+    if ui_mode is InteractionUiMode.TUI:
+        try:
+            from .tui import launch_textual_chat
+        except (ModuleNotFoundError, RuntimeError) as exc:
+            renderer.print_error(f"TUI 启动失败，已回退到 CLI：{exc}")
+        else:
+            launch_textual_chat(runner, runtime_context, show_banner=show_banner)
+            return
+
+    if (
+        ui_mode is InteractionUiMode.AUTO
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
+        try:
+            from .tui import launch_textual_chat
+        except (ModuleNotFoundError, RuntimeError):
+            pass
+        else:
+            launch_textual_chat(runner, runtime_context, show_banner=show_banner)
+            return
+
     if show_banner:
         print_banner(runner, runtime_context)
 
     while True:
         try:
-            user_input = typer.prompt("›").strip()
+            user_input = prompt_chat_input().strip()
         except (Abort, EOFError, KeyboardInterrupt):
             renderer.print_info("\n👋 再见！")
             break
@@ -449,6 +530,7 @@ def run_chat_loop(
         if not user_input:
             continue
 
+        renderer.print_user_message(user_input)
         builtin_result = handle_builtin_command(user_input, runner, runtime_context)
         if builtin_result is False:
             break
@@ -465,6 +547,33 @@ def run_chat_loop(
         except Exception as exc:
             # TODO(联调补全): 后续可按网络、工具、模型错误分别渲染更具体的提示。
             renderer.print_error(f"运行失败：{exc}")
+
+
+def prompt_chat_input() -> str:
+    """为纯 CLI 模式读取一行输入，优先使用支持补全的终端提示器。"""
+
+    global _cli_prompt_session, _prompt_toolkit_disabled
+
+    if (
+        not _prompt_toolkit_disabled
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
+        try:
+            from .prompting import CliPromptSession, PROMPT_TOOLKIT_IMPORT_ERROR
+        except ModuleNotFoundError:
+            _prompt_toolkit_disabled = True
+        else:
+            if PROMPT_TOOLKIT_IMPORT_ERROR is None:
+                try:
+                    if _cli_prompt_session is None:
+                        _cli_prompt_session = CliPromptSession()
+                    return _cli_prompt_session.prompt()
+                except Exception as exc:  # noqa: BLE001 - 终端兼容失败时需要自动降级
+                    _prompt_toolkit_disabled = True
+                    renderer.print_error(f"CLI 补全已降级为基础输入：{exc}")
+
+    return typer.prompt("›")
 
 
 @app.callback(invoke_without_command=True)
@@ -490,17 +599,24 @@ def main_callback(
         "--approval-policy",
         help="高风险工具调用的审批策略，可选 prompt、auto、never。",
     ),
+    ui: str = typer.Option(
+        InteractionUiMode.AUTO.value,
+        "--ui",
+        help="界面模式，可选 auto、tui、cli。",
+    ),
 ) -> None:
     """默认无子命令时直接进入交互式对话。"""
-    parsed_mode = parse_agent_mode(mode)
-    parsed_approval_policy = parse_approval_policy(approval_policy)
     ctx.ensure_object(dict)
     try:
+        parsed_mode = parse_agent_mode(mode)
+        parsed_approval_policy = parse_approval_policy(approval_policy)
+        parsed_ui_mode = parse_interaction_ui_mode(ui)
         ctx.obj["runtime_context"] = build_runtime_context(
             parsed_mode,
             allow_paths,
             tool_specs,
             parsed_approval_policy,
+            parsed_ui_mode,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

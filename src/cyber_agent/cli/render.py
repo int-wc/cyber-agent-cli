@@ -10,6 +10,22 @@ from rich.text import Text
 
 from ..agent.approval import ApprovalPolicy, get_approval_policy_label
 from ..agent.mode import AgentMode, get_mode_description, get_mode_label
+from .interactive import (
+    BUILTIN_COMMAND_SPECS,
+    build_session_overview,
+    get_banner_command_summary,
+)
+from .theme import (
+    ASSISTANT_BORDER_COLOR,
+    ASSISTANT_TEXT_COLOR,
+    COMMAND_DESC_STYLE,
+    COMMAND_NAME_STYLE,
+    KEYCAP_STYLE,
+    ROLE_STYLES,
+    SYSTEM_LABEL_STYLE,
+    SYSTEM_VALUE_STYLE,
+    SYSTEM_VALUE_STYLES,
+)
 
 
 class CliRenderer:
@@ -30,25 +46,45 @@ class CliRenderer:
         cwd: Path,
         approval_policy: ApprovalPolicy,
     ) -> None:
-        """打印欢迎面板，强化 CLI 的会话感。"""
-        title = Text("Cyber Agent CLI", style="bold")
-        subtitle = Text(f"{get_mode_label(mode)} · {service} · {model}", style="cyan")
-        body = Table.grid(padding=(0, 1))
-        body.add_row("工作目录", str(cwd))
-        body.add_row("模式说明", get_mode_description(mode))
-        body.add_row("审批策略", get_approval_policy_label(approval_policy))
-        body.add_row(
-            "快捷命令",
-            "/help  /tools  /status  /mode  /config  /allow-path  /approval  /exit",
-        )
+        """打印欢迎面板，保持与 TUI 欢迎区一致。"""
+        body = Text()
+        body.append("Cyber Agent CLI 交互界面\n", style="bold #f8fafc")
+        for item in build_session_overview(
+            mode_value=mode.value,
+            approval_policy_value=approval_policy.value,
+            service=service,
+            model=model,
+            cwd=str(cwd),
+        ):
+            self._append_system_kv_line(
+                body,
+                item.label,
+                item.value,
+                SYSTEM_VALUE_STYLES.get(item.value_style_key, SYSTEM_VALUE_STYLE),
+            )
+
+        body.append("快捷命令", style=SYSTEM_LABEL_STYLE)
+        body.append("：", style=SYSTEM_LABEL_STYLE)
+        for index, command in enumerate(get_banner_command_summary().split("  ")):
+            if index > 0:
+                body.append("  ", style=SYSTEM_LABEL_STYLE)
+            body.append(command, style=COMMAND_NAME_STYLE)
+        body.append("\n")
+
+        body.append("命令补全", style=SYSTEM_LABEL_STYLE)
+        body.append("：", style=SYSTEM_LABEL_STYLE)
+        body.append("输入 ", style=COMMAND_DESC_STYLE)
+        body.append("/", style=COMMAND_NAME_STYLE)
+        body.append(" 后按 ", style=COMMAND_DESC_STYLE)
+        body.append("Tab", style=KEYCAP_STYLE)
+        body.append(" 可自动补全。", style=COMMAND_DESC_STYLE)
         self.console.print(
             Panel(
                 body,
                 box=box.ROUNDED,
-                title=title,
-                subtitle=subtitle,
-                border_style="bright_blue",
-                padding=(1, 2),
+                title=ROLE_STYLES["system"]["title"],
+                border_style=ROLE_STYLES["system"]["border_style"],
+                padding=(0, 1),
             )
         )
 
@@ -57,23 +93,8 @@ class CliRenderer:
         command_table = Table(box=box.SIMPLE_HEAVY, show_header=True)
         command_table.add_column("命令", style="bold cyan", no_wrap=True)
         command_table.add_column("说明", style="white")
-        command_table.add_row("/help", "查看帮助")
-        command_table.add_row("/tools", "查看默认工具")
-        command_table.add_row("/status", "查看当前会话与配置状态")
-        command_table.add_row("/mode", "查看当前模式")
-        command_table.add_row("/mode standard", "切回标准模式")
-        command_table.add_row("/mode authorized", "切到授权模式")
-        command_table.add_row("/config", "查看当前工作目录下的本地配置")
-        command_table.add_row("/config allow-path", "查看本地配置中已保存的目录")
-        command_table.add_row("/config allow-path add <目录>", "将目录持久化写入本地配置")
-        command_table.add_row("/allow-path", "查看当前允许访问目录")
-        command_table.add_row("/allow-path add <目录>", "为当前会话添加允许访问目录")
-        command_table.add_row("/approval", "查看当前审批策略")
-        command_table.add_row("/approval prompt", "切到交互审批")
-        command_table.add_row("/approval auto", "切到自动批准")
-        command_table.add_row("/approval never", "切到全部拒绝")
-        command_table.add_row("/clear", "清空当前会话上下文")
-        command_table.add_row("/exit", "退出交互模式")
+        for command in BUILTIN_COMMAND_SPECS:
+            command_table.add_row(command.command, command.description)
         self.console.print(Panel(command_table, title="内建命令", border_style="blue"))
 
     def print_allowed_roots(self, allowed_roots: list[str]) -> None:
@@ -150,6 +171,24 @@ class CliRenderer:
         self.ensure_response_stream_closed()
         self.console.print(Rule(style="grey50"))
 
+    def print_chat_message(self, role: str, content: str) -> None:
+        """以统一气泡样式打印一条会话消息。"""
+        self.ensure_response_stream_closed()
+        style = ROLE_STYLES.get(role, ROLE_STYLES["system"])
+        self.console.print(
+            Panel(
+                Text(content, style=style["text_style"]),
+                title=style["title"],
+                border_style=style["border_style"],
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+    def print_user_message(self, content: str) -> None:
+        """打印用户输入，便于与 TUI 的消息气泡对齐。"""
+        self.print_chat_message("user", content)
+
     def print_tool_call(self, tool_calls: list[dict]) -> None:
         """打印工具调用事件。"""
         self.ensure_response_stream_closed()
@@ -185,10 +224,19 @@ class CliRenderer:
         if not self._streaming_response_started:
             self.begin_response_stream()
         if not self._streaming_prefix_printed:
-            self.console.print("[bold bright_blue]Agent[/bold bright_blue] › ", end="")
+            self.console.print(
+                f"[bold {ASSISTANT_BORDER_COLOR}]智能体输出[/bold {ASSISTANT_BORDER_COLOR}]"
+                " › ",
+                end="",
+            )
             self._streaming_prefix_printed = True
         self._streamed_response_chunks.append(token_text)
-        self.console.print(token_text, end="", soft_wrap=True, highlight=False)
+        self.console.print(
+            Text(token_text, style=ASSISTANT_TEXT_COLOR),
+            end="",
+            soft_wrap=True,
+            highlight=False,
+        )
 
     def end_response_stream(self, content: str, has_tool_calls: bool) -> None:
         """结束一轮模型 token 流。"""
@@ -200,19 +248,21 @@ class CliRenderer:
             elif content and not has_tool_calls:
                 self.console.print(
                     Panel(
-                        content,
-                        title="Agent",
-                        border_style="bright_blue",
-                        padding=(1, 2),
+                        Text(content, style=ROLE_STYLES["assistant"]["text_style"]),
+                        title=ROLE_STYLES["assistant"]["title"],
+                        border_style=ROLE_STYLES["assistant"]["border_style"],
+                        box=box.ROUNDED,
+                        padding=(0, 1),
                     )
                 )
         elif content and not has_tool_calls:
             self.console.print(
                 Panel(
-                    content,
-                    title="Agent",
-                    border_style="bright_blue",
-                    padding=(1, 2),
+                    Text(content, style=ROLE_STYLES["assistant"]["text_style"]),
+                    title=ROLE_STYLES["assistant"]["title"],
+                    border_style=ROLE_STYLES["assistant"]["border_style"],
+                    box=box.ROUNDED,
+                    padding=(0, 1),
                 )
             )
 
@@ -265,5 +315,16 @@ class CliRenderer:
 
     def print_error(self, content: str) -> None:
         """打印错误信息。"""
-        self.ensure_response_stream_closed()
-        self.console.print(Panel(content, title="错误", border_style="red"))
+        self.print_chat_message("error", content)
+
+    def _append_system_kv_line(
+        self,
+        text: Text,
+        label: str,
+        value: str,
+        value_style: str,
+    ) -> None:
+        text.append(label, style=SYSTEM_LABEL_STYLE)
+        text.append("：", style=SYSTEM_LABEL_STYLE)
+        text.append(value, style=value_style)
+        text.append("\n")
