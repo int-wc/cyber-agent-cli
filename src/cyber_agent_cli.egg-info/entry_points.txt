@@ -1,0 +1,2 @@
+[console_scripts]
+cyber-agent = cyber_agent.cli.app:app
