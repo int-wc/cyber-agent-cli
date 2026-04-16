@@ -6,7 +6,8 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default='sk-default', validation_alias='OPENAI_API_KEY')
     openai_model: str = Field(default='gpt-5.4', validation_alias='OPENAI_MODEL')   # 默认值
     openai_base_url: str | None = Field(default=None, validation_alias='OPENAI_BASE_URL')
-
+    service_name: str = Field(default='openai', validation_alias='SERVICE_NAME')
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
@@ -14,7 +15,7 @@ class Settings(BaseSettings):
     
     def get_service(self) -> str:
         # 从环境变量读取，例如 "openai"
-        return Field(default='openai', validation_alias='SERVICE_NAME')
+        return self.service_name.lower()
 
     def get_chat_openai_kwargs(self, service_name: str) -> dict:
         base_kwargs = {

@@ -1,5 +1,5 @@
 .venv
 .env
-tests/
 __pycache__/
 *.pyc
+.cyber-agent-cli.json
