@@ -1,8 +1,19 @@
 import unittest
+from pathlib import Path
 
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
+from rich.cells import cell_len
+from rich.console import Console
 
+from cyber_agent.agent.approval import ApprovalPolicy
+from cyber_agent.agent.mode import AgentMode
+from cyber_agent.cli.branding import (
+    STARTUP_PANEL_TITLE,
+    STARTUP_SUBTITLE,
+    STARTUP_TITLE,
+    build_startup_renderable,
+)
 from cyber_agent.cli.interactive import (
     InteractionUiMode,
     build_command_hint_lines,
@@ -11,7 +22,13 @@ from cyber_agent.cli.interactive import (
     match_builtin_commands,
     parse_interaction_ui_mode,
 )
-from cyber_agent.cli.prompting import BuiltinCommandCompleter
+from cyber_agent.cli.prompting import (
+    PROMPT_STYLE,
+    PROMPT_TOOLKIT_IMPORT_ERROR,
+    BuiltinCommandCompleter,
+)
+from cyber_agent.cli.render import CliRenderer
+from cyber_agent.cli.theme import USER_TEXT_COLOR
 
 
 class CliInteractiveHelperTestCase(unittest.TestCase):
@@ -84,6 +101,97 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
         self.assertIn("/help", summary)
         self.assertIn("/status", summary)
         self.assertIn("/approval", summary)
+
+    def test_startup_renderable_contains_ascii_title_and_subtitle(self) -> None:
+        """
+        测试：启动页区块会输出统一的项目标题与副标题，供 CLI 与 TUI 共用。
+        """
+
+        console = Console(record=True, width=120)
+        console.print(build_startup_renderable())
+
+        output = console.export_text()
+        self.assertIn(STARTUP_PANEL_TITLE, output)
+        self.assertIn(STARTUP_TITLE, output)
+        self.assertIn(STARTUP_SUBTITLE, output)
+        self.assertNotIn("启动完成", output)
+
+    def test_startup_renderable_centers_title_lines_by_display_width(self) -> None:
+        """
+        测试：启动页标题区按终端显示宽度居中，避免中文双宽字符导致视觉偏移。
+        """
+
+        console = Console(record=True, width=120)
+        console.print(build_startup_renderable())
+
+        output_lines = console.export_text().splitlines()
+        for target in (STARTUP_TITLE, STARTUP_SUBTITLE):
+            target_line = next(line for line in output_lines if target in line)
+            left_border = target_line.index("│")
+            right_border = target_line.rindex("│")
+            inner = target_line[left_border + 1 : right_border]
+            left_padding = len(inner) - len(inner.lstrip(" "))
+            right_padding = len(inner) - len(inner.rstrip(" "))
+            content = inner.strip(" ")
+            available_width = cell_len(inner)
+            content_width = cell_len(content)
+
+            self.assertEqual(content, target)
+            self.assertLessEqual(abs(left_padding - right_padding), 1)
+            self.assertEqual(left_padding + right_padding + content_width, available_width)
+
+    def test_prompt_style_sets_distinct_color_for_user_typed_text(self) -> None:
+        """
+        测试：CLI 输入提示器会为用户正在输入的正文设置独立颜色，避免与提示文案混淆。
+        """
+
+        self.assertIsNone(PROMPT_TOOLKIT_IMPORT_ERROR)
+        self.assertIn(("", f"bold {USER_TEXT_COLOR}"), PROMPT_STYLE.style_rules)
+
+    def test_cli_renderer_prints_startup_splash_before_system_banner(self) -> None:
+        """
+        测试：CLI 启动时先打印独立启动页，再继续输出系统提示面板。
+        """
+
+        console = Console(record=True, width=120)
+        renderer = CliRenderer(console=console)
+        renderer.print_startup_splash()
+        renderer.print_banner(
+            mode=AgentMode.STANDARD,
+            service="openai",
+            model="gpt-5.4",
+            cwd=Path("D:/cyber-agent-cli"),
+            approval_policy=ApprovalPolicy.PROMPT,
+        )
+
+        output = console.export_text()
+        self.assertLess(output.index(STARTUP_PANEL_TITLE), output.index("系统提示"))
+        self.assertIn(STARTUP_TITLE, output)
+        self.assertIn("Cyber Agent CLI 交互界面", output)
+
+    def test_cli_banner_adds_visual_gap_between_title_and_overview(self) -> None:
+        """
+        测试：欢迎面板标题下方保留一行留白，避免与后续会话概览信息过于贴近。
+        """
+
+        console = Console(record=True, width=100)
+        CliRenderer(console=console).print_banner(
+            mode=AgentMode.STANDARD,
+            service="openai",
+            model="gpt-5.4",
+            cwd=Path("D:/cyber-agent-cli"),
+            approval_policy=ApprovalPolicy.PROMPT,
+        )
+
+        output_lines = console.export_text().splitlines()
+        title_index = next(
+            index
+            for index, line in enumerate(output_lines)
+            if "Cyber Agent CLI 交互界面" in line
+        )
+
+        self.assertEqual(output_lines[title_index + 1].strip(" │"), "")
+        self.assertIn("当前模式", output_lines[title_index + 2])
 
 
 if __name__ == "__main__":

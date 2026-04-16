@@ -518,6 +518,7 @@ def run_chat_loop(
             return
 
     if show_banner:
+        renderer.print_startup_splash()
         print_banner(runner, runtime_context)
 
     while True:

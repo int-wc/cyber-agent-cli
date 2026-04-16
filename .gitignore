@@ -3,3 +3,4 @@
 __pycache__/
 *.pyc
 .cyber-agent-cli.json
+.pytest_cache/

@@ -106,6 +106,8 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 )
 
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("启动页面", result.output)
+        self.assertIn("Cyber Agent CLI", result.output)
         self.assertIn("再见", result.output)
 
     def test_ui_tui_mode_can_launch_tui_entry(self) -> None:

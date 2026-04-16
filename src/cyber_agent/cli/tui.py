@@ -9,6 +9,11 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..config import settings
+from .branding import (
+    STARTUP_ANIMATION_DELAY_SECONDS,
+    STARTUP_ANIMATION_FRAMES,
+    build_startup_frame,
+)
 from .interactive import (
     build_session_overview,
     build_command_hint_lines,
@@ -102,49 +107,64 @@ if TEXTUAL_IMPORT_ERROR is None:
         """基于 Textual 的交互式聊天界面。"""
 
         CSS = f"""
-        Screen {
+        Screen {{
+            layers: base overlay;
             background: {WINDOW_BG};
             color: #e2e8f0;
-        }
+        }}
 
-        #chat-view {
+        #chat-view {{
             border: round #334155;
             background: {SURFACE_BG};
             height: 1fr;
             margin: 1 1 0 1;
             padding: 1;
-        }
+        }}
 
-        #composer {
+        #composer {{
             border: round {PANEL_BORDER};
             background: {SURFACE_BG};
             margin: 0 1 1 1;
             padding: 0 1 1 1;
-        }
+        }}
 
-        #composer-title {
+        #composer-title {{
             color: {TEXT_MUTED};
             padding: 0 0 1 0;
-        }
+        }}
 
-        #chat-input {
+        #chat-input {{
             border: round #f59e0b;
             background: {WINDOW_BG};
             color: #f8fafc;
-        }
+        }}
 
-        #chat-input:focus {
+        #chat-input:focus {{
             border: round #14b8a6;
-        }
+        }}
 
-        #command-hint {
+        #command-hint {{
             color: {TEXT_MUTED};
             padding: 1 0 0 0;
-        }
+        }}
 
-        ChatMessage {
+        ChatMessage {{
             margin: 0 0 1 0;
-        }
+        }}
+
+        #startup-view {{
+            display: none;
+            layer: overlay;
+            width: 100%;
+            height: 100%;
+            content-align: center middle;
+            background: {WINDOW_BG};
+        }}
+
+        #startup-panel {{
+            width: auto;
+            height: auto;
+        }}
         """
 
         BINDINGS = [
@@ -164,6 +184,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.show_banner = show_banner
             self._is_busy = False
             self._active_assistant_message: ChatMessage | None = None
+            self._startup_frame_index = 0
+            self._startup_timer = None
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -173,12 +195,15 @@ if TEXTUAL_IMPORT_ERROR is None:
                 yield self._build_input_widget()
                 yield Static(id="command-hint")
             yield Footer()
+            with Container(id="startup-view"):
+                yield Static(id="startup-panel")
 
         def on_mount(self) -> None:
             self._update_command_hint("")
-            self.query_one("#chat-input", Input).focus()
             if self.show_banner:
-                self._add_message("system", self._build_welcome_message())
+                self._start_startup_animation()
+                return
+            self._finish_startup(show_welcome=False)
 
         def action_accept_completion(self) -> None:
             if self._is_busy:
@@ -339,6 +364,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         def _build_welcome_message(self) -> Text:
             welcome = Text()
             welcome.append("Cyber Agent CLI 交互界面\n", style="bold #f8fafc")
+            welcome.append("\n")
             for item in build_session_overview(
                 mode_value=self.runner.mode.value,
                 approval_policy_value=self.runtime_context["approval_policy"].value,
@@ -422,6 +448,34 @@ if TEXTUAL_IMPORT_ERROR is None:
             chat_view.mount(message)
             chat_view.scroll_end(animate=False)
             return message
+
+        def _start_startup_animation(self) -> None:
+            startup_view = self.query_one("#startup-view", Container)
+            startup_view.display = True
+            self._startup_frame_index = 0
+            self.query_one("#startup-panel", Static).update(build_startup_frame(0))
+            self._startup_timer = self.set_interval(
+                STARTUP_ANIMATION_DELAY_SECONDS,
+                self._advance_startup_animation,
+            )
+
+        def _advance_startup_animation(self) -> None:
+            self._startup_frame_index += 1
+            if self._startup_frame_index >= STARTUP_ANIMATION_FRAMES:
+                if self._startup_timer is not None:
+                    self._startup_timer.stop()
+                    self._startup_timer = None
+                self._finish_startup(show_welcome=True)
+                return
+            self.query_one("#startup-panel", Static).update(
+                build_startup_frame(self._startup_frame_index)
+            )
+
+        def _finish_startup(self, *, show_welcome: bool) -> None:
+            self.query_one("#startup-view", Container).display = False
+            self.query_one("#chat-input", Input).focus()
+            if show_welcome:
+                self._add_message("system", self._build_welcome_message())
 
         def _set_assistant_content(self, content: str) -> None:
             if self._active_assistant_message is None:

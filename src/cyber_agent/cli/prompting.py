@@ -21,12 +21,14 @@ from .theme import (
     TEXT_PRIMARY,
     TEXT_MUTED,
     USER_BORDER_COLOR,
+    USER_TEXT_COLOR,
 )
 
 
 if PROMPT_TOOLKIT_IMPORT_ERROR is None:
     PROMPT_STYLE = Style.from_dict(
         {
+            "": f"bold {USER_TEXT_COLOR}",
             "prompt-label": f"bold {USER_BORDER_COLOR}",
             "prompt-separator": TEXT_MUTED,
             "bottom-toolbar": f"bg:{SURFACE_BG} {TEXT_PRIMARY}",

@@ -36,7 +36,6 @@ COMMON_TOOL_GUIDANCE = """
 2. 小范围修改优先用 `replace_in_file`，多文件或结构化修改优先用 `apply_unified_patch`。
 3. 运行命令前，先明确命令目的，并基于真实输出继续分析。
 4. 工具失败时，要根据真实报错调整，而不是假设已经成功。
-5. 高风险工具可能触发审批；若被拒绝，应说明原因，并在可能时退回只读方案。
 """.strip()
 
 MODE_SYSTEM_PROMPTS: dict[AgentMode, str] = {

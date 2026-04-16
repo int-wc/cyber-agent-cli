@@ -1,8 +1,10 @@
 import json
+import time
 from pathlib import Path
 
 from rich import box
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
@@ -10,6 +12,11 @@ from rich.text import Text
 
 from ..agent.approval import ApprovalPolicy, get_approval_policy_label
 from ..agent.mode import AgentMode, get_mode_description, get_mode_label
+from .branding import (
+    STARTUP_ANIMATION_DELAY_SECONDS,
+    STARTUP_ANIMATION_FRAMES,
+    build_startup_frame,
+)
 from .interactive import (
     BUILTIN_COMMAND_SPECS,
     build_session_overview,
@@ -49,6 +56,7 @@ class CliRenderer:
         """打印欢迎面板，保持与 TUI 欢迎区一致。"""
         body = Text()
         body.append("Cyber Agent CLI 交互界面\n", style="bold #f8fafc")
+        body.append("\n")
         for item in build_session_overview(
             mode_value=mode.value,
             approval_policy_value=approval_policy.value,
@@ -87,6 +95,26 @@ class CliRenderer:
                 padding=(0, 1),
             )
         )
+
+    def print_startup_splash(self) -> None:
+        """打印启动页；真实终端播放动画，其余场景回退为静态区块。"""
+
+        self.ensure_response_stream_closed()
+        if not self.console.is_terminal or self.console.is_dumb_terminal:
+            self.console.print(build_startup_frame(STARTUP_ANIMATION_FRAMES - 1))
+            self.console.print()
+            return
+
+        with Live(
+            build_startup_frame(0),
+            console=self.console,
+            refresh_per_second=max(24, STARTUP_ANIMATION_FRAMES),
+            transient=False,
+        ) as live:
+            for frame_index in range(1, STARTUP_ANIMATION_FRAMES):
+                time.sleep(STARTUP_ANIMATION_DELAY_SECONDS)
+                live.update(build_startup_frame(frame_index))
+        self.console.print()
 
     def print_help(self) -> None:
         """打印内建命令帮助。"""
