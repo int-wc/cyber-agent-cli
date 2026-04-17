@@ -126,6 +126,49 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("来源会话", result.output)
         self.assertIn("source-root", result.output)
 
+    def test_context_command_can_render_ai_tool_calls_without_plain_text(self) -> None:
+        """
+        测试：/context 在遇到仅包含 tool_calls 的 AI 消息时，不应因上下文预览渲染而崩溃。
+        """
+        cli_runner = CliRunner()
+        with cli_runner.isolated_filesystem():
+            session_id = "history-tool-call"
+            save_session_history(
+                session_id,
+                [
+                    SystemMessage(content="system prompt"),
+                    HumanMessage(content="saved human message"),
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "echo_tool",
+                                "args": {"text": "saved human message"},
+                                "id": "call_echo_tool",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                ],
+                mode="authorized",
+                approval_policy="auto",
+            )
+
+            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+                result = cli_runner.invoke(
+                    app,
+                    [],
+                    input=(
+                        f"/history load {session_id}\n"
+                        "/context\n"
+                        "quit\n"
+                    ),
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("echo_tool", result.output)
+        self.assertIn("tool_call", result.output)
+
     def test_root_options_can_start_in_authorized_mode_with_auto_approval(self) -> None:
         """
         测试：根命令支持通过 --mode 和 --approval-policy 指定运行策略。

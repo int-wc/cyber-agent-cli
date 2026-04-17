@@ -626,6 +626,10 @@ def create_search_web_tool(
 
         safe_result_count = max(1, min(max_results, settings.search_result_limit))
         browser_notes: list[str] = []
+        if not PLAYWRIGHT_AVAILABLE:
+            browser_notes = [
+                "Playwright unavailable; skipped browser search and fell back to HTTP search."
+            ]
 
         if PLAYWRIGHT_AVAILABLE:
             try:

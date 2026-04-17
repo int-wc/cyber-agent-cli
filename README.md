@@ -43,6 +43,7 @@ git clone <your-repo-url>
 cd cyber-agent-cli
 python -m venv .venv
 pip install -e .
+python -m playwright install chromium
 ```
 
 ### 2. 配置环境变量

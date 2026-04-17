@@ -142,6 +142,7 @@ class SearchToolTestCase(unittest.TestCase):
             result = search_tool.invoke({"query": "example"})
 
         self.assertIn("当前运行环境可能无法访问外部搜索服务", result)
+        self.assertIn("Playwright unavailable", result)
         self.assertIn("https://html.duckduckgo.com/html/", result)
         self.assertIn("https://duckduckgo.com/html/", result)
 

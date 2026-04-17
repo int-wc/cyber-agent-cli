@@ -2,8 +2,11 @@ README.md
 pyproject.toml
 src/cyber_agent/__init__.py
 src/cyber_agent/__main__.py
+src/cyber_agent/capability_registry.py
 src/cyber_agent/config.py
+src/cyber_agent/execution_control.py
 src/cyber_agent/local_config.py
+src/cyber_agent/session_store.py
 src/cyber_agent/agent/__init__.py
 src/cyber_agent/agent/approval.py
 src/cyber_agent/agent/core.py
@@ -22,6 +25,7 @@ src/cyber_agent/tools/__init__.py
 src/cyber_agent/tools/filesystem.py
 src/cyber_agent/tools/metadata.py
 src/cyber_agent/tools/patching.py
+src/cyber_agent/tools/search.py
 src/cyber_agent/tools/security.py
 src/cyber_agent/tools/system.py
 src/cyber_agent_cli.egg-info/PKG-INFO
@@ -33,7 +37,10 @@ src/cyber_agent_cli.egg-info/top_level.txt
 tests/test_agent_runner.py
 tests/test_agent_tool_call.py
 tests/test_authorized_mode_tools.py
+tests/test_capability_registry.py
 tests/test_cli_chat_e2e.py
 tests/test_cli_commands.py
 tests/test_cli_interactive.py
 tests/test_config.py
+tests/test_search_tool.py
+tests/test_session_store.py

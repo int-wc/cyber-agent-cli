@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "httpx>=0.28.1",
+    "playwright>=1.0.0",
     "python-dotenv>=1.0.0",
     "aiofiles>=23.2.0",
     # 根据你的网络安全工具需求添加更多依赖
