@@ -7,6 +7,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from ..config import settings
+from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
 from .approval import ApprovalDecision
 from .mode import AgentMode, get_mode_system_prompt
@@ -50,6 +51,11 @@ def normalize_tool_args(tool_call: dict) -> dict:
     raise ValueError("工具参数格式无效，必须为对象或 JSON 字符串。")
 
 
+def iter_stream_characters(content: str) -> list[str]:
+    """将流式文本统一拆成单字符事件，避免不同模型分片粒度影响终端逐字输出。"""
+    return list(content)
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -60,12 +66,14 @@ class AgentRunner:
         command_registry: dict[str, Path] | None = None,
         extra_allowed_paths: list[Path] | None = None,
         configured_registry: dict[str, Path] | None = None,
+        execution_controller: ExecutionController | None = None,
     ):
         self.service = settings.get_service()
         self.llm = ChatOpenAI(**settings.get_chat_openai_kwargs(self.service))
         self.mode = mode
         self.extra_allowed_paths = extra_allowed_paths or []
         self.configured_registry = configured_registry or {}
+        self.execution_controller = execution_controller or ExecutionController()
         self.allowed_roots = allowed_roots or resolve_allowed_roots(
             mode,
             self.extra_allowed_paths,
@@ -91,6 +99,7 @@ class AgentRunner:
             self.mode,
             self.extra_allowed_paths,
             self.configured_registry,
+            self.execution_controller,
         )
 
     def reset(self) -> None:
@@ -101,6 +110,21 @@ class AgentRunner:
     def get_turn_count(self) -> int:
         """返回当前会话中用户已发起的轮次。"""
         return sum(isinstance(message, HumanMessage) for message in self.history)
+
+    def get_history_snapshot(self) -> list[BaseMessage]:
+        """返回当前会话消息副本，供上下文查看和持久化复用。"""
+        return list(self.history)
+
+    def restore_history(self, messages: list[BaseMessage]) -> None:
+        """使用已保存历史恢复当前会话上下文。"""
+        if not messages:
+            raise ValueError("恢复历史时消息列表不能为空。")
+        if not isinstance(messages[0], SystemMessage):
+            raise ValueError("恢复历史时首条消息必须是系统消息。")
+
+        self.base_messages = [messages[0]]
+        self.system_prompt = extract_text_content(messages[0].content)
+        self.history = list(messages)
 
     def switch_mode(self, mode: AgentMode) -> None:
         """
@@ -147,6 +171,7 @@ class AgentRunner:
         messages: list[BaseMessage],
         event_handler: AgentEventHandler | None,
     ) -> AIMessage:
+        self.execution_controller.ensure_not_cancelled()
         llm_with_tools = self.llm.bind_tools(self.tools, parallel_tool_calls=False)
         accumulated_chunk: AIMessageChunk | None = None
 
@@ -154,10 +179,12 @@ class AgentRunner:
             event_handler("response_begin", None)
 
         for chunk in llm_with_tools.stream(messages):
+            self.execution_controller.ensure_not_cancelled()
             accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
             token_text = extract_text_content(chunk.content)
             if token_text and event_handler is not None:
-                event_handler("response_token", token_text)
+                for character in iter_stream_characters(token_text):
+                    event_handler("response_token", character)
 
         if accumulated_chunk is None:
             raise RuntimeError("模型未返回任何响应分片。")
@@ -203,6 +230,8 @@ class AgentRunner:
                 tool_call_id=str(tool_call.get("id", "")),
             )
 
+        self.execution_controller.ensure_not_cancelled()
+
         if self._tool_requires_approval(tool):
             if event_handler is not None:
                 event_handler(
@@ -240,8 +269,11 @@ class AgentRunner:
                 )
 
         try:
+            self.execution_controller.ensure_not_cancelled()
             tool_result = tool.invoke(normalize_tool_args(tool_call))
             normalized_result = str(tool_result)
+        except ExecutionInterruptedError:
+            raise
         except ValueError as exc:
             normalized_result = f"❌ 工具参数错误：{exc}"
         except Exception as exc:
@@ -273,35 +305,41 @@ class AgentRunner:
         if not user_input.strip():
             return ""
 
-        if event_handler is not None:
-            event_handler("turn_start", {"input": user_input})
-        elif verbose:
-            print("开始处理用户输入...")
+        self.execution_controller.begin_run()
+        try:
+            if event_handler is not None:
+                event_handler("turn_start", {"input": user_input})
+            elif verbose:
+                print("开始处理用户输入...")
 
-        self.history.append(HumanMessage(content=user_input))
-        tool_registry = self._build_tool_registry()
+            self.history.append(HumanMessage(content=user_input))
+            tool_registry = self._build_tool_registry()
 
-        for _ in range(MAX_TOOL_ITERATIONS):
-            ai_message = self._stream_model_response(self.history, event_handler)
-            self.history.append(ai_message)
+            for _ in range(MAX_TOOL_ITERATIONS):
+                self.execution_controller.ensure_not_cancelled()
+                ai_message = self._stream_model_response(self.history, event_handler)
+                self.history.append(ai_message)
 
-            if ai_message.tool_calls:
-                if event_handler is not None:
-                    event_handler("tool_call", ai_message.tool_calls)
+                if ai_message.tool_calls:
+                    if event_handler is not None:
+                        event_handler("tool_call", ai_message.tool_calls)
 
-                for tool_call in ai_message.tool_calls:
-                    tool_message = self._invoke_tool(
-                        tool_call,
-                        tool_registry,
-                        approval_handler,
-                        event_handler,
-                    )
-                    self.history.append(tool_message)
-                continue
+                    for tool_call in ai_message.tool_calls:
+                        self.execution_controller.ensure_not_cancelled()
+                        tool_message = self._invoke_tool(
+                            tool_call,
+                            tool_registry,
+                            approval_handler,
+                            event_handler,
+                        )
+                        self.history.append(tool_message)
+                    continue
 
-            final_response = extract_text_content(ai_message.content)
-            if event_handler is None and verbose:
-                print(f"最终回复: {final_response}")
-            return final_response
+                final_response = extract_text_content(ai_message.content)
+                if event_handler is None and verbose:
+                    print(f"最终回复: {final_response}")
+                return final_response
 
-        raise RuntimeError("智能体在多轮工具调用后仍未收敛，请检查提示词或工具结果。")
+            raise RuntimeError("智能体在多轮工具调用后仍未收敛，请检查提示词或工具结果。")
+        finally:
+            self.execution_controller.finish_run()

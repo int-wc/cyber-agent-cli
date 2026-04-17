@@ -1,8 +1,11 @@
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from cyber_agent.execution_control import ExecutionController, ExecutionInterruptedError
 from cyber_agent.tools.filesystem import (
     create_read_text_file_tool,
     create_replace_in_file_tool,
@@ -130,6 +133,45 @@ class AuthorizedModeToolTestCase(unittest.TestCase):
 
         self.assertIn("shell-tool-ok", result)
         self.assertIn("执行权限", result)
+
+    def test_run_shell_command_can_be_interrupted(self) -> None:
+        """
+        测试：通用命令执行工具在收到停止请求后会终止外部进程。
+        """
+        execution_controller = ExecutionController()
+        run_shell_command = create_run_shell_command_tool(
+            [Path.cwd()],
+            execution_controller,
+        )
+        command = (
+            "Start-Sleep -Seconds 5; Write-Output 'should-not-finish'"
+            if sys.platform.startswith("win")
+            else "sleep 5; printf 'should-not-finish'"
+        )
+        errors: list[BaseException] = []
+
+        def invoke_shell_tool() -> None:
+            try:
+                run_shell_command.invoke(
+                    {
+                        "command": command,
+                        "working_directory": str(Path.cwd()),
+                    }
+                )
+            except BaseException as exc:  # noqa: BLE001 - 需要断言真实中断异常
+                errors.append(exc)
+
+        execution_controller.begin_run()
+        worker_thread = threading.Thread(target=invoke_shell_tool)
+        worker_thread.start()
+        time.sleep(0.2)
+        execution_controller.request_stop("测试中断 shell 工具")
+        worker_thread.join(timeout=5)
+        execution_controller.finish_run()
+
+        self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ExecutionInterruptedError)
 
 
 if __name__ == "__main__":

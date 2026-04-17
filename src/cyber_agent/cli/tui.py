@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..config import settings
+from ..execution_control import ExecutionInterruptedError
 from .branding import (
     STARTUP_ANIMATION_DELAY_SECONDS,
     STARTUP_ANIMATION_FRAMES,
@@ -224,11 +225,22 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def on_input_submitted(self, event: Input.Submitted) -> None:
             user_input = event.value.strip()
-            if not user_input or self._is_busy:
+            if not user_input:
                 return
 
             event.input.value = ""
             self._update_command_hint("")
+
+            if self._is_busy:
+                if user_input.lower() == "/stop":
+                    from .app import request_running_task_stop
+
+                    request_running_task_stop(self.runtime_context)
+                    self._add_message("system", "已收到 /stop，正在终止当前任务...")
+                else:
+                    self._add_message("system", "当前任务执行中，仅支持输入 /stop。")
+                return
+
             self._add_message("user", user_input)
 
             from .app import capture_builtin_command_output
@@ -254,7 +266,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         @work(thread=True)
         def _run_agent(self, user_input: str) -> None:
-            from .app import create_approval_handler
+            from .app import create_approval_handler, persist_runtime_session
 
             def event_handler(event_type: str, payload: object) -> None:
                 if event_type == "response_begin":
@@ -321,12 +333,18 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self._ensure_final_assistant_content,
                         final_response,
                     )
+            except ExecutionInterruptedError as exc:
+                self.call_from_thread(
+                    self._set_assistant_content,
+                    str(exc),
+                )
             except Exception as exc:  # noqa: BLE001 - 终端界面需要直接反馈真实异常
                 self.call_from_thread(
                     self._replace_assistant_with_error,
                     f"运行失败：{exc}",
                 )
             finally:
+                persist_runtime_session(self.runner, self.runtime_context)
                 self.call_from_thread(self._finish_request)
 
         def _build_input_widget(self) -> Input:
@@ -405,6 +423,11 @@ if TEXTUAL_IMPORT_ERROR is None:
         def _build_command_hint(self, user_input: str) -> Text:
             hint = Text()
             hint.append("命令提醒\n", style=HINT_TITLE_STYLE)
+
+            if self._is_busy:
+                hint.append("/stop", style=COMMAND_NAME_STYLE)
+                hint.append("  停止当前正在执行的任务", style=COMMAND_DESC_STYLE)
+                return hint
 
             matches = match_builtin_commands(user_input.strip(), limit=6)
             if user_input.strip().startswith("/") and not matches:
@@ -512,7 +535,14 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _set_busy(self, value: bool) -> None:
             self._is_busy = value
-            self.query_one("#chat-input", Input).disabled = value
+            input_widget = self.query_one("#chat-input", Input)
+            input_widget.disabled = False
+            input_widget.placeholder = (
+                "任务执行中，输入 /stop 立即中断当前任务"
+                if value
+                else "输入消息，或输入 /help 查看命令"
+            )
+            self._update_command_hint(input_widget.value)
 
 
 def launch_textual_chat(

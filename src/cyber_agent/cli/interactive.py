@@ -25,6 +25,11 @@ class SessionOverviewItem:
 BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/help", "查看帮助", show_in_banner=True),
     BuiltinCommandSpec("/tools", "查看默认工具", show_in_banner=True),
+    BuiltinCommandSpec("/context", "查看当前内存上下文"),
+    BuiltinCommandSpec("/context clear", "清空当前上下文并开始新会话"),
+    BuiltinCommandSpec("/history", "查看当前工作目录下的历史会话"),
+    BuiltinCommandSpec("/history show <会话ID>", "查看指定历史会话内容"),
+    BuiltinCommandSpec("/history load <会话ID>", "将历史会话加载进当前上下文"),
     BuiltinCommandSpec("/status", "查看当前会话与配置状态", show_in_banner=True),
     BuiltinCommandSpec("/mode", "查看当前模式", show_in_banner=True),
     BuiltinCommandSpec("/mode standard", "切回标准模式"),
@@ -38,6 +43,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/approval prompt", "切到交互审批"),
     BuiltinCommandSpec("/approval auto", "切到自动批准"),
     BuiltinCommandSpec("/approval never", "切到全部拒绝"),
+    BuiltinCommandSpec("/stop", "停止当前正在执行的任务"),
     BuiltinCommandSpec("/clear", "清空当前会话上下文"),
     BuiltinCommandSpec("/exit", "退出交互模式", show_in_banner=True),
 )

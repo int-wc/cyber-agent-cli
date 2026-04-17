@@ -5,9 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from typer.testing import CliRunner
 
 from cyber_agent.cli.app import app
+from cyber_agent.session_store import save_session_history
 
 
 class FakeChatOpenAI:
@@ -29,11 +31,11 @@ class FakeChatOpenAI:
 class CliBuiltinCommandTestCase(unittest.TestCase):
     def test_chat_loop_supports_builtin_commands(self) -> None:
         """
-        测试：交互模式支持 /tools、/status、/mode、/allow-path、/approval 等基础命令。
+        测试：交互模式支持 /tools、/context、/history、/mode、/allow-path、/approval 等基础命令。
         """
         cli_runner = CliRunner()
-        with TemporaryDirectory() as temp_dir:
-            allowed_dir = Path(temp_dir) / "allowed root"
+        with cli_runner.isolated_filesystem():
+            allowed_dir = Path.cwd() / "allowed root"
             allowed_dir.mkdir()
 
             with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
@@ -42,6 +44,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                     [],
                     input=(
                         "/tools\n"
+                        "/context\n"
+                        "/history\n"
+                        "/stop\n"
                         "/status\n"
                         "/config\n"
                         "/mode authorized\n"
@@ -60,6 +65,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("replace_in_file", result.output)
         self.assertIn("apply_unified_patch", result.output)
         self.assertIn("run_shell_command", result.output)
+        self.assertIn("当前会话 ID", result.output)
+        self.assertIn("当前工作目录下还没有已保存的历史会话", result.output)
+        self.assertIn("当前没有正在执行的任务", result.output)
         self.assertIn("当前状态", result.output)
         self.assertIn("本地配置文件", result.output)
         self.assertIn("已切换到 授权模式", result.output)
@@ -68,8 +76,48 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("允许访问目录", result.output)
         self.assertIn("已切换到 自动批准", result.output)
         self.assertIn("当前审批策略：自动批准", result.output)
-        self.assertIn("会话上下文已清空", result.output)
+        self.assertIn("会话上下文已清空，并已开始新的会话", result.output)
         self.assertIn("再见", result.output)
+
+    def test_history_commands_can_show_and_load_stored_session(self) -> None:
+        """
+        测试：/history show 和 /history load 可以访问并恢复已保存历史会话。
+        """
+        cli_runner = CliRunner()
+        with cli_runner.isolated_filesystem():
+            session_id = "history-001"
+            save_session_history(
+                session_id,
+                [
+                    SystemMessage(content="system prompt"),
+                    HumanMessage(content="saved human message"),
+                    AIMessage(content="saved ai response"),
+                ],
+                mode="authorized",
+                approval_policy="auto",
+                source_session_id="source-root",
+            )
+
+            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+                result = cli_runner.invoke(
+                    app,
+                    [],
+                    input=(
+                        "/history\n"
+                        f"/history show {session_id}\n"
+                        f"/history load {session_id}\n"
+                        "/context\n"
+                        "quit\n"
+                    ),
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(session_id, result.output)
+        self.assertIn("saved human message", result.output)
+        self.assertIn("已加载历史会话", result.output)
+        self.assertIn("后续继续对话时会保存为新的会话副本", result.output)
+        self.assertIn("来源会话", result.output)
+        self.assertIn("source-root", result.output)
 
     def test_root_options_can_start_in_authorized_mode_with_auto_approval(self) -> None:
         """

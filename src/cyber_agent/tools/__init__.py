@@ -2,6 +2,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from ..agent.mode import AgentMode
+from ..execution_control import ExecutionController
 from .filesystem import (
     create_list_directory_tool,
     create_read_text_file_tool,
@@ -45,6 +46,7 @@ def get_default_tools(
     mode: AgentMode = AgentMode.STANDARD,
     extra_allowed_paths: Iterable[Path | str] | None = None,
     command_registry: Mapping[str, Path | str] | None = None,
+    execution_controller: ExecutionController | None = None,
 ):
     """返回默认启用的工具列表。"""
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
@@ -57,10 +59,15 @@ def get_default_tools(
         create_write_text_file_tool(allowed_roots),
         create_replace_in_file_tool(allowed_roots),
         create_apply_unified_patch_tool(allowed_roots),
-        create_run_shell_command_tool(allowed_roots),
+        create_run_shell_command_tool(allowed_roots, execution_controller),
     ]
     if normalized_registry:
-        tools.append(create_run_registered_tool_tool(normalized_registry))
+        tools.append(
+            create_run_registered_tool_tool(
+                normalized_registry,
+                execution_controller,
+            )
+        )
     return tools
 
 

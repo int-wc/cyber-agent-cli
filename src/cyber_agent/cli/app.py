@@ -1,9 +1,13 @@
 import re
+import threading
+import time
 import sys
 from pathlib import Path
+from queue import Empty, Queue
 
 import typer
 from click.exceptions import Abort
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from rich.console import Console
 
@@ -14,13 +18,21 @@ from ..agent.approval import (
     parse_approval_policy,
 )
 from ..agent.mode import AgentMode, get_mode_label, parse_agent_mode
-from ..agent.runner import AgentRunner
+from ..agent.runner import AgentRunner, extract_text_content
 from ..config import settings
+from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..local_config import (
     add_allow_path_to_local_config,
     get_local_config_path,
     load_local_cli_config,
     merge_allow_paths,
+)
+from ..session_store import (
+    create_session_id,
+    get_session_storage_dir,
+    list_stored_sessions,
+    load_session_history,
+    save_session_history,
 )
 from ..tools import (
     describe_allowed_roots,
@@ -102,7 +114,13 @@ def build_runtime_context(
     configured_registry = parse_registered_tool_specs(tool_specs)
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
     command_registry = resolve_command_registry(mode, configured_registry)
-    tools = get_default_tools(mode, extra_allowed_paths, configured_registry)
+    execution_controller = ExecutionController()
+    tools = get_default_tools(
+        mode,
+        extra_allowed_paths,
+        configured_registry,
+        execution_controller,
+    )
 
     return {
         "mode": mode,
@@ -115,6 +133,11 @@ def build_runtime_context(
         "tools": tools,
         "approval_policy": approval_policy,
         "ui_mode": ui_mode,
+        "execution_controller": execution_controller,
+        "session_id": create_session_id(),
+        "session_source_id": None,
+        "session_storage_dir": get_session_storage_dir(),
+        "_stop_input_buffer": "",
     }
 
 
@@ -127,6 +150,7 @@ def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
         command_registry=runtime_context["command_registry"],
         extra_allowed_paths=runtime_context["extra_allowed_paths"],
         configured_registry=runtime_context["configured_registry"],
+        execution_controller=runtime_context["execution_controller"],
     )
 
 
@@ -212,8 +236,10 @@ def print_status(
                 f"{get_interaction_ui_mode_label(runtime_context['ui_mode'])}"
                 f" ({runtime_context['ui_mode'].value})",
             ),
+            ("当前会话 ID", str(runtime_context["session_id"])),
             ("OPENAI_API_KEY", api_key_configured),
             ("本地配置文件", str(runtime_context["local_config_path"])),
+            ("历史会话目录", str(runtime_context["session_storage_dir"])),
             ("已保存允许目录", saved_allowed_path_lines),
             ("允许读取根路径", allowed_root_lines),
             ("已注册外部工具", registered_tool_lines),
@@ -300,6 +326,249 @@ def add_persisted_allowed_path(
     cli_renderer.print_info(f"目录已存在于本地配置中：{persisted_path}")
 
 
+def start_new_runtime_session(
+    runtime_context: dict[str, object],
+    *,
+    source_session_id: str | None = None,
+) -> str:
+    """为当前运行上下文分配新的会话标识，避免覆盖既有历史。"""
+    session_id = create_session_id()
+    runtime_context["session_id"] = session_id
+    runtime_context["session_source_id"] = source_session_id
+    runtime_context["_stop_input_buffer"] = ""
+    return session_id
+
+
+def persist_runtime_session(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+) -> Path | None:
+    """按当前工作目录自动保存会话历史，供后续 /history 访问。"""
+    history = runner.get_history_snapshot()
+    if len(history) <= 1 and runner.get_turn_count() == 0:
+        return None
+
+    session_path = save_session_history(
+        str(runtime_context["session_id"]),
+        history,
+        mode=runner.mode.value,
+        approval_policy=runtime_context["approval_policy"].value,
+        source_session_id=runtime_context.get("session_source_id"),
+    )
+    runtime_context["session_storage_dir"] = session_path.parent
+    return session_path
+
+
+def _format_context_message(message: BaseMessage, index: int) -> str:
+    """将消息压缩为适合终端浏览的一行上下文摘要。"""
+    role_label = "系统"
+    if isinstance(message, HumanMessage):
+        role_label = "用户"
+    elif isinstance(message, AIMessage):
+        role_label = "助手"
+    elif isinstance(message, ToolMessage):
+        role_label = f"工具({message.name or 'unknown'})"
+    elif isinstance(message, SystemMessage):
+        role_label = "系统"
+
+    content = extract_text_content(message.content).strip()
+    if isinstance(message, AIMessage) and message.tool_calls and not content:
+        content = f"工具调用：{json.dumps(message.tool_calls, ensure_ascii=False)}"
+    if not content:
+        content = "（空内容）"
+
+    single_line_content = " ".join(
+        part.strip() for part in content.splitlines() if part.strip()
+    )
+    if len(single_line_content) > 180:
+        single_line_content = f"{single_line_content[:180]}..."
+    return f"{index}. {role_label}: {single_line_content}"
+
+
+def build_context_preview(
+    messages: list[BaseMessage],
+    *,
+    limit: int | None = 12,
+) -> str:
+    """构建当前上下文或历史会话的文本预览。"""
+    if not messages:
+        return "当前上下文为空。"
+
+    preview_messages = messages if limit is None else messages[-limit:]
+    lines: list[str] = []
+    if limit is not None and len(messages) > len(preview_messages):
+        lines.append(f"... 已省略更早的 {len(messages) - len(preview_messages)} 条消息")
+
+    start_index = len(messages) - len(preview_messages) + 1
+    for offset, message in enumerate(preview_messages, start=start_index):
+        lines.append(_format_context_message(message, offset))
+    return "\n".join(lines)
+
+
+def print_context(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """显示当前内存上下文，便于确认模型本轮能读取到的历史。"""
+    messages = runner.get_history_snapshot()
+    cli_renderer.print_status(
+        [
+            ("当前会话 ID", str(runtime_context["session_id"])),
+            ("消息数", str(len(messages))),
+            ("用户轮数", str(runner.get_turn_count())),
+            (
+                "来源会话",
+                str(runtime_context.get("session_source_id") or "无"),
+            ),
+        ]
+    )
+    cli_renderer.print_chat_message("system", build_context_preview(messages))
+
+
+def print_history_list(
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """列出当前工作目录下可访问的历史会话摘要。"""
+    stored_sessions = list_stored_sessions()
+    if not stored_sessions:
+        cli_renderer.print_info("当前工作目录下还没有已保存的历史会话。")
+        return
+
+    rows = []
+    for summary in stored_sessions:
+        detail_lines = [
+            f"更新时间: {summary.updated_at}",
+            (
+                f"模式: {summary.mode} | 审批: {summary.approval_policy}"
+                f" | 轮数: {summary.turn_count} | 消息: {summary.message_count}"
+            ),
+            f"标题: {summary.title}",
+        ]
+        if summary.source_session_id:
+            detail_lines.append(f"来源: {summary.source_session_id}")
+        rows.append((summary.session_id, "\n".join(detail_lines)))
+
+    cli_renderer.print_status(rows)
+
+
+def show_history_session(
+    session_id: str,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """显示指定历史会话的完整内容。"""
+    stored_session = load_session_history(session_id)
+    cli_renderer.print_status(
+        [
+            ("会话 ID", stored_session.summary.session_id),
+            ("创建时间", stored_session.summary.created_at),
+            ("更新时间", stored_session.summary.updated_at),
+            ("模式", stored_session.summary.mode),
+            ("审批策略", stored_session.summary.approval_policy),
+            ("消息数", str(stored_session.summary.message_count)),
+            ("用户轮数", str(stored_session.summary.turn_count)),
+            ("来源会话", str(stored_session.summary.source_session_id or "无")),
+        ]
+    )
+    cli_renderer.print_chat_message(
+        "system",
+        build_context_preview(stored_session.messages, limit=None),
+    )
+
+
+def load_history_session_into_runner(
+    session_id: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """将历史会话恢复进当前上下文，并作为新会话继续演进。"""
+    stored_session = load_session_history(session_id)
+    target_mode = parse_agent_mode(stored_session.summary.mode)
+    target_approval_policy = parse_approval_policy(
+        stored_session.summary.approval_policy
+    )
+
+    runner.switch_mode(target_mode)
+    runner.restore_history(stored_session.messages)
+    runtime_context["approval_policy"] = target_approval_policy
+    sync_runtime_context_from_runner(runtime_context, runner)
+    start_new_runtime_session(
+        runtime_context,
+        source_session_id=stored_session.summary.session_id,
+    )
+    cli_renderer.print_info(
+        f"已加载历史会话：{stored_session.summary.session_id}。"
+        "后续继续对话时会保存为新的会话副本。"
+    )
+
+
+def request_running_task_stop(
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+    *,
+    reason: str = "用户输入 /stop",
+) -> bool:
+    """请求中断当前任务，并给出统一提示。"""
+    execution_controller: ExecutionController = runtime_context["execution_controller"]
+    if execution_controller.is_cancel_requested():
+        cli_renderer.print_info("已请求停止当前任务，正在等待执行链路收尾。")
+        return True
+    if not execution_controller.request_stop(reason):
+        cli_renderer.print_info("当前没有正在执行的任务。")
+        return False
+
+    cli_renderer.print_info("已收到 /stop，正在终止当前模型、Shell 与工具执行...")
+    return True
+
+
+def _reset_stop_input_buffer(runtime_context: dict[str, object]) -> None:
+    """清理忙碌态下的临时输入缓冲，避免污染下一轮正常提示。"""
+    runtime_context["_stop_input_buffer"] = ""
+
+
+def _consume_stop_input_nonblocking(
+    runtime_context: dict[str, object],
+) -> str | None:
+    """在任务执行期间非阻塞轮询用户是否输入了 /stop。"""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+
+    if sys.platform.startswith("win"):
+        import msvcrt
+
+        buffered_input = str(runtime_context.get("_stop_input_buffer", ""))
+        while msvcrt.kbhit():
+            input_character = msvcrt.getwch()
+            if input_character in ("\r", "\n"):
+                runtime_context["_stop_input_buffer"] = ""
+                return buffered_input.strip()
+            if input_character == "\003":
+                raise KeyboardInterrupt
+            if input_character == "\b":
+                buffered_input = buffered_input[:-1]
+                continue
+            if input_character in ("\x00", "\xe0"):
+                if msvcrt.kbhit():
+                    msvcrt.getwch()
+                continue
+            buffered_input += input_character
+
+        runtime_context["_stop_input_buffer"] = buffered_input
+        return None
+
+    try:
+        import select
+
+        ready_inputs, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return None
+    if not ready_inputs:
+        return None
+    return sys.stdin.readline().strip()
+
+
 def render_agent_event(event_type: str, payload: object) -> None:
     """将运行器事件映射为富文本展示。"""
     if event_type == "turn_start":
@@ -365,6 +634,135 @@ def create_approval_handler(runtime_context: dict[str, object]):
     return approval_handler
 
 
+def create_cli_background_approval_handler(
+    runtime_context: dict[str, object],
+    approval_requests: Queue[dict[str, object]],
+):
+    """为后台执行线程生成审批处理器，由主线程统一收集用户确认。"""
+    execution_controller: ExecutionController = runtime_context["execution_controller"]
+
+    def approval_handler(tool: BaseTool, tool_call: dict) -> ApprovalDecision:
+        policy = runtime_context["approval_policy"]
+        tool_name = str(tool_call.get("name", tool.name))
+        risk = str((tool.metadata or {}).get("risk", "unknown"))
+
+        if policy is ApprovalPolicy.AUTO:
+            return ApprovalDecision(True, "当前审批策略为自动批准。")
+        if policy is ApprovalPolicy.NEVER:
+            return ApprovalDecision(False, "当前审批策略拒绝所有高风险工具调用。")
+
+        approval_request = {
+            "tool": tool,
+            "tool_call": tool_call,
+            "tool_name": tool_name,
+            "risk": risk,
+            "decision": None,
+            "event": threading.Event(),
+        }
+        approval_requests.put(approval_request)
+
+        while not approval_request["event"].wait(timeout=0.05):
+            execution_controller.ensure_not_cancelled()
+
+        decision = approval_request["decision"]
+        if isinstance(decision, ApprovalDecision):
+            return decision
+        return ApprovalDecision(False, "审批结果缺失，已拒绝执行。")
+
+    return approval_handler
+
+
+def handle_pending_cli_approval_request(
+    approval_requests: Queue[dict[str, object]],
+) -> bool:
+    """处理后台线程提交到主线程的审批请求。"""
+    try:
+        approval_request = approval_requests.get_nowait()
+    except Empty:
+        return False
+
+    tool_name = str(approval_request["tool_name"])
+    risk = str(approval_request["risk"])
+
+    try:
+        approved = typer.confirm(
+            f"是否批准高风险工具调用？工具={tool_name}，风险={risk}",
+            default=False,
+        )
+    except (Abort, EOFError, KeyboardInterrupt):
+        approved = False
+
+    if approved:
+        decision = ApprovalDecision(True, "用户已在交互审批中明确批准。")
+    else:
+        decision = ApprovalDecision(False, "用户在交互审批中拒绝执行。")
+
+    approval_request["decision"] = decision
+    approval_request["event"].set()
+    return True
+
+
+def run_agent_turn_with_stop_support(
+    runner: AgentRunner,
+    user_input: str,
+    runtime_context: dict[str, object],
+) -> None:
+    """在纯 CLI 交互中以后台线程运行任务，并轮询 /stop 与审批输入。"""
+    worker_errors: list[BaseException] = []
+    approval_requests: Queue[dict[str, object]] = Queue()
+    approval_handler = create_cli_background_approval_handler(
+        runtime_context,
+        approval_requests,
+    )
+
+    def run_agent() -> None:
+        try:
+            runner.run(
+                user_input,
+                verbose=False,
+                event_handler=render_agent_event,
+                approval_handler=approval_handler,
+            )
+        except BaseException as exc:  # noqa: BLE001 - 需跨线程回传真实异常
+            worker_errors.append(exc)
+
+    worker_thread = threading.Thread(target=run_agent, daemon=True)
+    worker_thread.start()
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        renderer.print_info("任务执行中，可随时输入 /stop 并回车中断。")
+
+    while worker_thread.is_alive():
+        if handle_pending_cli_approval_request(approval_requests):
+            continue
+
+        try:
+            stop_command = _consume_stop_input_nonblocking(runtime_context)
+        except KeyboardInterrupt:
+            request_running_task_stop(
+                runtime_context,
+                reason="用户通过键盘中断请求停止当前任务",
+            )
+            stop_command = None
+
+        if stop_command is not None:
+            if not stop_command:
+                pass
+            elif stop_command.lower() == "/stop":
+                request_running_task_stop(runtime_context)
+            else:
+                renderer.print_info("当前任务执行中，仅支持输入 /stop。")
+
+        worker_thread.join(timeout=0.05)
+        time.sleep(0.02)
+
+    worker_thread.join()
+    _reset_stop_input_buffer(runtime_context)
+
+    if worker_errors:
+        raise worker_errors[0]
+
+
 def handle_builtin_command(
     user_input: str,
     runner: AgentRunner,
@@ -379,11 +777,55 @@ def handle_builtin_command(
     if normalized_input in EXIT_COMMANDS:
         cli_renderer.print_info("👋 再见！")
         return False
+    if normalized_input == "/stop":
+        request_running_task_stop(runtime_context, cli_renderer)
+        return True
     if normalized_input == "/help":
         print_help(cli_renderer)
         return True
     if normalized_input == "/tools":
         print_tools(runner, cli_renderer)
+        return True
+    if normalized_input == "/context":
+        print_context(runner, runtime_context, cli_renderer)
+        return True
+    if normalized_input == "/context clear":
+        runner.reset()
+        start_new_runtime_session(runtime_context)
+        cli_renderer.print_info("会话上下文已清空，并已开始新的会话。")
+        return True
+    if normalized_input == "/history":
+        print_history_list(runtime_context, cli_renderer)
+        return True
+    if normalized_input.startswith("/history "):
+        history_remainder = stripped_input[len("/history"):].strip()
+        normalized_history_remainder = history_remainder.lower()
+        if normalized_history_remainder.startswith("show "):
+            session_id = history_remainder[5:].strip()
+            if not session_id:
+                cli_renderer.print_error("请提供要查看的会话 ID。")
+                return True
+            try:
+                show_history_session(session_id, cli_renderer)
+            except ValueError as exc:
+                cli_renderer.print_error(str(exc))
+            return True
+        if normalized_history_remainder.startswith("load "):
+            session_id = history_remainder[5:].strip()
+            if not session_id:
+                cli_renderer.print_error("请提供要加载的会话 ID。")
+                return True
+            try:
+                load_history_session_into_runner(
+                    session_id,
+                    runner,
+                    runtime_context,
+                    cli_renderer,
+                )
+            except ValueError as exc:
+                cli_renderer.print_error(str(exc))
+            return True
+        cli_renderer.print_error("不支持的 /history 子命令。")
         return True
     if normalized_input == "/status":
         print_status(runner, runtime_context, cli_renderer)
@@ -433,7 +875,8 @@ def handle_builtin_command(
         return True
     if normalized_input == "/clear":
         runner.reset()
-        cli_renderer.print_info("会话上下文已清空。")
+        start_new_runtime_session(runtime_context)
+        cli_renderer.print_info("会话上下文已清空，并已开始新的会话。")
         return True
     if normalized_input == "/mode":
         cli_renderer.print_mode_notice(runner.mode, switched=False)
@@ -446,6 +889,7 @@ def handle_builtin_command(
             return True
         runner.switch_mode(target_mode)
         sync_runtime_context_from_runner(runtime_context, runner)
+        start_new_runtime_session(runtime_context)
         cli_renderer.print_mode_notice(target_mode, switched=True)
         return True
     if normalized_input == "/approval":
@@ -539,13 +983,25 @@ def run_chat_loop(
             continue
 
         try:
-            runner.run(
-                user_input,
-                verbose=False,
-                event_handler=render_agent_event,
-                approval_handler=create_approval_handler(runtime_context),
-            )
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                run_agent_turn_with_stop_support(
+                    runner,
+                    user_input,
+                    runtime_context,
+                )
+            else:
+                runner.run(
+                    user_input,
+                    verbose=False,
+                    event_handler=render_agent_event,
+                    approval_handler=create_approval_handler(runtime_context),
+                )
+            persist_runtime_session(runner, runtime_context)
+        except ExecutionInterruptedError as exc:
+            persist_runtime_session(runner, runtime_context)
+            renderer.print_info(str(exc))
         except Exception as exc:
+            persist_runtime_session(runner, runtime_context)
             # TODO(联调补全): 后续可按网络、工具、模型错误分别渲染更具体的提示。
             renderer.print_error(f"运行失败：{exc}")
 
@@ -644,12 +1100,15 @@ def chat(
     runtime_context = ctx.obj["runtime_context"]
     runner = create_runner(runtime_context)
     if message is not None:
-        runner.run(
-            message,
-            verbose=False,
-            event_handler=render_agent_event,
-            approval_handler=create_approval_handler(runtime_context),
-        )
+        try:
+            runner.run(
+                message,
+                verbose=False,
+                event_handler=render_agent_event,
+                approval_handler=create_approval_handler(runtime_context),
+            )
+        finally:
+            persist_runtime_session(runner, runtime_context)
         return
     run_chat_loop(runner, runtime_context)
 
@@ -664,12 +1123,15 @@ def run(
     """
     runtime_context = ctx.obj["runtime_context"]
     runner = create_runner(runtime_context)
-    runner.run(
-        message,
-        verbose=False,
-        event_handler=render_agent_event,
-        approval_handler=create_approval_handler(runtime_context),
-    )
+    try:
+        runner.run(
+            message,
+            verbose=False,
+            event_handler=render_agent_event,
+            approval_handler=create_approval_handler(runtime_context),
+        )
+    finally:
+        persist_runtime_session(runner, runtime_context)
 
 
 @app.command()

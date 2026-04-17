@@ -1,16 +1,23 @@
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from langchain_core.tools import tool
 
+from ..execution_control import (
+    ExecutionController,
+    ExecutionInterruptedError,
+    terminate_process_tree,
+)
 from .filesystem import normalize_allowed_roots, resolve_permitted_path
 from .metadata import attach_tool_risk
 
 MAX_COMMAND_OUTPUT_CHARS = 4000
 MAX_TOOL_TIMEOUT_SECONDS = 120
+PROCESS_POLL_INTERVAL_SECONDS = 0.1
 
 
 def normalize_command_registry(
@@ -75,7 +82,73 @@ def _build_shell_command(command: str) -> list[str]:
     return ["/bin/sh", "-lc", command]
 
 
-def create_run_shell_command_tool(allowed_roots: Sequence[Path]):
+def _build_subprocess_options() -> dict[str, object]:
+    """为外部进程构建适合后续中断的启动参数。"""
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": creation_flag}
+    return {"start_new_session": True}
+
+
+def _run_process_with_controller(
+    command: list[str],
+    *,
+    working_directory: Path,
+    timeout_seconds: int,
+    execution_controller: ExecutionController | None,
+) -> subprocess.CompletedProcess[str]:
+    """以可轮询方式执行外部进程，便于 /stop 中途终止。"""
+    process: subprocess.Popen[str] | None = None
+    started_at = time.monotonic()
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=working_directory,
+            shell=False,
+            **_build_subprocess_options(),
+        )
+        if execution_controller is not None:
+            execution_controller.register_process(process)
+
+        while True:
+            if execution_controller is not None:
+                execution_controller.ensure_not_cancelled()
+
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=PROCESS_POLL_INTERVAL_SECONDS
+                )
+                return subprocess.CompletedProcess(
+                    process.args,
+                    process.returncode,
+                    stdout,
+                    stderr,
+                )
+            except subprocess.TimeoutExpired:
+                if time.monotonic() - started_at >= timeout_seconds:
+                    terminate_process_tree(process)
+                    stdout, stderr = process.communicate()
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        timeout_seconds,
+                        output=stdout,
+                        stderr=stderr,
+                    ) from None
+    finally:
+        if process is not None and execution_controller is not None:
+            execution_controller.unregister_process(process)
+
+
+def create_run_shell_command_tool(
+    allowed_roots: Sequence[Path],
+    execution_controller: ExecutionController | None = None,
+):
     """创建受工作目录范围约束的 Shell 命令执行工具。"""
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
@@ -104,21 +177,18 @@ def create_run_shell_command_tool(allowed_roots: Sequence[Path]):
 
         safe_timeout_seconds = max(1, min(timeout_seconds, MAX_TOOL_TIMEOUT_SECONDS))
         try:
-            completed_process = subprocess.run(
+            completed_process = _run_process_with_controller(
                 _build_shell_command(command),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=safe_timeout_seconds,
-                cwd=resolved_working_directory,
-                shell=False,
-                check=False,
+                working_directory=resolved_working_directory,
+                timeout_seconds=safe_timeout_seconds,
+                execution_controller=execution_controller,
             )
         except FileNotFoundError as exc:
             return f"❌ 命令执行环境不可用：{exc}"
         except subprocess.TimeoutExpired:
             return f"❌ 命令执行超时：{command}"
+        except ExecutionInterruptedError:
+            raise
         except Exception as exc:
             return f"❌ 执行命令时发生错误：{exc}"
 
@@ -131,7 +201,10 @@ def create_run_shell_command_tool(allowed_roots: Sequence[Path]):
     return attach_tool_risk(run_shell_command, "execute")
 
 
-def create_run_registered_tool_tool(command_registry: Mapping[str, Path | str]):
+def create_run_registered_tool_tool(
+    command_registry: Mapping[str, Path | str],
+    execution_controller: ExecutionController | None = None,
+):
     """创建只允许执行已注册外部工具的命令工具。"""
     normalized_registry = normalize_command_registry(command_registry)
     registered_tool_names = ", ".join(sorted(normalized_registry)) or "无"
@@ -159,21 +232,18 @@ def create_run_registered_tool_tool(command_registry: Mapping[str, Path | str]):
         command = [str(command_path), *command_arguments]
 
         try:
-            completed_process = subprocess.run(
+            completed_process = _run_process_with_controller(
                 command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=safe_timeout_seconds,
-                cwd=Path.cwd(),
-                shell=False,
-                check=False,
+                working_directory=Path.cwd(),
+                timeout_seconds=safe_timeout_seconds,
+                execution_controller=execution_controller,
             )
         except FileNotFoundError:
             return f"❌ 工具路径不存在：{command_path}"
         except subprocess.TimeoutExpired:
             return f"❌ 工具执行超时：{tool_name}"
+        except ExecutionInterruptedError:
+            raise
         except Exception as exc:
             return f"❌ 调用外部工具时发生错误：{exc}"
 
