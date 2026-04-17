@@ -1,8 +1,9 @@
+import json
 import unittest
 from time import sleep
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from cyber_agent.agent.approval import ApprovalDecision
@@ -19,10 +20,12 @@ class FakeChatOpenAI:
     """
 
     human_turn_message_counts: list[int] = []
+    init_kwargs_history: list[dict] = []
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
         self.bound_tools = []
+        self.__class__.init_kwargs_history.append(kwargs)
 
     def bind_tools(self, tools, **kwargs):
         self.bound_tools = tools
@@ -115,6 +118,100 @@ class InterruptibleFakeChatOpenAI:
             yield AIMessageChunk(content="B")
             sleep(0.02)
             yield AIMessageChunk(content="C")
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
+class LongSequenceFakeChatOpenAI:
+    """
+    用于长链路测试的假模型。
+    会连续发起多轮不同参数的工具调用，最后再给出最终答复。
+    """
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        completed_steps = sum(
+            1
+            for message in messages
+            if isinstance(message, ToolMessage) and message.name == "echo_tool"
+        )
+        next_step = completed_steps + 1
+
+        if isinstance(last_message, HumanMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "echo_tool",
+                        "args": json.dumps({"text": f"step-{next_step}"}),
+                        "id": f"call_step_{next_step}",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+            return
+
+        if isinstance(last_message, ToolMessage):
+            if next_step <= 14:
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "echo_tool",
+                            "args": json.dumps({"text": f"step-{next_step}"}),
+                            "id": f"call_step_{next_step}",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+                return
+
+            yield AIMessageChunk(content="长链路完成")
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
+class RepeatedLoopFakeChatOpenAI:
+    """
+    用于循环检测测试的假模型。
+    无论前文如何，都会重复请求同一个工具调用。
+    """
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage | ToolMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "echo_tool",
+                        "args": json.dumps({"text": "same-loop"}),
+                        "id": "call_loop",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
             return
 
         raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
@@ -224,6 +321,105 @@ class AgentRunnerTestCase(unittest.TestCase):
         self.assertEqual(runner.get_turn_count(), 0)
         self.assertEqual(len(runner.history), 1)
         self.assertIn("授权模式", runner.history[0].content)
+
+    def test_runner_compresses_older_messages_when_context_is_too_large(self) -> None:
+        """
+        测试：当完整历史超过上下文阈值时，会保留最近消息并插入压缩摘要。
+        """
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            runner = AgentRunner(
+                [],
+                max_context_chars=80,
+                context_keep_recent_messages=2,
+            )
+            runner.history.extend(
+                [
+                    HumanMessage(content="a" * 40),
+                    AIMessage(content="b" * 40),
+                    HumanMessage(content="c" * 40),
+                    AIMessage(content="d" * 40),
+                ]
+            )
+
+            with patch.object(
+                runner,
+                "_summarize_messages_for_context",
+                return_value="压缩摘要",
+            ) as mock_summarize:
+                model_messages = runner.get_model_context_snapshot()
+
+        self.assertEqual(runner.compressed_summary, "压缩摘要")
+        self.assertEqual(runner.compressed_message_count, 2)
+        self.assertEqual(mock_summarize.call_count, 1)
+        self.assertEqual(len(model_messages), 4)
+        self.assertIn("压缩摘要", model_messages[1].content)
+        self.assertEqual(model_messages[-2].content, "c" * 40)
+        self.assertEqual(model_messages[-1].content, "d" * 40)
+
+    def test_runner_can_use_and_switch_openai_compatible_service_config(self) -> None:
+        """
+        测试：运行器支持非 openai 服务商，并可在当前会话内切换模型配置。
+        """
+        FakeChatOpenAI.init_kwargs_history = []
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            runner = AgentRunner(
+                [],
+                service_name="deepseek",
+                model_name="deepseek-chat",
+            )
+            runner.update_llm_config(
+                service_name="openai",
+                model_name="gpt-5.4-mini",
+                base_url="https://example.test/v1",
+            )
+
+        self.assertEqual(runner.service, "openai")
+        self.assertEqual(runner.model_name, "gpt-5.4-mini")
+        self.assertEqual(runner.base_url, "https://example.test/v1")
+        self.assertEqual(FakeChatOpenAI.init_kwargs_history[0]["model"], "deepseek-chat")
+        self.assertEqual(
+            FakeChatOpenAI.init_kwargs_history[0]["base_url"],
+            "https://api.deepseek.com/v1",
+        )
+        self.assertEqual(FakeChatOpenAI.init_kwargs_history[-1]["model"], "gpt-5.4-mini")
+        self.assertEqual(
+            FakeChatOpenAI.init_kwargs_history[-1]["base_url"],
+            "https://example.test/v1",
+        )
+
+    def test_runner_allows_long_non_repeating_tool_sequences(self) -> None:
+        """
+        测试：正常推进且每轮都在变化的长工具链，不应被旧的低轮数上限提前终止。
+        """
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """回显文本。"""
+            return f"processed:{text}"
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", LongSequenceFakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            response = runner.run("请执行一个较长的工具链", verbose=False)
+
+        self.assertEqual(response, "长链路完成")
+
+    def test_runner_stops_identical_tool_loop_with_explicit_reason(self) -> None:
+        """
+        测试：只有出现重复工具调用循环时，才会被提前终止并返回明确原因。
+        """
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """回显文本。"""
+            return f"processed:{text}"
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", RepeatedLoopFakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            with self.assertRaises(RuntimeError) as captured:
+                runner.run("进入循环", verbose=False)
+
+        self.assertIn("重复工具调用循环", str(captured.exception))
 
     def test_runner_respects_approval_handler_for_high_risk_tools(self) -> None:
         """

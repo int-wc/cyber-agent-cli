@@ -9,7 +9,7 @@ import typer
 from click.exceptions import Abort
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from rich.console import Console
+from rich.console import Console, RenderableType
 
 from ..agent.approval import (
     ApprovalDecision,
@@ -19,6 +19,7 @@ from ..agent.approval import (
 )
 from ..agent.mode import AgentMode, get_mode_label, parse_agent_mode
 from ..agent.runner import AgentRunner, extract_text_content
+from ..capability_registry import CapabilityRegistry
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..local_config import (
@@ -37,7 +38,7 @@ from ..session_store import (
 from ..tools import (
     describe_allowed_roots,
     describe_command_registry,
-    describe_tools,
+    describe_tool_instances,
     get_default_tools,
     resolve_allowed_roots,
     resolve_command_registry,
@@ -59,6 +60,19 @@ TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 renderer = CliRenderer()
 _cli_prompt_session = None
 _prompt_toolkit_disabled = False
+
+
+class BuiltinCommandCaptureRenderer(CliRenderer):
+    """收集内建命令的 Rich 输出，供 TUI 直接挂载原始面板。"""
+
+    def __init__(self) -> None:
+        super().__init__(console=Console(record=True, width=100))
+        self.renderables: list[RenderableType] = []
+
+    def print_renderable(self, renderable: RenderableType) -> None:
+        """捕获渲染对象而不是直接写到终端。"""
+        self.ensure_response_stream_closed()
+        self.renderables.append(renderable)
 
 
 def parse_registered_tool_specs(tool_specs: list[str] | None) -> dict[str, Path]:
@@ -111,15 +125,27 @@ def build_runtime_context(
         persisted_allowed_paths,
         cli_allowed_paths,
     )
+    service_name = settings.get_service()
+    model_name = settings.get_model_name()
+    api_key = settings.openai_api_key
+    base_url = settings.resolve_base_url(service_name)
     configured_registry = parse_registered_tool_specs(tool_specs)
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
     command_registry = resolve_command_registry(mode, configured_registry)
     execution_controller = ExecutionController()
+    capability_registry = CapabilityRegistry(
+        execution_controller=execution_controller,
+        service_name=service_name,
+        model_name=model_name,
+        api_key=api_key,
+        base_url=base_url,
+    )
     tools = get_default_tools(
         mode,
         extra_allowed_paths,
         configured_registry,
         execution_controller,
+        capability_registry,
     )
 
     return {
@@ -134,6 +160,11 @@ def build_runtime_context(
         "approval_policy": approval_policy,
         "ui_mode": ui_mode,
         "execution_controller": execution_controller,
+        "capability_registry": capability_registry,
+        "service_name": service_name,
+        "model_name": model_name,
+        "base_url": base_url,
+        "api_key": api_key,
         "session_id": create_session_id(),
         "session_source_id": None,
         "session_storage_dir": get_session_storage_dir(),
@@ -143,7 +174,7 @@ def build_runtime_context(
 
 def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
     """按运行上下文创建会话运行器。"""
-    return AgentRunner(
+    runner = AgentRunner(
         runtime_context["tools"],
         mode=runtime_context["mode"],
         allowed_roots=runtime_context["allowed_roots"],
@@ -151,7 +182,27 @@ def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
         extra_allowed_paths=runtime_context["extra_allowed_paths"],
         configured_registry=runtime_context["configured_registry"],
         execution_controller=runtime_context["execution_controller"],
+        capability_registry=runtime_context["capability_registry"],
+        service_name=runtime_context["service_name"],
+        model_name=runtime_context["model_name"],
+        api_key=runtime_context["api_key"],
+        base_url=runtime_context["base_url"],
     )
+    capability_registry = runtime_context.get("capability_registry")
+    if isinstance(capability_registry, CapabilityRegistry):
+        capability_registry.register_refresh_callback(
+            lambda: _refresh_runner_capabilities(runtime_context, runner)
+        )
+    return runner
+
+
+def _refresh_runner_capabilities(
+    runtime_context: dict[str, object],
+    runner: AgentRunner,
+) -> None:
+    """鍦ㄥ姩鎬?capability 鍙樻洿鍚庡埛鏂拌繍琛屽櫒鍜?CLI 杩愯鏃朵笂涓嬫枃銆?"""
+    runner._refresh_runtime_scope()
+    sync_runtime_context_from_runner(runtime_context, runner)
 
 
 def sync_runtime_context_from_runner(
@@ -164,6 +215,10 @@ def sync_runtime_context_from_runner(
     runtime_context["allowed_roots"] = list(runner.allowed_roots)
     runtime_context["command_registry"] = dict(runner.command_registry)
     runtime_context["tools"] = list(runner.tools)
+    runtime_context["service_name"] = runner.service
+    runtime_context["model_name"] = runner.model_name
+    runtime_context["base_url"] = runner.base_url
+    runtime_context["api_key"] = runner.api_key
 
 
 def print_banner(
@@ -174,8 +229,8 @@ def print_banner(
     """输出交互模式欢迎信息。"""
     cli_renderer.print_banner(
         mode=runner.mode,
-        service=settings.get_service(),
-        model=settings.openai_model,
+        service=runner.service,
+        model=runner.model_name,
         cwd=Path.cwd(),
         approval_policy=runtime_context["approval_policy"],
     )
@@ -191,13 +246,23 @@ def print_tools(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出默认工具清单。"""
-    cli_renderer.print_tools(
-        describe_tools(
-            runner.mode,
-            runner.extra_allowed_paths,
-            runner.configured_registry,
+    cli_renderer.print_tools(describe_tool_instances(runner.tools))
+
+
+def describe_capability_lines(capability_registry: CapabilityRegistry) -> list[str]:
+    """将动态 capability 摘要压缩为适合状态面板展示的文本行。"""
+    capabilities = capability_registry.list_capabilities()
+    if not capabilities:
+        return ["无"]
+
+    lines: list[str] = []
+    for capability in capabilities:
+        lines.append(
+            f"{capability.name} | kind={capability.kind} | "
+            f"tool={str(capability.register_as_tool).lower()} | "
+            f"status={capability.status} | rev={capability.revision}"
         )
-    )
+    return lines
 
 
 def print_status(
@@ -206,9 +271,11 @@ def print_status(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出便于试用排障的运行状态。"""
+    capability_registry = runtime_context["capability_registry"]
+    context_diagnostics = runner.get_context_diagnostics()
     api_key_configured = (
         "已配置"
-        if settings.openai_api_key and settings.openai_api_key != "sk-default"
+        if runner.api_key and runner.api_key != "sk-default"
         else "未配置或仍为默认占位值"
     )
     saved_allowed_path_lines = "\n".join(
@@ -218,6 +285,7 @@ def print_status(
     registered_tool_lines = "\n".join(
         describe_command_registry(runner.command_registry)
     ) or "无"
+    capability_lines = "\n".join(describe_capability_lines(capability_registry))
     cli_renderer.print_status(
         [
             ("模式", f"{get_mode_label(runner.mode)} ({runner.mode.value})"),
@@ -227,7 +295,8 @@ def print_status(
                 f" ({runtime_context['approval_policy'].value})",
             ),
             ("服务", runner.service),
-            ("模型", settings.openai_model),
+            ("模型", runner.model_name),
+            ("模型基址", str(runner.base_url or "默认")),
             ("工作目录", str(Path.cwd())),
             ("会话轮数", str(runner.get_turn_count())),
             ("默认工具数", str(len(runner.tools))),
@@ -237,12 +306,20 @@ def print_status(
                 f" ({runtime_context['ui_mode'].value})",
             ),
             ("当前会话 ID", str(runtime_context["session_id"])),
+            ("动态能力数", str(len(capability_registry.list_capabilities()))),
+            (
+                "上下文消息",
+                f"完整 {context_diagnostics['history_message_count']} / "
+                f"模型可见 {context_diagnostics['model_message_count']}",
+            ),
+            ("已压缩历史消息数", str(context_diagnostics["compressed_message_count"])),
             ("OPENAI_API_KEY", api_key_configured),
             ("本地配置文件", str(runtime_context["local_config_path"])),
             ("历史会话目录", str(runtime_context["session_storage_dir"])),
             ("已保存允许目录", saved_allowed_path_lines),
             ("允许读取根路径", allowed_root_lines),
             ("已注册外部工具", registered_tool_lines),
+            ("动态能力", capability_lines),
         ]
     )
 
@@ -267,6 +344,9 @@ def print_local_config(
         [
             ("本地配置文件", str(runtime_context["local_config_path"])),
             ("已保存允许目录", saved_allowed_path_lines),
+            ("当前服务", str(runtime_context["service_name"])),
+            ("当前模型", str(runtime_context["model_name"])),
+            ("当前模型基址", str(runtime_context["base_url"] or "默认")),
         ]
     )
 
@@ -324,6 +404,56 @@ def add_persisted_allowed_path(
         cli_renderer.print_info(f"目录已存在于本地配置和当前会话中：{persisted_path}")
         return
     cli_renderer.print_info(f"目录已存在于本地配置中：{persisted_path}")
+
+
+def print_model_config(
+    runner: AgentRunner,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """输出当前会话正在使用的模型配置。"""
+    cli_renderer.print_status(
+        [
+            ("当前服务", runner.service),
+            ("当前模型", runner.model_name),
+            ("当前模型基址", str(runner.base_url or "默认")),
+        ]
+    )
+
+
+def switch_runtime_model(
+    raw_model_name: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """在当前会话中切换模型名称。"""
+    normalized_model_name = settings.get_model_name(raw_model_name)
+    runner.update_llm_config(model_name=normalized_model_name)
+    sync_runtime_context_from_runner(runtime_context, runner)
+    cli_renderer.print_info(
+        f"已切换当前会话模型：{runner.service} / {runner.model_name}"
+    )
+
+
+def switch_runtime_service(
+    raw_service_name: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+    *,
+    base_url: str | None = None,
+) -> None:
+    """在当前会话中切换服务商，并按规则重算兼容接口基址。"""
+    normalized_service_name = settings.normalize_service_name(raw_service_name)
+    runner.update_llm_config(
+        service_name=normalized_service_name,
+        base_url=base_url,
+    )
+    sync_runtime_context_from_runner(runtime_context, runner)
+    cli_renderer.print_info(
+        "已切换当前会话服务商："
+        f"{runner.service}，模型：{runner.model_name}，基址：{runner.base_url or '默认'}"
+    )
 
 
 def start_new_runtime_session(
@@ -411,7 +541,10 @@ def print_context(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """显示当前内存上下文，便于确认模型本轮能读取到的历史。"""
-    messages = runner.get_history_snapshot()
+    history_messages = runner.get_history_snapshot()
+    model_messages = runner.get_model_context_snapshot()
+    diagnostics = runner.get_context_diagnostics()
+    messages = history_messages
     cli_renderer.print_status(
         [
             ("当前会话 ID", str(runtime_context["session_id"])),
@@ -424,6 +557,16 @@ def print_context(
         ]
     )
     cli_renderer.print_chat_message("system", build_context_preview(messages))
+    if diagnostics["compressed_summary"]:
+        cli_renderer.print_chat_message(
+            "system",
+            "压缩摘要\n" + str(diagnostics["compressed_summary"]),
+        )
+    cli_renderer.print_chat_message(
+        "system",
+        "模型实际可见上下文预览\n"
+        + build_context_preview(model_messages, limit=None),
+    )
 
 
 def print_history_list(
@@ -856,6 +999,48 @@ def handle_builtin_command(
             return True
         cli_renderer.print_error("不支持的 /config 子命令。")
         return True
+    if normalized_input == "/service":
+        print_model_config(runner, cli_renderer)
+        return True
+    if normalized_input.startswith("/service "):
+        service_remainder = stripped_input[len("/service"):].strip()
+        if not service_remainder:
+            cli_renderer.print_error("请提供要切换的服务商名称。")
+            return True
+
+        service_parts = service_remainder.split(maxsplit=1)
+        service_name = service_parts[0]
+        base_url = service_parts[1] if len(service_parts) == 2 else None
+        try:
+            switch_runtime_service(
+                service_name,
+                runner,
+                runtime_context,
+                cli_renderer,
+                base_url=base_url,
+            )
+        except ValueError as exc:
+            cli_renderer.print_error(str(exc))
+        return True
+    if normalized_input == "/model":
+        print_model_config(runner, cli_renderer)
+        return True
+    if normalized_input.startswith("/model "):
+        model_remainder = stripped_input[len("/model"):].strip()
+        if not model_remainder:
+            cli_renderer.print_error("请提供要切换的模型名称。")
+            return True
+
+        try:
+            switch_runtime_model(
+                model_remainder,
+                runner,
+                runtime_context,
+                cli_renderer,
+            )
+        except ValueError as exc:
+            cli_renderer.print_error(str(exc))
+        return True
     if normalized_input == "/allow-path":
         print_allowed_roots(runner, cli_renderer)
         return True
@@ -932,6 +1117,23 @@ def capture_builtin_command_output(
     return result, output
 
 
+def capture_builtin_command_renderables(
+    user_input: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+) -> tuple[bool | None, list[RenderableType]]:
+    """执行内建命令并保留原始 Rich 渲染对象，供 TUI 复用 CLI 面板。"""
+
+    capture_renderer = BuiltinCommandCaptureRenderer()
+    result = handle_builtin_command(
+        user_input,
+        runner,
+        runtime_context,
+        capture_renderer,
+    )
+    return result, capture_renderer.renderables
+
+
 def run_chat_loop(
     runner: AgentRunner,
     runtime_context: dict[str, object],
@@ -939,6 +1141,9 @@ def run_chat_loop(
 ) -> None:
     """运行类似 Claude Code 的交互式命令行循环。"""
     ui_mode = runtime_context.get("ui_mode", InteractionUiMode.AUTO)
+    if show_banner and sys.stdout.isatty():
+        renderer.clear_screen()
+
     if ui_mode is InteractionUiMode.TUI:
         try:
             from .tui import launch_textual_chat

@@ -1,0 +1,13 @@
+# 与 pyproject.toml 中的运行时依赖保持一致，便于直接 `pip install -r requirements.txt`
+langchain>=0.2.0
+langgraph>=0.2.0
+langchain-openai
+typer>=0.16.0
+click>=8.2.1
+textual>=0.52.0
+prompt_toolkit>=3.0.48
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+httpx>=0.28.1
+python-dotenv>=1.0.0
+aiofiles>=23.2.0

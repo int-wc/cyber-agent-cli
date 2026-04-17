@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
+from ..capability_registry import CapabilityRegistry
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
@@ -14,7 +15,10 @@ from .mode import AgentMode, get_mode_system_prompt
 
 AgentEventHandler = Callable[[str, object], None]
 ApprovalHandler = Callable[[BaseTool, dict], ApprovalDecision]
-MAX_TOOL_ITERATIONS = 12
+MAX_TOOL_ITERATIONS = 48
+MAX_IDENTICAL_TOOL_ROUNDS = 3
+MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
+MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
 
 
 def extract_text_content(content: str | list[str | dict]) -> str:
@@ -56,6 +60,88 @@ def iter_stream_characters(content: str) -> list[str]:
     return list(content)
 
 
+def format_message_for_context_summary(message: BaseMessage) -> str:
+    """将消息压缩为可用于上下文摘要和调试的文本。"""
+    role_label = "system"
+    if isinstance(message, HumanMessage):
+        role_label = "user"
+    elif isinstance(message, AIMessage):
+        role_label = "assistant"
+    elif isinstance(message, ToolMessage):
+        role_label = f"tool:{message.name or 'unknown'}"
+
+    content = extract_text_content(message.content).strip()
+    if isinstance(message, AIMessage) and message.tool_calls and not content:
+        content = f"工具调用: {json.dumps(message.tool_calls, ensure_ascii=False)}"
+    if not content:
+        content = "（空内容）"
+    return f"{role_label}: {content}"
+
+
+def normalize_tool_signature_text(text: str) -> str:
+    """压缩工具结果文本，避免循环检测被长输出干扰。"""
+    normalized_text = " ".join(text.split())
+    if len(normalized_text) <= MAX_TOOL_RESULT_SIGNATURE_CHARS:
+        return normalized_text
+    return f"{normalized_text[:MAX_TOOL_RESULT_SIGNATURE_CHARS]}..."
+
+
+def serialize_tool_args_for_signature(tool_call: dict) -> str:
+    """稳定序列化工具参数，便于识别重复调用。"""
+    try:
+        normalized_args: object = normalize_tool_args(tool_call)
+    except ValueError:
+        normalized_args = tool_call.get("args", {})
+
+    try:
+        return json.dumps(normalized_args, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(normalized_args)
+
+
+def build_tool_round_signature(
+    tool_calls: list[dict],
+    tool_messages: list[ToolMessage],
+) -> str:
+    """构建单轮工具调用与结果的签名，用于异常循环检测。"""
+    round_payload = []
+    for tool_call, tool_message in zip(tool_calls, tool_messages):
+        round_payload.append(
+            {
+                "name": str(tool_call.get("name", "")),
+                "args": serialize_tool_args_for_signature(tool_call),
+                "result": normalize_tool_signature_text(
+                    extract_text_content(tool_message.content)
+                ),
+            }
+        )
+    return json.dumps(round_payload, ensure_ascii=False, sort_keys=True)
+
+
+def detect_tool_call_loop(round_signatures: list[str]) -> str | None:
+    """检测重复工具调用或重复链路，避免异常循环。"""
+    if len(round_signatures) >= MAX_IDENTICAL_TOOL_ROUNDS:
+        recent_signatures = round_signatures[-MAX_IDENTICAL_TOOL_ROUNDS:]
+        if len(set(recent_signatures)) == 1:
+            return (
+                "检测到重复工具调用循环：最近 3 轮工具调用与工具结果完全相同，"
+                "已主动停止当前轮次。"
+            )
+
+    max_pattern_length = min(
+        MAX_CYCLIC_TOOL_PATTERN_LENGTH,
+        len(round_signatures) // 2,
+    )
+    for pattern_length in range(2, max_pattern_length + 1):
+        recent_signatures = round_signatures[-pattern_length * 2:]
+        if recent_signatures[:pattern_length] == recent_signatures[pattern_length:]:
+            return (
+                "检测到重复工具链循环：最近 "
+                f"{pattern_length} 轮工具调用链完整重复了 2 次，已主动停止当前轮次。"
+            )
+    return None
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -67,13 +153,32 @@ class AgentRunner:
         extra_allowed_paths: list[Path] | None = None,
         configured_registry: dict[str, Path] | None = None,
         execution_controller: ExecutionController | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        service_name: str | None = None,
+        model_name: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_context_chars: int | None = None,
+        context_keep_recent_messages: int | None = None,
+        context_summary_max_chars: int | None = None,
     ):
-        self.service = settings.get_service()
-        self.llm = ChatOpenAI(**settings.get_chat_openai_kwargs(self.service))
+        self.service = settings.normalize_service_name(service_name)
+        self.model_name = settings.get_model_name(model_name)
+        self.api_key = api_key if api_key is not None else settings.openai_api_key
+        self.base_url = settings.resolve_base_url(self.service, base_url=base_url)
+        self.llm = self._build_llm()
         self.mode = mode
         self.extra_allowed_paths = extra_allowed_paths or []
         self.configured_registry = configured_registry or {}
         self.execution_controller = execution_controller or ExecutionController()
+        self.capability_registry = capability_registry
+        self.max_context_chars = max_context_chars or settings.max_context_chars
+        self.context_keep_recent_messages = (
+            context_keep_recent_messages or settings.context_keep_recent_messages
+        )
+        self.context_summary_max_chars = (
+            context_summary_max_chars or settings.context_summary_max_chars
+        )
         self.allowed_roots = allowed_roots or resolve_allowed_roots(
             mode,
             self.extra_allowed_paths,
@@ -86,7 +191,47 @@ class AgentRunner:
         self.system_prompt = system_prompt or get_mode_system_prompt(self.mode)
         self.base_messages: list[BaseMessage] = []
         self.history: list[BaseMessage] = []
+        self.compressed_summary = ""
+        self.compressed_message_count = 0
         self.reset()
+
+    def _build_llm(self) -> ChatOpenAI:
+        """按当前运行时服务商与模型配置重建模型实例。"""
+        return ChatOpenAI(
+            **settings.get_chat_openai_kwargs(
+                self.service,
+                model_name=self.model_name,
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
+        )
+
+    def update_llm_config(
+        self,
+        *,
+        service_name: str | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """更新当前会话使用的服务商、模型或基址，并立即重建模型实例。"""
+        if service_name is not None:
+            self.service = settings.normalize_service_name(service_name)
+        if model_name is not None:
+            self.model_name = settings.get_model_name(model_name)
+        if service_name is not None or base_url is not None:
+            self.base_url = settings.resolve_base_url(
+                self.service,
+                base_url=base_url,
+            )
+
+        self.llm = self._build_llm()
+        if self.capability_registry is not None:
+            self.capability_registry.update_llm_config(
+                service_name=self.service,
+                model_name=self.model_name,
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
 
     def _refresh_runtime_scope(self) -> None:
         """按当前模式与授权配置重建可用工具和访问范围。"""
@@ -100,12 +245,15 @@ class AgentRunner:
             self.extra_allowed_paths,
             self.configured_registry,
             self.execution_controller,
+            self.capability_registry,
         )
 
     def reset(self) -> None:
         """重置会话上下文，便于开始一轮新的交互。"""
         self.base_messages = [SystemMessage(content=self.system_prompt)]
         self.history = list(self.base_messages)
+        self.compressed_summary = ""
+        self.compressed_message_count = 0
 
     def get_turn_count(self) -> int:
         """返回当前会话中用户已发起的轮次。"""
@@ -125,6 +273,26 @@ class AgentRunner:
         self.base_messages = [messages[0]]
         self.system_prompt = extract_text_content(messages[0].content)
         self.history = list(messages)
+        self.compressed_summary = ""
+        self.compressed_message_count = 0
+
+    def get_model_context_snapshot(self) -> list[BaseMessage]:
+        """返回当前模型真正会读取到的上下文快照。"""
+        return list(self._build_model_messages())
+
+    def get_context_diagnostics(self) -> dict[str, object]:
+        """返回当前完整历史、压缩摘要和模型上下文的调试信息。"""
+        model_messages = self._build_model_messages()
+        return {
+            "history_message_count": len(self.history),
+            "model_message_count": len(model_messages),
+            "compressed_message_count": self.compressed_message_count,
+            "compressed_summary": self.compressed_summary,
+            "history_preview": [format_message_for_context_summary(message) for message in self.history],
+            "model_preview": [
+                format_message_for_context_summary(message) for message in model_messages
+            ],
+        }
 
     def switch_mode(self, mode: AgentMode) -> None:
         """
@@ -166,12 +334,107 @@ class AgentRunner:
     def _build_tool_registry(self) -> dict[str, BaseTool]:
         return {tool.name: tool for tool in self.tools}
 
+    def _compose_system_prompt(self) -> str:
+        """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
+        prompt_parts = [self.system_prompt]
+        if self.capability_registry is not None:
+            skill_prompt = self.capability_registry.build_skill_prompt().strip()
+            if skill_prompt:
+                prompt_parts.append(skill_prompt)
+        return "\n\n".join(part for part in prompt_parts if part.strip())
+
+    def _estimate_context_char_count(self, messages: list[BaseMessage]) -> int:
+        """估算当前上下文占用字符数，用于触发压缩。"""
+        return sum(len(format_message_for_context_summary(message)) for message in messages)
+
+    def _summarize_messages_for_context(
+        self,
+        previous_summary: str,
+        messages_to_summarize: list[BaseMessage],
+    ) -> str:
+        """将较早消息增量压缩为新的上下文摘要。"""
+        serialized_messages = "\n".join(
+            format_message_for_context_summary(message)
+            for message in messages_to_summarize
+        )
+        summary_prompt = """
+你是会话上下文压缩器。请将已有摘要与新增消息压缩为一个新的中文摘要。
+必须保留：
+1. 用户的真实目标、约束和偏好。
+2. 已完成的重要动作、搜索结果、文件变更、工具输出和失败原因。
+3. 当前仍未解决的问题、待确认项和后续建议。
+4. 已创建的 capability、历史会话、路径、命令或关键标识。
+输出只要纯文本摘要，不要加标题，不要虚构内容。
+""".strip()
+        response = self.llm.invoke(
+            [
+                SystemMessage(content=summary_prompt),
+                HumanMessage(
+                    content=(
+                        f"已有摘要:\n{previous_summary or '无'}\n\n"
+                        f"新增消息:\n{serialized_messages}"
+                    )
+                ),
+            ]
+        )
+        summary_text = extract_text_content(response.content).strip()
+        if len(summary_text) > self.context_summary_max_chars:
+            return f"{summary_text[:self.context_summary_max_chars]}..."
+        return summary_text
+
+    def _ensure_context_window(self) -> None:
+        """在模型调用前按阈值压缩较早消息，避免上下文持续无限增长。"""
+        non_system_messages = self.history[1:]
+        if not non_system_messages:
+            return
+        if self._estimate_context_char_count(self.history) <= self.max_context_chars:
+            return
+
+        if len(non_system_messages) <= 1:
+            return
+
+        keep_recent_messages = max(1, self.context_keep_recent_messages)
+        compression_boundary = max(1, len(non_system_messages) - keep_recent_messages)
+        if compression_boundary <= self.compressed_message_count:
+            return
+
+        messages_to_summarize = non_system_messages[
+            self.compressed_message_count:compression_boundary
+        ]
+        if not messages_to_summarize:
+            return
+
+        self.execution_controller.ensure_not_cancelled()
+        self.compressed_summary = self._summarize_messages_for_context(
+            self.compressed_summary,
+            messages_to_summarize,
+        )
+        self.compressed_message_count = compression_boundary
+
+    def _build_model_messages(self) -> list[BaseMessage]:
+        """构建模型实际读取的消息列表，必要时插入压缩摘要。"""
+        self._ensure_context_window()
+        model_messages: list[BaseMessage] = [
+            SystemMessage(content=self._compose_system_prompt())
+        ]
+        if self.compressed_summary:
+            model_messages.append(
+                SystemMessage(
+                    content=(
+                        "以下是更早对话的压缩摘要，请基于它继续保持上下文一致性：\n"
+                        f"{self.compressed_summary}"
+                    )
+                )
+            )
+        model_messages.extend(self.history[1 + self.compressed_message_count :])
+        return model_messages
+
     def _stream_model_response(
         self,
-        messages: list[BaseMessage],
         event_handler: AgentEventHandler | None,
     ) -> AIMessage:
         self.execution_controller.ensure_not_cancelled()
+        messages = self._build_model_messages()
         llm_with_tools = self.llm.bind_tools(self.tools, parallel_tool_calls=False)
         accumulated_chunk: AIMessageChunk | None = None
 
@@ -313,17 +576,19 @@ class AgentRunner:
                 print("开始处理用户输入...")
 
             self.history.append(HumanMessage(content=user_input))
-            tool_registry = self._build_tool_registry()
+            tool_round_signatures: list[str] = []
 
             for _ in range(MAX_TOOL_ITERATIONS):
                 self.execution_controller.ensure_not_cancelled()
-                ai_message = self._stream_model_response(self.history, event_handler)
+                ai_message = self._stream_model_response(event_handler)
                 self.history.append(ai_message)
 
                 if ai_message.tool_calls:
                     if event_handler is not None:
                         event_handler("tool_call", ai_message.tool_calls)
 
+                    tool_registry = self._build_tool_registry()
+                    round_tool_messages: list[ToolMessage] = []
                     for tool_call in ai_message.tool_calls:
                         self.execution_controller.ensure_not_cancelled()
                         tool_message = self._invoke_tool(
@@ -333,6 +598,17 @@ class AgentRunner:
                             event_handler,
                         )
                         self.history.append(tool_message)
+                        round_tool_messages.append(tool_message)
+                    round_signature = build_tool_round_signature(
+                        ai_message.tool_calls,
+                        round_tool_messages,
+                    )
+                    loop_error = detect_tool_call_loop(
+                        [*tool_round_signatures, round_signature]
+                    )
+                    tool_round_signatures.append(round_signature)
+                    if loop_error is not None:
+                        raise RuntimeError(loop_error)
                     continue
 
                 final_response = extract_text_content(ai_message.content)
@@ -340,6 +616,10 @@ class AgentRunner:
                     print(f"最终回复: {final_response}")
                 return final_response
 
-            raise RuntimeError("智能体在多轮工具调用后仍未收敛，请检查提示词或工具结果。")
+            raise RuntimeError(
+                "工具调用轮数已达到安全上限 "
+                f"({MAX_TOOL_ITERATIONS} 轮)。最近调用仍在变化，为避免无限执行，"
+                "当前轮次已被停止。"
+            )
         finally:
             self.execution_controller.finish_run()

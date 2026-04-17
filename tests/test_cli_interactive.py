@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
@@ -8,6 +9,8 @@ from rich.console import Console
 
 from cyber_agent.agent.approval import ApprovalPolicy
 from cyber_agent.agent.mode import AgentMode
+from cyber_agent.agent.runner import AgentRunner
+from cyber_agent.cli.app import capture_builtin_command_renderables, renderer, run_chat_loop
 from cyber_agent.cli.branding import (
     STARTUP_PANEL_TITLE,
     STARTUP_SUBTITLE,
@@ -29,6 +32,16 @@ from cyber_agent.cli.prompting import (
 )
 from cyber_agent.cli.render import CliRenderer
 from cyber_agent.cli.theme import USER_TEXT_COLOR
+
+
+class PassiveFakeChatOpenAI:
+    """用于只读界面测试的假模型，避免测试期间触发真实模型初始化。"""
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def bind_tools(self, tools, **kwargs):
+        return self
 
 
 class CliInteractiveHelperTestCase(unittest.TestCase):
@@ -192,6 +205,57 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
 
         self.assertEqual(output_lines[title_index + 1].strip(" │"), "")
         self.assertIn("当前模式", output_lines[title_index + 2])
+
+    def test_builtin_command_renderables_keep_cli_help_panel_structure(self) -> None:
+        """
+        测试：TUI 捕获内建命令输出时，会保留 CLI 原始 Rich 面板而不是退化成纯字符串。
+        """
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", PassiveFakeChatOpenAI):
+            runner = AgentRunner([])
+
+        result, renderables = capture_builtin_command_renderables("/help", runner, {})
+
+        self.assertTrue(result)
+        self.assertEqual(len(renderables), 1)
+
+        console = Console(record=True, width=100)
+        console.print(renderables[0])
+        output = console.export_text()
+
+        self.assertIn("内建命令", output)
+        self.assertIn("/help", output)
+        self.assertIn("/status", output)
+
+    def test_run_chat_loop_clears_screen_before_startup_splash_in_real_terminal(self) -> None:
+        """
+        测试：交互式启动在真实终端中会先清屏，再显示启动页。
+        """
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", PassiveFakeChatOpenAI):
+            runner = AgentRunner([])
+
+        ordered_calls: list[str] = []
+        runtime_context = {"ui_mode": InteractionUiMode.CLI}
+
+        with patch("cyber_agent.cli.app.print_banner"), patch(
+            "cyber_agent.cli.app.prompt_chat_input",
+            side_effect=EOFError,
+        ), patch(
+            "cyber_agent.cli.app.sys.stdout.isatty",
+            return_value=True,
+        ), patch.object(
+            renderer,
+            "clear_screen",
+            side_effect=lambda: ordered_calls.append("clear"),
+        ), patch.object(
+            renderer,
+            "print_startup_splash",
+            side_effect=lambda: ordered_calls.append("splash"),
+        ):
+            run_chat_loop(runner, runtime_context)
+
+        self.assertEqual(ordered_calls, ["clear", "splash"])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from typer.testing import CliRunner
 
 from cyber_agent.cli.app import app
+from cyber_agent.config import settings
 from cyber_agent.session_store import save_session_history
 
 
@@ -65,6 +66,12 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("replace_in_file", result.output)
         self.assertIn("apply_unified_patch", result.output)
         self.assertIn("run_shell_command", result.output)
+        self.assertIn("search_web", result.output)
+        self.assertIn("create_generated_capability", result.output)
+        self.assertIn("revise_generated_capability", result.output)
+        self.assertIn("list_generated_capabilities", result.output)
+        self.assertIn("show_generated_capability", result.output)
+        self.assertIn("mark_generated_capability_satisfied", result.output)
         self.assertIn("当前会话 ID", result.output)
         self.assertIn("当前工作目录下还没有已保存的历史会话", result.output)
         self.assertIn("当前没有正在执行的任务", result.output)
@@ -157,6 +164,55 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("启动页面", result.output)
         self.assertIn("Cyber Agent CLI", result.output)
         self.assertIn("再见", result.output)
+
+    def test_builtin_commands_can_switch_service_and_model_in_current_session(self) -> None:
+        """
+        测试：/service 与 /model 可在当前会话中切换服务商和模型，并体现在状态输出中。
+        """
+        cli_runner = CliRunner()
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            result = cli_runner.invoke(
+                app,
+                [],
+                input=(
+                    "/service deepseek\n"
+                    "/model deepseek-chat\n"
+                    "/service\n"
+                    "/status\n"
+                    "quit\n"
+                ),
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("已切换当前会话服务商：deepseek", result.output)
+        self.assertIn("已切换当前会话模型：deepseek / deepseek-chat", result.output)
+        self.assertIn("当前服务", result.output)
+        self.assertIn("当前模型", result.output)
+        self.assertIn("deepseek-chat", result.output)
+        self.assertIn("https://api.deepseek.com/v1", result.output)
+
+    def test_runtime_context_uses_configured_service_and_model_at_startup(self) -> None:
+        """
+        测试：启动时应优先使用当前配置中的服务商与模型，而不是固定展示 openai。
+        """
+        cli_runner = CliRunner()
+
+        with (
+            patch.object(settings, "service_name", "deepseek"),
+            patch.object(settings, "openai_model", "deepseek-chat"),
+            patch.object(settings, "openai_base_url", None),
+            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+        ):
+            result = cli_runner.invoke(
+                app,
+                [],
+                input="quit\n",
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("模型服务：deepseek", result.output)
+        self.assertIn("模型名称：deepseek-chat", result.output)
 
     def test_ui_tui_mode_can_launch_tui_entry(self) -> None:
         """
@@ -251,7 +307,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             self.assertEqual(second_result.exit_code, 0)
             self.assertIn("本地配置文件", second_result.output)
             self.assertIn("已保存允许目录", second_result.output)
-            self.assertIn(str(allowed_dir), second_result.output)
+            self.assertIn(str(working_directory), second_result.output)
+            self.assertIn("persisted", second_result.output)
+            self.assertIn("root", second_result.output)
             self.assertIn("允许读取根路径", second_result.output)
 
 

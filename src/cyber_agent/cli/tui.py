@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from rich import box
-from rich.panel import Panel
+from rich.console import RenderableType
 from rich.text import Text
 
-from ..config import settings
 from ..execution_control import ExecutionInterruptedError
 from .branding import (
     STARTUP_ANIMATION_DELAY_SECONDS,
@@ -16,12 +13,18 @@ from .branding import (
     build_startup_frame,
 )
 from .interactive import (
-    build_session_overview,
     build_command_hint_lines,
     get_auto_completion,
-    get_banner_command_summary,
     list_builtin_command_names,
     match_builtin_commands,
+)
+from .render import (
+    build_approval_request_panel,
+    build_approval_result_panel,
+    build_banner_panel,
+    build_chat_message_panel,
+    build_tool_call_panel,
+    build_tool_result_panel,
 )
 from .theme import (
     COMMAND_DESC_STYLE,
@@ -31,9 +34,6 @@ from .theme import (
     PANEL_BORDER,
     ROLE_STYLES,
     SURFACE_BG,
-    SYSTEM_LABEL_STYLE,
-    SYSTEM_VALUE_STYLE,
-    SYSTEM_VALUE_STYLES,
     TEXT_MUTED,
     WINDOW_BG,
 )
@@ -42,7 +42,7 @@ try:
     from textual import work
     from textual.app import App, ComposeResult
     from textual.containers import Container, ScrollableContainer
-    from textual.widgets import Footer, Header, Input, Static
+    from textual.widgets import Input, Static
 
     try:
         from textual.suggester import SuggestFromList
@@ -55,6 +55,15 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 运行环境缺依赖�
 
 
 if TEXTUAL_IMPORT_ERROR is None:
+
+    class RenderableBlock(Static):
+        """用于在聊天区挂载共享 Rich 面板，避免 TUI 重新实现一套样式。"""
+
+        def __init__(self, renderable: RenderableType) -> None:
+            super().__init__()
+            self.renderable = renderable
+            self.update(renderable)
+
 
     class ChatMessage(Static):
         """用于显示聊天消息的富文本气泡。"""
@@ -82,26 +91,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             return bool(self.content.strip())
 
         def _refresh_renderable(self) -> None:
-            style = ROLE_STYLES.get(self.role, ROLE_STYLES["system"])
-            if isinstance(self.content, Text):
-                if self.content.plain.strip():
-                    message_text = self.content.copy()
-                else:
-                    message_text = Text("正在处理...", style=style["text_style"])
-            else:
-                message_text = Text(
-                    self.content.strip() or "正在处理...",
-                    style=style["text_style"],
-                )
-            self.update(
-                Panel(
-                    message_text,
-                    title=style["title"],
-                    border_style=style["border_style"],
-                    box=box.ROUNDED,
-                    padding=(0, 1),
-                )
-            )
+            self.update(build_chat_message_panel(self.role, self.content))
 
 
     class CyberAgentTUI(App):
@@ -153,6 +143,10 @@ if TEXTUAL_IMPORT_ERROR is None:
             margin: 0 0 1 0;
         }}
 
+        RenderableBlock {{
+            margin: 0 0 1 0;
+        }}
+
         #startup-view {{
             display: none;
             layer: overlay;
@@ -189,13 +183,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._startup_timer = None
 
         def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
             yield ScrollableContainer(id="chat-view")
             with Container(id="composer"):
                 yield Static(self._build_composer_title(), id="composer-title")
                 yield self._build_input_widget()
                 yield Static(id="command-hint")
-            yield Footer()
             with Container(id="startup-view"):
                 yield Static(id="startup-panel")
 
@@ -243,21 +235,21 @@ if TEXTUAL_IMPORT_ERROR is None:
 
             self._add_message("user", user_input)
 
-            from .app import capture_builtin_command_output
+            from .app import capture_builtin_command_renderables
 
-            builtin_result, output = capture_builtin_command_output(
+            builtin_result, renderables = capture_builtin_command_renderables(
                 user_input,
                 self.runner,
                 self.runtime_context,
             )
             if builtin_result is False:
-                if output:
-                    self._add_message("system", Text.from_ansi(output))
+                for renderable in renderables:
+                    self._add_renderable(renderable)
                 self.exit()
                 return
             if builtin_result is True:
-                if output:
-                    self._add_message("system", Text.from_ansi(output))
+                for renderable in renderables:
+                    self._add_renderable(renderable)
                 return
 
             self._set_busy(True)
@@ -285,11 +277,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self.call_from_thread(self._set_assistant_content, "正在调用工具...")
                     return
                 if event_type == "tool_call":
-                    formatted = json.dumps(payload, ensure_ascii=False, indent=2)
                     self.call_from_thread(
-                        self._add_message,
-                        "system",
-                        f"工具调用\n{formatted}",
+                        self._add_renderable,
+                        build_tool_call_panel(payload if isinstance(payload, list) else []),
                     )
                     return
                 if event_type == "tool_result":
@@ -299,25 +289,20 @@ if TEXTUAL_IMPORT_ERROR is None:
                     else:
                         content = str(payload)
                     self.call_from_thread(
-                        self._add_message,
-                        "system",
-                        f"工具结果\n{content}",
+                        self._add_renderable,
+                        build_tool_result_panel(content),
                     )
                     return
-                if event_type == "approval_request":
-                    formatted = json.dumps(payload, ensure_ascii=False, indent=2)
+                if event_type == "approval_request" and isinstance(payload, dict):
                     self.call_from_thread(
-                        self._add_message,
-                        "system",
-                        f"审批请求\n{formatted}",
+                        self._add_renderable,
+                        build_approval_request_panel(payload),
                     )
                     return
-                if event_type == "approval_result":
-                    formatted = json.dumps(payload, ensure_ascii=False, indent=2)
+                if event_type == "approval_result" and isinstance(payload, dict):
                     self.call_from_thread(
-                        self._add_message,
-                        "system",
-                        f"审批结果\n{formatted}",
+                        self._add_renderable,
+                        build_approval_result_panel(payload),
                     )
                     return
 
@@ -379,41 +364,14 @@ if TEXTUAL_IMPORT_ERROR is None:
             composer_title.append(" 可查看命令。")
             return composer_title
 
-        def _build_welcome_message(self) -> Text:
-            welcome = Text()
-            welcome.append("Cyber Agent CLI 交互界面\n", style="bold #f8fafc")
-            welcome.append("\n")
-            for item in build_session_overview(
-                mode_value=self.runner.mode.value,
-                approval_policy_value=self.runtime_context["approval_policy"].value,
+        def _build_welcome_panel(self) -> RenderableType:
+            return build_banner_panel(
+                mode=self.runner.mode,
                 service=self.runner.service,
-                model=settings.openai_model,
-                cwd=str(Path.cwd()),
-            ):
-                self._append_system_kv_line(
-                    welcome,
-                    item.label,
-                    item.value,
-                    SYSTEM_VALUE_STYLES.get(item.value_style_key, SYSTEM_VALUE_STYLE),
-                )
-
-            welcome.append("快捷命令", style=SYSTEM_LABEL_STYLE)
-            welcome.append("：", style=SYSTEM_LABEL_STYLE)
-            command_summary = get_banner_command_summary().split("  ")
-            for index, command in enumerate(command_summary):
-                if index > 0:
-                    welcome.append("  ", style=SYSTEM_LABEL_STYLE)
-                welcome.append(command, style=COMMAND_NAME_STYLE)
-            welcome.append("\n")
-
-            welcome.append("命令补全", style=SYSTEM_LABEL_STYLE)
-            welcome.append("：", style=SYSTEM_LABEL_STYLE)
-            welcome.append("输入 ", style=COMMAND_DESC_STYLE)
-            welcome.append("/", style=COMMAND_NAME_STYLE)
-            welcome.append(" 后按 ", style=COMMAND_DESC_STYLE)
-            welcome.append("Tab", style=KEYCAP_STYLE)
-            welcome.append(" 可自动补全。", style=COMMAND_DESC_STYLE)
-            return welcome
+                model=self.runner.model_name,
+                cwd=Path.cwd(),
+                approval_policy=self.runtime_context["approval_policy"],
+            )
 
         def _update_command_hint(self, user_input: str) -> None:
             self.query_one("#command-hint", Static).update(
@@ -453,24 +411,19 @@ if TEXTUAL_IMPORT_ERROR is None:
                     hint.append("\n")
             return hint
 
-        def _append_system_kv_line(
-            self,
-            text: Text,
-            label: str,
-            value: str,
-            value_style: str,
-        ) -> None:
-            text.append(label, style=SYSTEM_LABEL_STYLE)
-            text.append("：", style=SYSTEM_LABEL_STYLE)
-            text.append(value, style=value_style)
-            text.append("\n")
-
         def _add_message(self, role: str, content: str | Text) -> ChatMessage:
             message = ChatMessage(role, content)
             chat_view = self.query_one("#chat-view", ScrollableContainer)
             chat_view.mount(message)
             chat_view.scroll_end(animate=False)
             return message
+
+        def _add_renderable(self, renderable: RenderableType) -> RenderableBlock:
+            block = RenderableBlock(renderable)
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+            chat_view.mount(block)
+            chat_view.scroll_end(animate=False)
+            return block
 
         def _start_startup_animation(self) -> None:
             startup_view = self.query_one("#startup-view", Container)
@@ -498,7 +451,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.query_one("#startup-view", Container).display = False
             self.query_one("#chat-input", Input).focus()
             if show_welcome:
-                self._add_message("system", self._build_welcome_message())
+                self._add_renderable(self._build_welcome_panel())
 
         def _set_assistant_content(self, content: str) -> None:
             if self._active_assistant_message is None:

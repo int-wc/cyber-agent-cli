@@ -60,8 +60,8 @@ SERVICE_NAME=openai
 
 - `OPENAI_API_KEY`：必填。
 - `OPENAI_MODEL`：可选，默认是 `gpt-5.4`。
-- `OPENAI_BASE_URL`：可选，适用于兼容 OpenAI API 的代理服务。
-- `SERVICE_NAME`：当前实现仅支持 `openai`。
+- `OPENAI_BASE_URL`：可选，适用于兼容 OpenAI API 的代理服务；当 `SERVICE_NAME=deepseek` 时，会优先使用内置的 `https://api.deepseek.com/v1`，如需覆盖请在 CLI 中使用 `/service deepseek <基址>` 或在代码侧显式传入基址。
+- `SERVICE_NAME`：可选，默认是 `openai`，当前支持 `openai`、`deepseek` 以及其他手动指定兼容基址的 OpenAI 兼容服务。
 
 ### 3. 启动
 
@@ -192,6 +192,11 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 - `/config`
 - `/config allow-path`
 - `/config allow-path add <目录>`
+- `/service`
+- `/service <服务商>`
+- `/service <服务商> <基址>`
+- `/model`
+- `/model <模型名>`
 - `/allow-path`
 - `/allow-path add <目录>`
 - `/approval`
@@ -205,6 +210,7 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 
 - `/allow-path add <目录>` 只对当前会话生效。
 - `/config allow-path add <目录>` 会把目录写入工作目录下的 `.cyber-agent-cli.json`，供后续会话复用。
+- `/service <服务商>` 和 `/model <模型名>` 只对当前会话生效，不会改写 `.env`。
 
 ## 本地配置
 

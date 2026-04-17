@@ -12,6 +12,7 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_BASE_URL",
+    "SERVICE_NAME",
 )
 
 
@@ -65,6 +66,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.openai_api_key, "test-key")
         self.assertEqual(settings.openai_model, "gpt-5.4")
         self.assertIsNone(settings.openai_base_url)
+        self.assertEqual(settings.get_service(), "openai")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:
         """
@@ -84,6 +86,42 @@ class SettingsTestCase(unittest.TestCase):
             config_module.settings.openai_base_url,
             "https://example.test/v1",
         )
+
+    def test_settings_can_build_deepseek_compatible_kwargs(self) -> None:
+        """
+        测试：切换到 deepseek 时，应保留模型名并自动补出默认兼容基址。
+        """
+        with temporary_config_env(
+            OPENAI_API_KEY="deepseek-key",
+            OPENAI_MODEL="deepseek-chat",
+            SERVICE_NAME="deepseek",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(settings.get_service(), "deepseek")
+        self.assertEqual(kwargs["model"], "deepseek-chat")
+        self.assertEqual(kwargs["api_key"], "deepseek-key")
+        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
+
+    def test_deepseek_default_base_url_should_override_generic_proxy_base_url(self) -> None:
+        """
+        测试：当服务商是 deepseek 时，不应继续沿用 OPENAI_BASE_URL 中的通用代理地址。
+        """
+        with temporary_config_env(
+            OPENAI_API_KEY="deepseek-key",
+            OPENAI_MODEL="deepseek-chat",
+            OPENAI_BASE_URL="https://example.test/v1",
+            SERVICE_NAME="deepseek",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
 
 
 if __name__ == "__main__":

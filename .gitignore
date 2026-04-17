@@ -5,3 +5,4 @@ __pycache__/
 .cyber-agent-cli.json
 .pytest_cache/
 .cyber-agent-cli-sessions/
+.cyber-agent-cli-capabilities/
