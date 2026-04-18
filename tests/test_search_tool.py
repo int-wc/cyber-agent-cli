@@ -3,10 +3,17 @@ from unittest.mock import patch
 
 import httpx
 
+from cyber_agent.config import settings
 from cyber_agent.tools.search import (
+    PLAYWRIGHT_SEARCH_ENGINES,
+    PLAYWRIGHT_TYPE_DELAY_MILLISECONDS,
     SearchResult,
+    _page_looks_blocked,
+    _search_with_single_engine,
     create_search_web_tool,
+    enrich_results_with_page_visits,
     parse_duckduckgo_html_results,
+    search_with_playwright,
 )
 
 
@@ -85,6 +92,273 @@ class AlwaysFailHttpxClient:
         )
 
 
+class MissingLocator:
+    def wait_for(self, **kwargs) -> None:
+        raise RuntimeError("missing")
+
+    def click(self, **kwargs) -> None:
+        raise RuntimeError("missing")
+
+    def fill(self, *args, **kwargs) -> None:
+        raise RuntimeError("missing")
+
+    def type(self, *args, **kwargs) -> None:
+        raise RuntimeError("missing")
+
+    def press(self, *args, **kwargs) -> None:
+        raise RuntimeError("missing")
+
+    def text_content(self, **kwargs):
+        raise RuntimeError("missing")
+
+    def inner_text(self, **kwargs):
+        raise RuntimeError("missing")
+
+    def get_attribute(self, *args, **kwargs):
+        raise RuntimeError("missing")
+
+
+class FakeLocator:
+    def __init__(self, *, text: str = "", attrs: dict[str, str] | None = None, actions: list | None = None):
+        self.text = text
+        self.attrs = attrs or {}
+        self.actions = actions if actions is not None else []
+
+    def wait_for(self, **kwargs) -> None:
+        return None
+
+    def click(self, **kwargs) -> None:
+        self.actions.append(("click",))
+
+    def fill(self, value: str, **kwargs) -> None:
+        self.actions.append(("fill", value))
+
+    def type(self, value: str, delay: int | None = None, **kwargs) -> None:
+        self.actions.append(("type", value, delay))
+
+    def press(self, key: str, **kwargs) -> None:
+        self.actions.append(("press", key))
+
+    def text_content(self, **kwargs):
+        return self.text
+
+    def inner_text(self, **kwargs):
+        return self.text
+
+    def get_attribute(self, name: str, **kwargs):
+        return self.attrs.get(name)
+
+
+class FakeLocatorCollection:
+    def __init__(self, locators: list[FakeLocator] | None = None) -> None:
+        self.locators = locators or []
+
+    @property
+    def first(self):
+        return self.locators[0] if self.locators else MissingLocator()
+
+    def nth(self, index: int):
+        return self.locators[index] if index < len(self.locators) else MissingLocator()
+
+    def count(self) -> int:
+        return len(self.locators)
+
+
+class FakeMouse:
+    def __init__(self, actions: list[tuple]) -> None:
+        self.actions = actions
+
+    def wheel(self, delta_x: int, delta_y: int) -> None:
+        self.actions.append(("wheel", delta_x, delta_y))
+
+
+class FakeSearchPage:
+    def __init__(self, *, engine_name: str = "bing", body_text: str = "search body") -> None:
+        self.engine_name = engine_name
+        self.goto_urls: list[str] = []
+        self.waits: list[int] = []
+        self.input_actions: list[tuple] = []
+        self.load_state_waits: list[str] = []
+        self.scroll_actions: list[tuple] = []
+        self.evaluate_calls: list[str] = []
+        self.url = ""
+        self._title = engine_name.title()
+        self.mouse = FakeMouse(self.scroll_actions)
+        self._locator_map = self._build_locator_map(engine_name, body_text)
+
+    def _build_locator_map(self, engine_name: str, body_text: str) -> dict[str, FakeLocatorCollection]:
+        input_locator = FakeLocator(actions=self.input_actions)
+        locator_map = {
+            "body": FakeLocatorCollection([FakeLocator(text=body_text)]),
+        }
+        if engine_name == "baidu":
+            locator_map.update(
+                {
+                    "textarea[name='wd']": FakeLocatorCollection([input_locator]),
+                    "input[name='wd']": FakeLocatorCollection([input_locator]),
+                    "#content_left": FakeLocatorCollection([FakeLocator(text="results ready")]),
+                    "#content_left > div.result, #content_left > div.result-op": FakeLocatorCollection(
+                        [FakeLocator(text="result card")]
+                    ),
+                    "#content_left > div.result h3 a, #content_left > div.result-op h3 a": FakeLocatorCollection(
+                        [
+                            FakeLocator(
+                                text="Example Baidu Result",
+                                attrs={"href": "https://example.com/baidu"},
+                            ),
+                        ]
+                    ),
+                    "#content_left > div.result .c-abstract, #content_left > div.result-op .c-abstract": (
+                        FakeLocatorCollection([FakeLocator(text="Example baidu summary.")])
+                    ),
+                }
+            )
+            return locator_map
+
+        locator_map.update(
+            {
+                "textarea[name='q']": FakeLocatorCollection([input_locator]),
+                "input[name='q']": FakeLocatorCollection([input_locator]),
+                "#b_results": FakeLocatorCollection([FakeLocator(text="results ready")]),
+                "li.b_algo h2 a": FakeLocatorCollection(
+                    [
+                        FakeLocator(
+                            text="Example Result",
+                            attrs={"href": "https://example.com/article"},
+                        ),
+                    ]
+                ),
+                "li.b_algo .b_caption p": FakeLocatorCollection(
+                    [
+                        FakeLocator(text="Example summary."),
+                    ]
+                ),
+                "li.b_algo": FakeLocatorCollection([FakeLocator(text="result card")]),
+            }
+        )
+        return locator_map
+
+    def goto(self, url: str, **kwargs) -> None:
+        self.goto_urls.append(url)
+        self.url = url
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        self.waits.append(milliseconds)
+
+    def wait_for_load_state(self, state: str, **kwargs) -> None:
+        self.load_state_waits.append(state)
+
+    def evaluate(self, script: str):
+        self.evaluate_calls.append(script)
+        return None
+
+    def title(self) -> str:
+        return self._title
+
+    def locator(self, selector: str):
+        return self._locator_map.get(selector, FakeLocatorCollection([]))
+
+
+class FakeBrowserPage:
+    def __init__(
+        self,
+        *,
+        title: str = "OpenAI Agent Guide",
+        description: str = "OpenAI agent usage guide.",
+        body_text: str = "This page explains how the OpenAI agent works in detail.",
+    ) -> None:
+        self.goto_urls: list[str] = []
+        self.waits: list[int] = []
+        self.load_state_waits: list[str] = []
+        self.scroll_actions: list[tuple] = []
+        self.url = ""
+        self._title = title
+        self.mouse = FakeMouse(self.scroll_actions)
+        self._locator_map = {
+            "meta[name='description']": FakeLocatorCollection([FakeLocator(attrs={"content": description})]),
+            "meta[property='og:description']": FakeLocatorCollection([]),
+            "main": FakeLocatorCollection([FakeLocator(text=body_text)]),
+            "article": FakeLocatorCollection([]),
+            "[role='main']": FakeLocatorCollection([]),
+            "main p": FakeLocatorCollection([FakeLocator(text=body_text)]),
+            "article p": FakeLocatorCollection([]),
+            "p": FakeLocatorCollection([FakeLocator(text=body_text)]),
+            "body": FakeLocatorCollection([FakeLocator(text=body_text)]),
+        }
+
+    def goto(self, url: str, **kwargs) -> None:
+        self.goto_urls.append(url)
+        self.url = url
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        self.waits.append(milliseconds)
+
+    def wait_for_load_state(self, state: str, **kwargs) -> None:
+        self.load_state_waits.append(state)
+
+    def evaluate(self, script: str):
+        return None
+
+    def title(self) -> str:
+        return self._title
+
+    def locator(self, selector: str):
+        return self._locator_map.get(selector, FakeLocatorCollection([]))
+
+    def close(self) -> None:
+        return None
+
+
+class FakeBrowserContext:
+    def __init__(self, page_factory=None) -> None:
+        self.new_page_count = 0
+        self.page_factory = page_factory or (lambda: FakeBrowserPage())
+        self.created_pages: list[FakeBrowserPage] = []
+
+    def new_page(self):
+        self.new_page_count += 1
+        page = self.page_factory()
+        self.created_pages.append(page)
+        return page
+
+    def close(self) -> None:
+        return None
+
+
+class FakeBrowser:
+    def __init__(self, context: FakeBrowserContext | None = None) -> None:
+        self.context_kwargs: dict | None = None
+        self.context = context or FakeBrowserContext()
+
+    def new_context(self, **kwargs):
+        self.context_kwargs = kwargs
+        return self.context
+
+    def close(self) -> None:
+        return None
+
+
+class FakeChromium:
+    def __init__(self) -> None:
+        self.launch_kwargs: dict | None = None
+        self.browser = FakeBrowser()
+
+    def launch(self, **kwargs):
+        self.launch_kwargs = kwargs
+        return self.browser
+
+
+class FakePlaywrightManager:
+    def __init__(self, chromium: FakeChromium) -> None:
+        self.chromium = chromium
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class SearchToolTestCase(unittest.TestCase):
     def test_parse_duckduckgo_html_results_extracts_title_url_and_snippet(self) -> None:
         """
@@ -99,13 +373,122 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertEqual(results[1].title, "Example News")
         self.assertEqual(results[1].url, "https://example.org/news")
 
+    def test_single_engine_search_uses_homepage_and_types_query(self) -> None:
+        """
+        测试：浏览器搜索应先打开首页，再在输入框中逐字输入关键词并提交，而不是直接拼搜索 URL。
+        """
+        page = FakeSearchPage()
+        engine_spec = PLAYWRIGHT_SEARCH_ENGINES[0]
+
+        results, note = _search_with_single_engine(
+            page,
+            engine_spec,
+            "openai agent",
+            3,
+            None,
+        )
+
+        self.assertIsNone(note)
+        self.assertEqual(page.goto_urls, ["https://www.bing.com/"])
+        self.assertIn(("type", "openai agent", PLAYWRIGHT_TYPE_DELAY_MILLISECONDS), page.input_actions)
+        self.assertIn(("press", "Enter"), page.input_actions)
+        self.assertGreaterEqual(len(page.scroll_actions), 1)
+        self.assertEqual(results[0].title, "Example Result")
+        self.assertEqual(results[0].url, "https://example.com/article")
+        self.assertTrue(results[0].relevance_summary)
+
+    def test_page_looks_blocked_detects_body_verification_text(self) -> None:
+        """
+        测试：即使标题未命中，只要正文出现人机验证提示，也会识别为拦截页。
+        """
+        page = FakeSearchPage(body_text="Verify you are human to continue")
+        engine_spec = PLAYWRIGHT_SEARCH_ENGINES[0]
+
+        self.assertTrue(_page_looks_blocked(page, engine_spec))
+
+    def test_baidu_search_waits_for_full_load_before_extracting_results(self) -> None:
+        """
+        测试：Baidu 搜索会等待完整加载状态，并在结果页执行自动滚动。
+        """
+        page = FakeSearchPage(engine_name="baidu")
+        engine_spec = next(engine for engine in PLAYWRIGHT_SEARCH_ENGINES if engine.name == "baidu")
+
+        results, note = _search_with_single_engine(
+            page,
+            engine_spec,
+            "openai agent",
+            3,
+            None,
+        )
+
+        self.assertIsNone(note)
+        self.assertIn("load", page.load_state_waits)
+        self.assertIn("networkidle", page.load_state_waits)
+        self.assertGreaterEqual(len(page.scroll_actions), 1)
+        self.assertEqual(results[0].url, "https://example.com/baidu")
+
+    def test_search_with_playwright_respects_visible_browser_switch(self) -> None:
+        """
+        测试：配置打开显示浏览器时，应以非无头模式启动 Playwright。
+        """
+        chromium = FakeChromium()
+        manager = FakePlaywrightManager(chromium)
+
+        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
+            "cyber_agent.tools.search.sync_playwright",
+            return_value=manager,
+        ), patch(
+            "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
+            (),
+        ), patch(
+            "cyber_agent.tools.search.enrich_results_with_page_visits",
+            return_value=[],
+        ), patch.object(settings, "search_show_browser", True):
+            results, notes = search_with_playwright("example", 3)
+
+        self.assertEqual(results, [])
+        self.assertIn("浏览器模式：可见窗口", notes)
+        self.assertEqual(chromium.launch_kwargs, {"headless": False})
+
+    def test_enrich_results_with_page_visits_marks_page_relevance(self) -> None:
+        """
+        测试：访问真实页面后，会补充标题摘要并给出页面相关性判断。
+        """
+        result = SearchResult(
+            title="Old Title",
+            url="https://example.com/agent",
+            snippet="Old snippet",
+            source_engine="bing",
+        )
+        visit_page = FakeBrowserPage(
+            title="OpenAI Agent Guide",
+            description="OpenAI agent usage guide.",
+            body_text="This page explains how the OpenAI agent works in detail.",
+        )
+        browser_context = FakeBrowserContext(page_factory=lambda: visit_page)
+
+        notes = enrich_results_with_page_visits(
+            browser_context,
+            "openai agent",
+            [result],
+            None,
+            1,
+        )
+
+        self.assertEqual(notes, [])
+        self.assertTrue(result.visited)
+        self.assertEqual(result.title, "OpenAI Agent Guide")
+        self.assertEqual(result.snippet, "OpenAI agent usage guide.")
+        self.assertIn(result.relevance_summary, {"高度相关", "相关"})
+        self.assertGreaterEqual(len(visit_page.scroll_actions), 1)
+
     def test_search_web_tool_formats_ranked_results(self) -> None:
         """
-        测试：搜索工具会返回类似通用搜索引擎的排序结果文本。
+        测试：搜索工具会返回排序后的文本结果。
         """
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", False), patch(
-            "cyber_agent.tools.search.httpx.Client",
-            FakeHttpxClient,
+        with patch("cyber_agent.tools.search.httpx.Client", FakeHttpxClient), patch(
+            "cyber_agent.tools.search.search_with_playwright",
+            return_value=([], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]),
         ):
             search_tool = create_search_web_tool()
             result = search_tool.invoke({"query": "example", "max_results": 2})
@@ -118,11 +501,11 @@ class SearchToolTestCase(unittest.TestCase):
 
     def test_search_web_tool_can_fallback_to_secondary_endpoint(self) -> None:
         """
-        测试：首个搜索端点连接失败时，会自动尝试内置兜底端点。
+        测试：首个 HTTP 端点失败时，会继续尝试备用端点。
         """
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", False), patch(
-            "cyber_agent.tools.search.httpx.Client",
-            FallbackHttpxClient,
+        with patch("cyber_agent.tools.search.httpx.Client", FallbackHttpxClient), patch(
+            "cyber_agent.tools.search.search_with_playwright",
+            return_value=([], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]),
         ):
             search_tool = create_search_web_tool()
             result = search_tool.invoke({"query": "example", "max_results": 2})
@@ -132,23 +515,23 @@ class SearchToolTestCase(unittest.TestCase):
 
     def test_search_web_tool_reports_network_unavailable_clearly(self) -> None:
         """
-        测试：当所有端点都无法访问时，应明确提示外网不可用而不是只返回模糊异常。
+        测试：所有 HTTP 端点都不可用时，应明确提示外网不可用与浏览器搜索回退原因。
         """
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", False), patch(
-            "cyber_agent.tools.search.httpx.Client",
-            AlwaysFailHttpxClient,
+        with patch("cyber_agent.tools.search.httpx.Client", AlwaysFailHttpxClient), patch(
+            "cyber_agent.tools.search.search_with_playwright",
+            return_value=([], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]),
         ):
             search_tool = create_search_web_tool()
             result = search_tool.invoke({"query": "example"})
 
         self.assertIn("当前运行环境可能无法访问外部搜索服务", result)
-        self.assertIn("Playwright unavailable", result)
+        self.assertIn("当前环境未安装 Playwright", result)
         self.assertIn("https://html.duckduckgo.com/html/", result)
         self.assertIn("https://duckduckgo.com/html/", result)
 
     def test_search_web_tool_prefers_playwright_results_when_available(self) -> None:
         """
-        测试：若 Playwright 搜索成功，应优先返回浏览器搜索和访问后的结果。
+        测试：若浏览器搜索成功，应优先返回浏览器搜索与访问后的结果。
         """
         browser_results = [
             SearchResult(
@@ -157,12 +540,13 @@ class SearchToolTestCase(unittest.TestCase):
                 snippet="Visited summary from real page.",
                 source_engine="bing",
                 visited=True,
+                relevance_summary="高度相关",
             )
         ]
 
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
+        with patch(
             "cyber_agent.tools.search.search_with_playwright",
-            return_value=(browser_results, ["bing 返回 3 条候选结果。"]),
+            return_value=(browser_results, ["浏览器模式：可见窗口"]),
         ) as mock_browser_search, patch(
             "cyber_agent.tools.search.search_with_httpx",
         ) as mock_http_search:
@@ -174,32 +558,7 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertIn("Example Browser Result", result)
         self.assertIn("来源: bing", result)
         self.assertIn("已访问: 是", result)
-
-    def test_search_web_tool_falls_back_to_http_when_playwright_returns_no_results(self) -> None:
-        """
-        测试：若浏览器搜索没有拿到可用结果，会自动回退到 HTTP 搜索。
-        """
-        http_results = [
-            SearchResult(
-                title="Fallback Result",
-                url="https://example.com/fallback",
-                snippet="Fallback summary.",
-            )
-        ]
-
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
-            "cyber_agent.tools.search.search_with_playwright",
-            return_value=([], ["google 未解析到可用结果。"]),
-        ), patch(
-            "cyber_agent.tools.search.search_with_httpx",
-            return_value=(http_results, ["已回退到 HTTP 搜索。"], []),
-        ):
-            search_tool = create_search_web_tool()
-            result = search_tool.invoke({"query": "example", "max_results": 1})
-
-        self.assertIn("Fallback Result", result)
-        self.assertIn("google 未解析到可用结果。", result)
-        self.assertIn("已回退到 HTTP 搜索。", result)
+        self.assertIn("页面判断: 高度相关", result)
 
 
 if __name__ == "__main__":

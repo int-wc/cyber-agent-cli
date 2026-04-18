@@ -55,7 +55,10 @@ OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-5.4
 OPENAI_BASE_URL=
 SERVICE_NAME=openai
+SEARCH_SHOW_BROWSER=true
 ```
+
+`SEARCH_SHOW_BROWSER` 默认是 `true`，`search_web` 会弹出真实浏览器窗口，按“打开首页 -> 输入关键词 -> 触发搜索 -> 读取结果 -> 访问结果页”的流程执行。
 
 说明：
 

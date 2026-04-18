@@ -37,6 +37,10 @@ class Settings(BaseSettings):
         default=5,
         validation_alias="SEARCH_RESULT_LIMIT",
     )
+    search_show_browser: bool = Field(
+        default=True,
+        validation_alias="SEARCH_SHOW_BROWSER",
+    )
     max_context_chars: int = Field(
         default=14000,
         validation_alias="MAX_CONTEXT_CHARS",
