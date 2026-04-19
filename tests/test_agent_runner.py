@@ -448,5 +448,26 @@ class AgentRunnerTestCase(unittest.TestCase):
         self.assertIn("测试中拒绝所有写入", response)
 
 
+    def test_runner_can_be_created_without_langchain_openai_until_model_is_used(self) -> None:
+        """
+        测试：缺少 langchain_openai 时，非模型路径仍可初始化运行器，真正调用模型时再报错。
+        """
+        import_error = ModuleNotFoundError("No module named 'langchain_openai'")
+
+        with (
+            patch("cyber_agent.agent.runner.ChatOpenAI", None),
+            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+        ):
+            runner = AgentRunner([])
+
+            self.assertEqual(runner.get_turn_count(), 0)
+            self.assertEqual(runner.get_context_diagnostics()["history_message_count"], 1)
+
+            with self.assertRaises(ModuleNotFoundError) as captured:
+                runner.run("hello", verbose=False)
+
+        self.assertIn("langchain_openai", str(captured.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -62,7 +62,10 @@ def get_default_tools(
 
     tools = [
         scan_port,
-        create_search_web_tool(execution_controller),
+        create_search_web_tool(
+            execution_controller,
+            capability_registry=capability_registry,
+        ),
         create_list_directory_tool(allowed_roots),
         create_read_text_file_tool(allowed_roots),
         create_write_text_file_tool(allowed_roots),

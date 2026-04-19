@@ -13,7 +13,14 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
-from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_openai import ChatOpenAI
+
+    LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
+    ChatOpenAI = None
+    LANGCHAIN_OPENAI_IMPORT_ERROR = exc
 
 from .config import settings
 from .execution_control import ExecutionController, ExecutionInterruptedError
@@ -535,6 +542,10 @@ class CapabilityRegistry:
     def _get_llm(self) -> ChatOpenAI:
         """懒加载用于生成与审计 capability 的模型实例。"""
         if self._llm is None:
+            if ChatOpenAI is None:
+                raise ModuleNotFoundError(
+                    "缺少 `langchain_openai` 依赖，当前环境无法创建 capability 模型客户端。"
+                ) from LANGCHAIN_OPENAI_IMPORT_ERROR
             self._llm = ChatOpenAI(
                 **settings.get_chat_openai_kwargs(
                     self.service_name,
@@ -568,6 +579,10 @@ class CapabilityRegistry:
         if not isinstance(parsed_data, dict):
             raise ValueError("模型返回的 capability 结构必须是 JSON 对象。")
         return parsed_data
+
+    def invoke_json_prompt(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        """对外复用统一的 JSON 模型调用封装。"""
+        return self._invoke_json_prompt(system_prompt, user_prompt)
 
     def _generate_capability_spec(
         self,

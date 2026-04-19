@@ -8,6 +8,7 @@ from cyber_agent.tools.search import (
     PLAYWRIGHT_SEARCH_ENGINES,
     PLAYWRIGHT_TYPE_DELAY_MILLISECONDS,
     SearchResult,
+    _annotate_result_relevance,
     _page_looks_blocked,
     _search_with_single_engine,
     create_search_web_tool,
@@ -119,10 +120,18 @@ class MissingLocator:
 
 
 class FakeLocator:
-    def __init__(self, *, text: str = "", attrs: dict[str, str] | None = None, actions: list | None = None):
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        attrs: dict[str, str] | None = None,
+        actions: list | None = None,
+        children: dict[str, "FakeLocatorCollection"] | None = None,
+    ):
         self.text = text
         self.attrs = attrs or {}
         self.actions = actions if actions is not None else []
+        self.children = children or {}
 
     def wait_for(self, **kwargs) -> None:
         return None
@@ -147,6 +156,9 @@ class FakeLocator:
 
     def get_attribute(self, name: str, **kwargs):
         return self.attrs.get(name)
+
+    def locator(self, selector: str):
+        return self.children.get(selector, FakeLocatorCollection([]))
 
 
 class FakeLocatorCollection:
@@ -179,6 +191,7 @@ class FakeSearchPage:
         self.waits: list[int] = []
         self.input_actions: list[tuple] = []
         self.load_state_waits: list[str] = []
+        self.load_state_calls: list[tuple[str, int | None]] = []
         self.scroll_actions: list[tuple] = []
         self.evaluate_calls: list[str] = []
         self.url = ""
@@ -192,21 +205,27 @@ class FakeSearchPage:
             "body": FakeLocatorCollection([FakeLocator(text=body_text)]),
         }
         if engine_name == "baidu":
+            baidu_result_link = FakeLocator(
+                text="Example Baidu Result",
+                attrs={"href": "https://example.com/baidu"},
+            )
+            baidu_result_card = FakeLocator(
+                text="result card",
+                children={
+                    "h3 a": FakeLocatorCollection([baidu_result_link]),
+                    ".c-abstract": FakeLocatorCollection([FakeLocator(text="Example baidu summary.")]),
+                },
+            )
             locator_map.update(
                 {
                     "textarea[name='wd']": FakeLocatorCollection([input_locator]),
                     "input[name='wd']": FakeLocatorCollection([input_locator]),
                     "#content_left": FakeLocatorCollection([FakeLocator(text="results ready")]),
                     "#content_left > div.result, #content_left > div.result-op": FakeLocatorCollection(
-                        [FakeLocator(text="result card")]
+                        [baidu_result_card]
                     ),
                     "#content_left > div.result h3 a, #content_left > div.result-op h3 a": FakeLocatorCollection(
-                        [
-                            FakeLocator(
-                                text="Example Baidu Result",
-                                attrs={"href": "https://example.com/baidu"},
-                            ),
-                        ]
+                        [baidu_result_link]
                     ),
                     "#content_left > div.result .c-abstract, #content_left > div.result-op .c-abstract": (
                         FakeLocatorCollection([FakeLocator(text="Example baidu summary.")])
@@ -215,25 +234,29 @@ class FakeSearchPage:
             )
             return locator_map
 
+        bing_result_link = FakeLocator(
+            text="Example Result",
+            attrs={"href": "https://example.com/article"},
+        )
+        bing_result_card = FakeLocator(
+            text="result card",
+            children={
+                "h2 a": FakeLocatorCollection([bing_result_link]),
+                ".b_caption p": FakeLocatorCollection([FakeLocator(text="Example summary.")]),
+            },
+        )
         locator_map.update(
             {
                 "textarea[name='q']": FakeLocatorCollection([input_locator]),
                 "input[name='q']": FakeLocatorCollection([input_locator]),
                 "#b_results": FakeLocatorCollection([FakeLocator(text="results ready")]),
-                "li.b_algo h2 a": FakeLocatorCollection(
-                    [
-                        FakeLocator(
-                            text="Example Result",
-                            attrs={"href": "https://example.com/article"},
-                        ),
-                    ]
-                ),
+                "li.b_algo h2 a": FakeLocatorCollection([bing_result_link]),
                 "li.b_algo .b_caption p": FakeLocatorCollection(
                     [
                         FakeLocator(text="Example summary."),
                     ]
                 ),
-                "li.b_algo": FakeLocatorCollection([FakeLocator(text="result card")]),
+                "li.b_algo": FakeLocatorCollection([bing_result_card]),
             }
         )
         return locator_map
@@ -247,6 +270,7 @@ class FakeSearchPage:
 
     def wait_for_load_state(self, state: str, **kwargs) -> None:
         self.load_state_waits.append(state)
+        self.load_state_calls.append((state, kwargs.get("timeout")))
 
     def evaluate(self, script: str):
         self.evaluate_calls.append(script)
@@ -257,6 +281,9 @@ class FakeSearchPage:
 
     def locator(self, selector: str):
         return self._locator_map.get(selector, FakeLocatorCollection([]))
+
+    def close(self) -> None:
+        return None
 
 
 class FakeBrowserPage:
@@ -270,6 +297,7 @@ class FakeBrowserPage:
         self.goto_urls: list[str] = []
         self.waits: list[int] = []
         self.load_state_waits: list[str] = []
+        self.load_state_calls: list[tuple[str, int | None]] = []
         self.scroll_actions: list[tuple] = []
         self.url = ""
         self._title = title
@@ -295,6 +323,7 @@ class FakeBrowserPage:
 
     def wait_for_load_state(self, state: str, **kwargs) -> None:
         self.load_state_waits.append(state)
+        self.load_state_calls.append((state, kwargs.get("timeout")))
 
     def evaluate(self, script: str):
         return None
@@ -359,6 +388,18 @@ class FakePlaywrightManager:
         return False
 
 
+class FakeCapabilityRegistry:
+    def __init__(self, response: dict | Exception) -> None:
+        self.response = response
+        self.calls: list[tuple[str, str]] = []
+
+    def invoke_json_prompt(self, system_prompt: str, user_prompt: str) -> dict:
+        self.calls.append((system_prompt, user_prompt))
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
 class SearchToolTestCase(unittest.TestCase):
     def test_parse_duckduckgo_html_results_extracts_title_url_and_snippet(self) -> None:
         """
@@ -406,6 +447,29 @@ class SearchToolTestCase(unittest.TestCase):
 
         self.assertTrue(_page_looks_blocked(page, engine_spec))
 
+    def test_single_engine_search_prefers_card_local_extraction(self) -> None:
+        """
+        测试：当全局选择器缺失时，仍可从结果卡片内部抽取标题、链接和摘要。
+        """
+        page = FakeSearchPage()
+        page._locator_map["li.b_algo h2 a"] = FakeLocatorCollection([])
+        page._locator_map["li.b_algo .b_caption p"] = FakeLocatorCollection([])
+        engine_spec = PLAYWRIGHT_SEARCH_ENGINES[0]
+
+        results, note = _search_with_single_engine(
+            page,
+            engine_spec,
+            "openai agent",
+            3,
+            None,
+        )
+
+        self.assertIsNone(note)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "Example Result")
+        self.assertEqual(results[0].url, "https://example.com/article")
+        self.assertEqual(results[0].snippet, "Example summary.")
+
     def test_baidu_search_waits_for_full_load_before_extracting_results(self) -> None:
         """
         测试：Baidu 搜索会等待完整加载状态，并在结果页执行自动滚动。
@@ -424,8 +488,25 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertIsNone(note)
         self.assertIn("load", page.load_state_waits)
         self.assertIn("networkidle", page.load_state_waits)
+        self.assertIn(("load", 9000), page.load_state_calls)
+        self.assertIn(("networkidle", 9000), page.load_state_calls)
         self.assertGreaterEqual(len(page.scroll_actions), 1)
         self.assertEqual(results[0].url, "https://example.com/baidu")
+
+    def test_annotate_result_relevance_handles_chinese_query_terms(self) -> None:
+        """
+        测试：中文查询即使没有空格，也能识别标题中的相关词片段。
+        """
+        result = SearchResult(
+            title="网络与安全实践",
+            url="https://example.com/security",
+            snippet="介绍攻防和加固方法。",
+        )
+
+        _annotate_result_relevance("网络安全", result)
+
+        self.assertGreater(result.relevance_score, 0)
+        self.assertIn(result.relevance_summary, {"高度相关", "相关", "弱相关，建议人工复核"})
 
     def test_search_with_playwright_respects_visible_browser_switch(self) -> None:
         """
@@ -449,6 +530,78 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertEqual(results, [])
         self.assertIn("浏览器模式：可见窗口", notes)
         self.assertEqual(chromium.launch_kwargs, {"headless": False})
+
+    def test_search_with_playwright_uses_model_relevance_when_registry_available(self) -> None:
+        """
+        测试：若提供模型能力注册器，浏览器搜索结果会升级为模型相关性判定。
+        """
+        chromium = FakeChromium()
+        page_sequence = iter([FakeSearchPage(), FakeBrowserPage()])
+        chromium.browser = FakeBrowser(
+            context=FakeBrowserContext(page_factory=lambda: next(page_sequence))
+        )
+        manager = FakePlaywrightManager(chromium)
+        capability_registry = FakeCapabilityRegistry(
+            {
+                "results": [
+                    {
+                        "index": 1,
+                        "label": "高度相关",
+                        "score": 96,
+                        "reason": "页面标题、摘要和正文都直接回答查询。",
+                    }
+                ]
+            }
+        )
+
+        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
+            "cyber_agent.tools.search.sync_playwright",
+            return_value=manager,
+        ), patch(
+            "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
+            (PLAYWRIGHT_SEARCH_ENGINES[0],),
+        ):
+            results, notes = search_with_playwright(
+                "openai agent",
+                1,
+                capability_registry=capability_registry,
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].relevance_summary, "高度相关")
+        self.assertEqual(results[0].relevance_source, "model")
+        self.assertEqual(results[0].relevance_reason, "页面标题、摘要和正文都直接回答查询。")
+        self.assertIn("已使用模型完成 1 条结果的相关性判定。", notes)
+        self.assertEqual(len(capability_registry.calls), 1)
+
+    def test_search_with_playwright_falls_back_to_rule_relevance_when_model_fails(self) -> None:
+        """
+        测试：模型相关性判定失败时，会保留规则判定并给出回退说明。
+        """
+        chromium = FakeChromium()
+        page_sequence = iter([FakeSearchPage(), FakeBrowserPage()])
+        chromium.browser = FakeBrowser(
+            context=FakeBrowserContext(page_factory=lambda: next(page_sequence))
+        )
+        manager = FakePlaywrightManager(chromium)
+        capability_registry = FakeCapabilityRegistry(RuntimeError("model unavailable"))
+
+        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
+            "cyber_agent.tools.search.sync_playwright",
+            return_value=manager,
+        ), patch(
+            "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
+            (PLAYWRIGHT_SEARCH_ENGINES[0],),
+        ):
+            results, notes = search_with_playwright(
+                "openai agent",
+                1,
+                capability_registry=capability_registry,
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].relevance_source, "rule")
+        self.assertTrue(any("模型相关性判定失败" in note for note in notes))
 
     def test_enrich_results_with_page_visits_marks_page_relevance(self) -> None:
         """
@@ -541,6 +694,8 @@ class SearchToolTestCase(unittest.TestCase):
                 source_engine="bing",
                 visited=True,
                 relevance_summary="高度相关",
+                relevance_source="model",
+                relevance_reason="页面内容直接回答了查询问题。",
             )
         ]
 
@@ -558,7 +713,8 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertIn("Example Browser Result", result)
         self.assertIn("来源: bing", result)
         self.assertIn("已访问: 是", result)
-        self.assertIn("页面判断: 高度相关", result)
+        self.assertIn("页面判断: 高度相关（模型）", result)
+        self.assertIn("判定依据: 页面内容直接回答了查询问题。", result)
 
 
 if __name__ == "__main__":

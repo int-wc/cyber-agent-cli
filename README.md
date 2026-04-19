@@ -110,6 +110,13 @@ cyber-agent --mode authorized --allow-path ./labs --approval-policy auto
 cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 ```
 
+### 启动 webhook 移动端桥接
+
+```bash
+cyber-agent webhook example-config webhook-routes.json
+cyber-agent --mode authorized --approval-policy never webhook serve --config webhook-routes.json --port 8787
+```
+
 ## 运行模式
 
 ### `standard`
@@ -173,7 +180,15 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 - `cyber-agent chat`：进入交互模式，或通过 `--message/-m` 执行单轮对话。
 - `cyber-agent run <message>`：执行单轮对话。
 - `cyber-agent tools`：查看当前默认启用的工具列表。
+- `cyber-agent history`：列出当前工作目录下的历史会话。
+- `cyber-agent history show <会话ID>`：查看指定历史会话内容。
+- `cyber-agent history search <关键词>`：按关键词检索历史会话。
+- `cyber-agent history export <会话ID> [路径]`：导出历史会话为 Markdown 或 JSON。
+- `cyber-agent webhook example-config [路径]`：输出 webhook 路由示例配置。
+- `cyber-agent webhook serve`：启动 webhook HTTP 服务，接入飞书、钉钉、企微、邮件等移动端桥接。
 - `cyber-agent doctor`：检查运行依赖、配置、允许路径和工具注册状态。
+- `cyber-agent doctor --json`：以 JSON 输出诊断结果，便于脚本和 CI 使用。
+- `cyber-agent version`：输出当前 CLI 版本。
 
 常用选项：
 
@@ -182,6 +197,7 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 - `--tool name=absolute_path`
 - `--approval-policy prompt|auto|never`
 - `--ui auto|tui|cli`
+- `--version`
 
 ## 交互命令
 
@@ -189,7 +205,14 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 
 - `/help`
 - `/tools`
+- `/history`
+- `/history show <会话ID>`
+- `/history load <会话ID>`
+- `/history search <关键词>`
+- `/history export <会话ID> [路径]`
+- `/doctor`
 - `/status`
+- `/version`
 - `/mode`
 - `/mode standard`
 - `/mode authorized`
@@ -215,6 +238,61 @@ cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 - `/allow-path add <目录>` 只对当前会话生效。
 - `/config allow-path add <目录>` 会把目录写入工作目录下的 `.cyber-agent-cli.json`，供后续会话复用。
 - `/service <服务商>` 和 `/model <模型名>` 只对当前会话生效，不会改写 `.env`。
+- `/history export <会话ID> [路径]` 默认导出为 Markdown；若路径以 `.json` 结尾，则导出结构化 JSON。
+
+## Webhook 移动交互
+
+项目现在提供一个最小可运行的 webhook 网关，用于把第三方移动端消息桥接到当前智能体会话。
+
+当前内置支持的 provider：
+
+- `feishu`
+- `dingtalk`
+- `wecom`
+- `email`
+
+默认路由如下：
+
+- `/webhook/feishu`
+- `/webhook/dingtalk`
+- `/webhook/wecom`
+- `/webhook/email`
+
+你可以先生成示例配置：
+
+```bash
+cyber-agent webhook example-config webhook-routes.json
+```
+
+示例配置结构：
+
+```json
+{
+  "routes": [
+    {
+      "provider": "feishu",
+      "path": "/webhook/feishu",
+      "secret": "replace-with-shared-secret",
+      "reply_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/your-feishu-webhook"
+    }
+  ]
+}
+```
+
+启动服务：
+
+```bash
+cyber-agent --mode authorized --approval-policy never webhook serve --config webhook-routes.json --host 0.0.0.0 --port 8787
+```
+
+补充说明：
+
+- webhook 场景下不支持交互式审批；若使用 `prompt`，高风险工具会被拒绝。
+- `dingtalk` 会优先使用请求体中的 `sessionWebhook` 回包；若没有，则尝试同步 HTTP 响应。
+- `feishu`、`wecom`、`email` 默认支持把回复投递到配置中的 `reply_webhook_url`；若未配置，则会把建议回包作为 HTTP 响应 JSON 返回给上游桥接层。
+- `wecom` 当前仅支持经网关解密后的 JSON 回调；官方 XML 加密回调仍需结合真实企业配置补充验签与解密。
+- `email` 当前默认支持 JSON 和 `application/x-www-form-urlencoded` 两类 webhook；若邮件服务使用 `multipart/form-data`，需要按真实供应商字段继续补充。
+- webhook 会按“provider + 会话键”自动复用本地历史会话，因此同一聊天线程会继承上下文。
 
 ## 本地配置
 
@@ -268,6 +346,12 @@ tests/
 ## 开发与测试
 
 运行测试：
+
+```bash
+pytest -q
+```
+
+如需直接走标准库入口，也可以在仓库根目录运行：
 
 ```bash
 python -m unittest discover tests -v

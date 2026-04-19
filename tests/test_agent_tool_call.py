@@ -1,5 +1,6 @@
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -73,6 +74,33 @@ class AgentToolCallTestCase(unittest.TestCase):
         self.assertEqual(messages[2].content, "processed:hello-tool")
         self.assertIsInstance(messages[3], AIMessage)
         self.assertEqual(messages[3].content, "final:processed:hello-tool")
+
+    def test_create_agent_graph_fallback_runner_can_execute_tool_chain(self) -> None:
+        """
+        测试：即使禁用 LangGraph，也应由内置降级执行器完成工具调用链路。
+        """
+        tool_inputs: list[str] = []
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """回显文本，便于验证降级执行器是否真的执行了工具。"""
+            tool_inputs.append(text)
+            return f"processed:{text}"
+
+        llm = FakeToolCallingLLM()
+        with patch("cyber_agent.agent.core.LANGGRAPH_AVAILABLE", False):
+            app = create_agent_graph(llm, [echo_tool])
+
+        final_state = app.invoke({"messages": [HumanMessage(content="hello-fallback")]})
+        messages = final_state["messages"]
+
+        self.assertEqual(tool_inputs, ["hello-fallback"])
+        self.assertIsInstance(messages[0], HumanMessage)
+        self.assertIsInstance(messages[1], AIMessage)
+        self.assertIsInstance(messages[2], ToolMessage)
+        self.assertEqual(messages[2].content, "processed:hello-fallback")
+        self.assertIsInstance(messages[3], AIMessage)
+        self.assertEqual(messages[3].content, "final:processed:hello-fallback")
 
 
 if __name__ == "__main__":

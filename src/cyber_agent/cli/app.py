@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.tools import BaseTool
 from rich.console import Console, RenderableType
 
+from .. import __version__
 from ..agent.approval import (
     ApprovalDecision,
     ApprovalPolicy,
@@ -31,10 +32,12 @@ from ..local_config import (
 )
 from ..session_store import (
     create_session_id,
+    export_session_history,
     get_session_storage_dir,
     list_stored_sessions,
     load_session_history,
     save_session_history,
+    search_stored_sessions,
 )
 from ..tools import (
     describe_allowed_roots,
@@ -44,6 +47,7 @@ from ..tools import (
     resolve_allowed_roots,
     resolve_command_registry,
 )
+from .doctor import build_doctor_payload, build_doctor_rows
 from .interactive import (
     EXIT_COMMANDS,
     InteractionUiMode,
@@ -51,16 +55,44 @@ from .interactive import (
     parse_interaction_ui_mode,
 )
 from .render import CliRenderer
+from .webhook import (
+    DEFAULT_WEBHOOK_HOST,
+    DEFAULT_WEBHOOK_PORT,
+    DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
+    SUPPORTED_WEBHOOK_PROVIDERS,
+    build_default_webhook_routes,
+    build_webhook_example_config,
+    load_webhook_routes_from_file,
+    serve_webhook_gateway,
+)
 
 app = typer.Typer(
     add_completion=False,
     help="一个支持工具调用的命令行智能体原型。",
 )
+history_app = typer.Typer(
+    add_completion=False,
+    help="查看、检索与导出当前工作目录下的历史会话。",
+)
+webhook_app = typer.Typer(
+    add_completion=False,
+    help="通过 webhook 接入飞书、钉钉、企微、邮件等移动端消息桥接。",
+)
+app.add_typer(history_app, name="history")
+app.add_typer(webhook_app, name="webhook")
 
 TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 renderer = CliRenderer()
 _cli_prompt_session = None
 _prompt_toolkit_disabled = False
+
+
+def _print_version_and_exit(value: bool) -> None:
+    """处理全局 --version 选项，便于脚本和排障快速查看版本。"""
+    if not value:
+        return
+    typer.echo(f"cyber-agent-cli {__version__}")
+    raise typer.Exit()
 
 
 class BuiltinCommandCaptureRenderer(CliRenderer):
@@ -322,6 +354,18 @@ def print_status(
             ("已注册外部工具", registered_tool_lines),
             ("动态能力", capability_lines),
         ]
+    )
+
+
+def print_doctor_report(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """输出更接近真实环境检查的 doctor 诊断结果。"""
+    cli_renderer.print_status(
+        build_doctor_rows(runner, runtime_context),
+        title="运行诊断",
     )
 
 
@@ -594,7 +638,37 @@ def print_history_list(
             detail_lines.append(f"来源: {summary.source_session_id}")
         rows.append((summary.session_id, "\n".join(detail_lines)))
 
-    cli_renderer.print_status(rows)
+    cli_renderer.print_status(rows, title="历史会话")
+
+
+def print_history_search_results(
+    query: str,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """按关键词检索历史会话，便于从长会话中快速定位线索。"""
+    search_results = search_stored_sessions(query)
+    if not search_results:
+        cli_renderer.print_info(f"未检索到包含关键词 `{query}` 的历史会话。")
+        return
+
+    rows: list[tuple[str, str]] = []
+    for result in search_results:
+        detail_lines = [
+            f"更新时间: {result.updated_at}",
+            (
+                f"模式: {result.mode} | 审批: {result.approval_policy}"
+                f" | 命中消息: {result.matched_message_count}"
+            ),
+            f"标题: {result.title}",
+        ]
+        if result.source_session_id:
+            detail_lines.append(f"来源: {result.source_session_id}")
+        if result.excerpts:
+            detail_lines.append("命中片段:")
+            detail_lines.extend(result.excerpts)
+        rows.append((result.session_id, "\n".join(detail_lines)))
+
+    cli_renderer.print_status(rows, title=f"历史检索: {query}")
 
 
 def show_history_session(
@@ -646,6 +720,17 @@ def load_history_session_into_runner(
         f"已加载历史会话：{stored_session.summary.session_id}。"
         "后续继续对话时会保存为新的会话副本。"
     )
+
+
+def export_history_session(
+    session_id: str,
+    raw_output_path: str | None,
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """导出指定历史会话为更适合排查的 Markdown 或 JSON 文件。"""
+    target_path = Path(raw_output_path).expanduser() if raw_output_path else None
+    exported_path = export_session_history(session_id, output_path=target_path)
+    cli_renderer.print_info(f"已导出历史会话：{session_id} -> {exported_path}")
 
 
 def request_running_task_stop(
@@ -969,10 +1054,43 @@ def handle_builtin_command(
             except ValueError as exc:
                 cli_renderer.print_error(str(exc))
             return True
+        if normalized_history_remainder.startswith("search "):
+            search_query = history_remainder[7:].strip()
+            if not search_query:
+                cli_renderer.print_error("请提供要检索的关键词。")
+                return True
+            try:
+                print_history_search_results(search_query, cli_renderer)
+            except ValueError as exc:
+                cli_renderer.print_error(str(exc))
+            return True
+        if normalized_history_remainder.startswith("export "):
+            export_remainder = history_remainder[7:].strip()
+            session_parts = export_remainder.split(maxsplit=1)
+            session_id = session_parts[0].strip() if session_parts else ""
+            raw_output_path = session_parts[1].strip() if len(session_parts) == 2 else None
+            if not session_id:
+                cli_renderer.print_error("请提供要导出的会话 ID。")
+                return True
+            try:
+                export_history_session(
+                    session_id,
+                    raw_output_path,
+                    cli_renderer,
+                )
+            except ValueError as exc:
+                cli_renderer.print_error(str(exc))
+            return True
         cli_renderer.print_error("不支持的 /history 子命令。")
+        return True
+    if normalized_input == "/doctor":
+        print_doctor_report(runner, runtime_context, cli_renderer)
         return True
     if normalized_input == "/status":
         print_status(runner, runtime_context, cli_renderer)
+        return True
+    if normalized_input == "/version":
+        cli_renderer.print_info(f"cyber-agent-cli {__version__}")
         return True
     if normalized_input == "/config":
         print_local_config(runtime_context, cli_renderer)
@@ -1242,6 +1360,13 @@ def prompt_chat_input() -> str:
 @app.callback(invoke_without_command=True)
 def main_callback(
     ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_print_version_and_exit,
+        is_eager=True,
+        help="显示当前 CLI 版本并退出。",
+    ),
     mode: str = typer.Option(
         AgentMode.STANDARD.value,
         "--mode",
@@ -1313,6 +1438,9 @@ def chat(
                 event_handler=render_agent_event,
                 approval_handler=create_approval_handler(runtime_context),
             )
+        except ModuleNotFoundError as exc:
+            renderer.print_error(f"运行失败：{exc}")
+            raise typer.Exit(code=1) from exc
         finally:
             persist_runtime_session(runner, runtime_context)
         return
@@ -1336,6 +1464,9 @@ def run(
             event_handler=render_agent_event,
             approval_handler=create_approval_handler(runtime_context),
         )
+    except ModuleNotFoundError as exc:
+        renderer.print_error(f"运行失败：{exc}")
+        raise typer.Exit(code=1) from exc
     finally:
         persist_runtime_session(runner, runtime_context)
 
@@ -1349,14 +1480,171 @@ def tools(ctx: typer.Context) -> None:
     print_tools(runner)
 
 
-@app.command()
-def doctor(ctx: typer.Context) -> None:
+@history_app.callback(invoke_without_command=True)
+def history_callback(ctx: typer.Context) -> None:
+    """默认列出当前工作目录下的历史会话。"""
+    if ctx.invoked_subcommand is not None:
+        return
+    print_history_list(ctx.obj["runtime_context"])
+
+
+@history_app.command("show")
+def history_show(
+    ctx: typer.Context,
+    session_id: str = typer.Argument(..., help="要查看的历史会话 ID。"),
+) -> None:
+    """
+    显示指定历史会话的完整内容。
+    """
+    show_history_session(session_id)
+
+
+@history_app.command("search")
+def history_search(
+    ctx: typer.Context,
+    query: str = typer.Argument(..., help="用于检索历史会话的关键词。"),
+) -> None:
+    """
+    按关键词检索当前工作目录下的历史会话。
+    """
+    print_history_search_results(query)
+
+
+@history_app.command("export")
+def history_export(
+    ctx: typer.Context,
+    session_id: str = typer.Argument(..., help="要导出的历史会话 ID。"),
+    output_path: str | None = typer.Argument(
+        None,
+        help="导出目标路径；省略时默认导出到历史会话目录。",
+    ),
+) -> None:
+    """
+    将指定历史会话导出为 Markdown 或 JSON 文件。
+    """
+    export_history_session(session_id, output_path)
+
+
+@webhook_app.command("example-config")
+def webhook_example_config(
+    output_path: str | None = typer.Argument(
+        None,
+        help="可选的输出文件路径；省略时直接打印到标准输出。",
+    ),
+) -> None:
+    """
+    输出 webhook 路由示例配置，便于对接第三方平台或中继网关。
+    """
+    serialized_config = json.dumps(
+        build_webhook_example_config(),
+        ensure_ascii=False,
+        indent=2,
+    )
+    if output_path is None:
+        typer.echo(serialized_config)
+        return
+
+    resolved_output_path = Path(output_path).expanduser().resolve()
+    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output_path.write_text(serialized_config + "\n", encoding="utf-8")
+    renderer.print_info(f"已写出 webhook 示例配置：{resolved_output_path}")
+
+
+@webhook_app.command("serve")
+def webhook_serve(
+    ctx: typer.Context,
+    host: str = typer.Option(
+        DEFAULT_WEBHOOK_HOST,
+        "--host",
+        help="Webhook HTTP 服务监听地址。",
+    ),
+    port: int = typer.Option(
+        DEFAULT_WEBHOOK_PORT,
+        "--port",
+        help="Webhook HTTP 服务监听端口。",
+    ),
+    providers: list[str] | None = typer.Option(
+        None,
+        "--provider",
+        help=(
+            "使用默认路由时启用的第三方平台，可重复传入；"
+            f"可选值：{', '.join(SUPPORTED_WEBHOOK_PROVIDERS)}。"
+        ),
+    ),
+    config_path: str | None = typer.Option(
+        None,
+        "--config",
+        help="Webhook JSON 配置文件路径；提供后优先使用配置文件中的 routes。",
+    ),
+    storage_dir: str | None = typer.Option(
+        None,
+        "--storage-dir",
+        help="Webhook 会话历史落盘使用的工作根目录；省略时默认使用当前工作目录。",
+    ),
+    reply_timeout_seconds: float = typer.Option(
+        DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
+        "--reply-timeout-seconds",
+        help="向第三方 reply webhook 回包时的超时时间（秒）。",
+    ),
+) -> None:
+    """
+    启动 webhook HTTP 服务，将第三方消息桥接到当前智能体会话。
+    """
+    runtime_context = ctx.obj["runtime_context"]
+    if config_path is not None:
+        routes = load_webhook_routes_from_file(config_path)
+    else:
+        routes = build_default_webhook_routes(providers)
+
+    resolved_storage_dir = (
+        Path(storage_dir).expanduser().resolve()
+        if storage_dir is not None
+        else None
+    )
+    serve_webhook_gateway(
+        host,
+        port,
+        routes,
+        runtime_context,
+        create_runner,
+        cli_renderer=renderer,
+        base_dir=resolved_storage_dir,
+        reply_timeout_seconds=reply_timeout_seconds,
+    )
+
+
+@app.command(name="doctor")
+def doctor(
+    ctx: typer.Context,
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="以 JSON 输出诊断结果，便于脚本和 CI 使用。",
+    ),
+) -> None:
     """
     检查当前 CLI 运行所依赖的关键配置。
     """
     runtime_context = ctx.obj["runtime_context"]
     runner = create_runner(runtime_context)
-    print_status(runner, runtime_context)
+    if json_output:
+        typer.echo(
+            json.dumps(
+                build_doctor_payload(runner, runtime_context),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    print_doctor_report(runner, runtime_context)
+
+
+@app.command()
+def version() -> None:
+    """
+    输出当前 CLI 版本。
+    """
+    typer.echo(f"cyber-agent-cli {__version__}")
 
 
 def main() -> None:

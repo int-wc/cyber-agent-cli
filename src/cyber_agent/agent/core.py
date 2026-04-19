@@ -1,39 +1,116 @@
-# src/cyber_agent/agent/core.py
+from __future__ import annotations
+
+import json
 import operator
-from typing import List, Annotated, TypedDict
-from langgraph.graph import StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_core.messages import HumanMessage, AIMessage
+from typing import Annotated, Any, TypedDict
 
-# 1. 定义状态 (State)：用于在图的节点间传递数据
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.tools import BaseTool
+
+try:
+    from langgraph.graph import StateGraph
+    from langgraph.prebuilt import ToolNode, tools_condition
+
+    LANGGRAPH_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - 是否安装依赖由运行环境决定
+    StateGraph = None
+    ToolNode = None
+    tools_condition = None
+    LANGGRAPH_AVAILABLE = False
+
+MAX_FALLBACK_TOOL_ROUNDS = 24
+
+
 class AgentState(TypedDict):
-    messages: Annotated[List[HumanMessage | AIMessage], operator.add]
+    """用于在图节点之间传递消息列表。"""
 
-# 2. 定义节点 (Nodes)：
-#    - `agent`节点：调用LLM，让它决定下一步做什么（调用工具或直接回答）
-def agent(state: AgentState, llm, tools):
+    messages: Annotated[list[BaseMessage], operator.add]
+
+
+def agent(state: AgentState, llm: Any, tools: list[BaseTool]) -> dict[str, list[AIMessage]]:
+    """调用模型，让其决定是直接回复还是发起工具调用。"""
     llm_with_tools = llm.bind_tools(tools)
     response = llm_with_tools.invoke(state["messages"])
     return {"messages": [response]}
 
-#    - `tools`节点：执行LLM选择的具体工具
-# LangGraph提供了一个预制的`ToolNode`，可以自动处理工具调用
 
-# 3. 构建图 (Graph)
-def create_agent_graph(llm, tools):
-    # 初始化图
+def _normalize_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
+    """兼容字典和 JSON 字符串两种工具参数格式。"""
+    raw_args = tool_call.get("args", {})
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        stripped_args = raw_args.strip()
+        if not stripped_args:
+            return {}
+        parsed_args = json.loads(stripped_args)
+        if not isinstance(parsed_args, dict):
+            raise ValueError("工具参数必须是 JSON 对象。")
+        return parsed_args
+    raise ValueError("工具参数格式无效，必须是对象或 JSON 字符串。")
+
+
+class _FallbackCompiledGraph:
+    """LangGraph 不可用时的最小执行器，保证基础工具链路仍可验证。"""
+
+    def __init__(self, llm: Any, tools: list[BaseTool]) -> None:
+        self._llm = llm
+        self._tools = list(tools)
+        self._tool_registry = {tool.name: tool for tool in tools}
+
+    def invoke(self, state: AgentState) -> AgentState:
+        """模拟 agent -> tool -> agent 的循环，直到模型返回最终文本。"""
+        messages = list(state.get("messages", []))
+        if not messages:
+            raise ValueError("初始状态缺少 messages。")
+
+        for _ in range(MAX_FALLBACK_TOOL_ROUNDS):
+            ai_message = agent({"messages": messages}, self._llm, self._tools)["messages"][0]
+            messages.append(ai_message)
+
+            tool_calls = list(ai_message.tool_calls or [])
+            if not tool_calls:
+                return {"messages": messages}
+
+            for tool_call in tool_calls:
+                messages.append(self._invoke_tool(tool_call))
+
+        raise RuntimeError(
+            "工具调用轮数超过降级执行器的安全上限，"
+            f"当前已停止在 {MAX_FALLBACK_TOOL_ROUNDS} 轮。"
+        )
+
+    def _invoke_tool(self, tool_call: dict[str, Any]) -> ToolMessage:
+        """执行单次工具调用，并统一返回 ToolMessage。"""
+        tool_name = str(tool_call.get("name", "")) or "unknown"
+        tool_call_id = str(tool_call.get("id", ""))
+        tool = self._tool_registry.get(tool_name)
+        if tool is None:
+            tool_result = f"❌ 未知工具：{tool_name}"
+        else:
+            try:
+                tool_result = str(tool.invoke(_normalize_tool_args(tool_call)))
+            except ValueError as exc:
+                tool_result = f"❌ 工具参数错误：{exc}"
+            except Exception as exc:  # noqa: BLE001 - 需要把真实工具错误回传到消息链
+                tool_result = f"❌ 工具执行异常：{exc}"
+
+        return ToolMessage(
+            content=tool_result,
+            name=tool_name,
+            tool_call_id=tool_call_id,
+        )
+
+
+def create_agent_graph(llm: Any, tools: list[BaseTool]):
+    """优先使用 LangGraph；缺依赖时回退到内置最小执行器。"""
+    if not LANGGRAPH_AVAILABLE or StateGraph is None or ToolNode is None or tools_condition is None:
+        return _FallbackCompiledGraph(llm, tools)
+
     workflow = StateGraph(AgentState)
-
-    # 添加节点
     workflow.add_node("agent", lambda state: agent(state, llm, tools))
     workflow.add_node("tools", ToolNode(tools))
-
-    # 添加边 (Edges)：定义节点间的流转逻辑
-    workflow.set_entry_point("agent")  # 从`agent`节点开始
-    # 添加条件边：`agent`节点执行后，是去`tools`节点还是直接结束(END)
+    workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", tools_condition)
-    # `tools`节点执行完后，再回到`agent`节点，形成循环
     workflow.add_edge("tools", "agent")
-
-    # 编译图，生成可执行的App
     return workflow.compile()

@@ -123,6 +123,44 @@ class SettingsTestCase(unittest.TestCase):
 
         self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
 
+    def test_package_root_import_should_not_eagerly_import_heavy_submodules(self) -> None:
+        """
+        测试：导入 cyber_agent 包根模块时，不应立刻加载 CLI 和搜索等重模块。
+        """
+        module_names = (
+            "cyber_agent",
+            "cyber_agent.agent",
+            "cyber_agent.agent.mode",
+            "cyber_agent.cli.app",
+            "cyber_agent.tools",
+            "cyber_agent.tools.search",
+            "cyber_agent.capability_registry",
+        )
+        original_modules = {
+            module_name: sys.modules.get(module_name)
+            for module_name in module_names
+        }
+
+        try:
+            with temporary_config_env(OPENAI_API_KEY="lazy-import-key"):
+                for module_name in module_names:
+                    sys.modules.pop(module_name, None)
+
+                package_module = importlib.import_module("cyber_agent")
+
+            self.assertEqual(package_module.__version__, "0.1.0")
+            self.assertNotIn("cyber_agent.cli.app", sys.modules)
+            self.assertNotIn("cyber_agent.tools.search", sys.modules)
+            self.assertNotIn("cyber_agent.capability_registry", sys.modules)
+
+            self.assertEqual(package_module.AgentMode.__name__, "AgentMode")
+            self.assertIn("cyber_agent.agent.mode", sys.modules)
+        finally:
+            for module_name in module_names:
+                sys.modules.pop(module_name, None)
+            for module_name, module in original_modules.items():
+                if module is not None:
+                    sys.modules[module_name] = module
 
 if __name__ == "__main__":
     unittest.main()

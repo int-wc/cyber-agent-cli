@@ -8,6 +8,7 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from typer.testing import CliRunner
 
+from cyber_agent import __version__
 from cyber_agent.cli.app import app
 from cyber_agent.config import settings
 from cyber_agent.session_store import save_session_history
@@ -47,6 +48,8 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                         "/tools\n"
                         "/context\n"
                         "/history\n"
+                        "/doctor\n"
+                        "/version\n"
                         "/stop\n"
                         "/status\n"
                         "/config\n"
@@ -74,6 +77,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("mark_generated_capability_satisfied", result.output)
         self.assertIn("当前会话 ID", result.output)
         self.assertIn("当前工作目录下还没有已保存的历史会话", result.output)
+        self.assertIn("运行诊断", result.output)
+        self.assertIn("项目版本", result.output)
+        self.assertIn(f"cyber-agent-cli {__version__}", result.output)
         self.assertIn("当前没有正在执行的任务", result.output)
         self.assertIn("当前状态", result.output)
         self.assertIn("本地配置文件", result.output)
@@ -125,6 +131,94 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("后续继续对话时会保存为新的会话副本", result.output)
         self.assertIn("来源会话", result.output)
         self.assertIn("source-root", result.output)
+
+    def test_history_search_and_export_commands_can_help_debug_long_sessions(self) -> None:
+        """
+        测试：/history search 和 /history export 可用于定位历史内容并导出排查材料。
+        """
+        cli_runner = CliRunner()
+        with cli_runner.isolated_filesystem():
+            session_id = "history-search-001"
+            export_path = Path.cwd() / "exports" / "history search result.md"
+            save_session_history(
+                session_id,
+                [
+                    SystemMessage(content="system prompt"),
+                    HumanMessage(content="请排查 search_web 的回退路径"),
+                    AIMessage(content="已定位到 HTTP fallback 行为。"),
+                ],
+                mode="authorized",
+                approval_policy="auto",
+            )
+
+            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+                result = cli_runner.invoke(
+                    app,
+                    [],
+                    input=(
+                        "/history search fallback\n"
+                        f"/history export {session_id} {export_path}\n"
+                        "quit\n"
+                    ),
+                )
+
+            self.assertTrue(export_path.exists())
+            exported_markdown = export_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("历史检索: fallback", result.output)
+        self.assertIn(session_id, result.output)
+        self.assertIn("HTTP fallback", result.output)
+        self.assertIn("已导出历史会话", result.output)
+        self.assertIn("历史会话导出", exported_markdown)
+        self.assertIn("search_web", exported_markdown)
+
+    def test_top_level_history_commands_can_list_show_search_and_export(self) -> None:
+        """
+        测试：顶层 history 命令组支持脚本化列出、查看、检索和导出历史会话。
+        """
+        cli_runner = CliRunner()
+        with cli_runner.isolated_filesystem():
+            session_id = "history-cli-001"
+            export_path = Path.cwd() / "exports" / "history-cli-001.json"
+            save_session_history(
+                session_id,
+                [
+                    SystemMessage(content="system prompt"),
+                    HumanMessage(content="请排查 doctor json 输出"),
+                    AIMessage(content="history cli export ready"),
+                ],
+                mode="standard",
+                approval_policy="prompt",
+            )
+
+            list_result = cli_runner.invoke(app, ["history"])
+            show_result = cli_runner.invoke(app, ["history", "show", session_id])
+            search_result = cli_runner.invoke(app, ["history", "search", "json"])
+            export_result = cli_runner.invoke(
+                app,
+                ["history", "export", session_id, str(export_path)],
+            )
+
+            self.assertTrue(export_path.exists())
+            exported_json = json.loads(export_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(list_result.exit_code, 0)
+        self.assertIn("历史会话", list_result.output)
+        self.assertIn(session_id, list_result.output)
+
+        self.assertEqual(show_result.exit_code, 0)
+        self.assertIn("会话 ID", show_result.output)
+        self.assertIn("doctor json 输出", show_result.output)
+
+        self.assertEqual(search_result.exit_code, 0)
+        self.assertIn("历史检索: json", search_result.output)
+        self.assertIn(session_id, search_result.output)
+
+        self.assertEqual(export_result.exit_code, 0)
+        self.assertIn("已导出历史会话", export_result.output)
+        self.assertEqual(exported_json["session_id"], session_id)
+        self.assertEqual(exported_json["mode"], "standard")
 
     def test_context_command_can_render_ai_tool_calls_without_plain_text(self) -> None:
         """
@@ -284,7 +378,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
     def test_doctor_can_show_extra_allowed_path_and_registered_tool(self) -> None:
         """
-        测试：授权模式下可在状态里看到额外允许路径和已注册外部工具。
+        测试：doctor 会展示依赖、版本、额外允许路径和已注册外部工具。
         """
         cli_runner = CliRunner()
         with TemporaryDirectory() as temp_dir:
@@ -306,11 +400,105 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 )
 
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("运行诊断", result.output)
+        self.assertIn("项目版本", result.output)
+        self.assertIn("Python", result.output)
+        self.assertIn("prompt_toolkit", result.output)
+        self.assertIn("textual", result.output)
+        self.assertIn("playwright", result.output)
+        self.assertIn("浏览器搜索", result.output)
         self.assertIn("允许读取根路径", result.output)
         self.assertIn(temp_dir, result.output)
         self.assertIn("已注册外部工具", result.output)
         self.assertIn("python=", result.output)
         self.assertIn("审批策略", result.output)
+
+    def test_doctor_can_output_json_for_scripts_and_ci(self) -> None:
+        """
+        测试：doctor --json 会输出稳定的结构化诊断结果。
+        """
+        cli_runner = CliRunner()
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            result = cli_runner.invoke(app, ["doctor", "--json"])
+
+        self.assertEqual(result.exit_code, 0)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["project"]["version"], __version__)
+        self.assertIn(payload["summary"]["status"], {"ok", "warning"})
+        self.assertIn("dependencies", payload)
+        self.assertIn("runtime", payload)
+        self.assertIn("permissions", payload)
+        self.assertIn("capabilities", payload)
+
+    def test_doctor_still_works_without_langchain_openai_dependency(self) -> None:
+        """
+        测试：缺少 langchain_openai 时，doctor 仍可输出诊断结果而不是在初始化阶段崩溃。
+        """
+        cli_runner = CliRunner()
+        import_error = ModuleNotFoundError("No module named 'langchain_openai'")
+
+        with (
+            patch("cyber_agent.agent.runner.ChatOpenAI", None),
+            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent.capability_registry.ChatOpenAI", None),
+            patch("cyber_agent.capability_registry.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+        ):
+            result = cli_runner.invoke(app, ["doctor"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("运行诊断", result.output)
+        self.assertIn("langchain_openai", result.output)
+
+    def test_webhook_example_config_command_can_output_sample_routes(self) -> None:
+        """
+        测试：webhook example-config 会输出可直接复制修改的 JSON 示例。
+        """
+        cli_runner = CliRunner()
+
+        result = cli_runner.invoke(app, ["webhook", "example-config"])
+
+        self.assertEqual(result.exit_code, 0)
+        payload = json.loads(result.output)
+        self.assertIn("routes", payload)
+        self.assertEqual(len(payload["routes"]), 4)
+        self.assertEqual(
+            {route["provider"] for route in payload["routes"]},
+            {"feishu", "dingtalk", "wecom", "email"},
+        )
+
+    def test_run_command_reports_missing_langchain_openai_dependency_cleanly(self) -> None:
+        """
+        测试：单次 run 命令在缺少 langchain_openai 时返回明确错误，而不是直接抛出堆栈。
+        """
+        cli_runner = CliRunner()
+        import_error = ModuleNotFoundError("No module named 'langchain_openai'")
+
+        with (
+            patch("cyber_agent.agent.runner.ChatOpenAI", None),
+            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent.capability_registry.ChatOpenAI", None),
+            patch("cyber_agent.capability_registry.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+        ):
+            result = cli_runner.invoke(app, ["run", "hello"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("运行失败", result.output)
+        self.assertIn("langchain_openai", result.output)
+
+    def test_version_command_and_root_option_can_show_current_version(self) -> None:
+        """
+        测试：顶层 version 子命令和 --version 选项都能输出当前 CLI 版本。
+        """
+        cli_runner = CliRunner()
+
+        version_command_result = cli_runner.invoke(app, ["version"])
+        version_option_result = cli_runner.invoke(app, ["--version"])
+
+        self.assertEqual(version_command_result.exit_code, 0)
+        self.assertEqual(version_option_result.exit_code, 0)
+        self.assertEqual(version_command_result.output.strip(), f"cyber-agent-cli {__version__}")
+        self.assertEqual(version_option_result.output.strip(), f"cyber-agent-cli {__version__}")
 
     def test_config_command_can_persist_allow_path_for_future_runs(self) -> None:
         """

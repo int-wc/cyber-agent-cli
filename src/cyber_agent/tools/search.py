@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
@@ -13,6 +14,9 @@ from langchain_core.tools import tool
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from .metadata import attach_tool_risk
+
+if TYPE_CHECKING:
+    from ..capability_registry import CapabilityRegistry
 
 try:
     from playwright.sync_api import Error as PlaywrightError
@@ -47,6 +51,9 @@ PLAYWRIGHT_PAGE_TEXT_MAX_CHARS = 2400
 PLAYWRIGHT_RELEVANCE_HIGH_SCORE = 12
 PLAYWRIGHT_RELEVANCE_MEDIUM_SCORE = 6
 PLAYWRIGHT_RELEVANCE_LOW_SCORE = 3
+MODEL_RELEVANCE_EVALUATION_LIMIT = 5
+MODEL_RELEVANCE_REASON_MAX_CHARS = 120
+MODEL_RELEVANCE_PAGE_EXCERPT_MAX_CHARS = 1200
 
 
 @dataclass(slots=True)
@@ -61,6 +68,9 @@ class SearchResult:
     visit_summary: str = ""
     relevance_score: int = 0
     relevance_summary: str = ""
+    relevance_reason: str = ""
+    relevance_source: str = ""
+    page_excerpt: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,12 +85,16 @@ class SearchEngineSpec:
     link_selector: str
     title_selector: str
     snippet_selectors: tuple[str, ...]
+    card_link_selectors: tuple[str, ...] = ()
+    card_title_selectors: tuple[str, ...] = ()
+    card_snippet_selectors: tuple[str, ...] = ()
     consent_button_selectors: tuple[str, ...] = ()
     search_button_selectors: tuple[str, ...] = ()
     blocked_title_markers: tuple[str, ...] = ()
     blocked_url_markers: tuple[str, ...] = ()
     blocked_text_markers: tuple[str, ...] = ()
     result_ready_timeout_milliseconds: int = PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS
+    load_state_timeout_milliseconds: int = PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS
     post_submit_wait_milliseconds: int = PLAYWRIGHT_WAIT_MILLISECONDS
     settle_wait_milliseconds: int = 500
     auto_scroll_rounds: int = 3
@@ -97,6 +111,9 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         link_selector="li.b_algo h2 a",
         title_selector="li.b_algo h2 a",
         snippet_selectors=("li.b_algo .b_caption p", "li.b_algo .b_snippet"),
+        card_link_selectors=("h2 a",),
+        card_title_selectors=("h2 a",),
+        card_snippet_selectors=(".b_caption p", ".b_snippet"),
         search_button_selectors=("button#search_icon", "input#sb_form_go"),
         blocked_text_markers=(
             "verify you are human",
@@ -121,6 +138,9 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "div.g span.aCOpRe",
             "div.g div[data-sncf='1']",
         ),
+        card_link_selectors=("a[href]:has(h3)",),
+        card_title_selectors=("a[href]:has(h3) h3",),
+        card_snippet_selectors=("div.VwiC3b", "span.aCOpRe", "div[data-sncf='1']"),
         consent_button_selectors=(
             "button:has-text('Accept all')",
             "button:has-text('I agree')",
@@ -148,9 +168,13 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "#content_left > div.result .content-right_8Zs40, #content_left > div.result-op .content-right_8Zs40",
             "#content_left > div.result .c-span-last, #content_left > div.result-op .c-span-last",
         ),
+        card_link_selectors=("h3 a",),
+        card_title_selectors=("h3 a",),
+        card_snippet_selectors=(".c-abstract", ".content-right_8Zs40", ".c-span-last"),
         search_button_selectors=("input#su", "button#su"),
         blocked_text_markers=("百度安全验证", "安全验证", "请输入验证码"),
         result_ready_timeout_milliseconds=9000,
+        load_state_timeout_milliseconds=9000,
         post_submit_wait_milliseconds=1600,
         settle_wait_milliseconds=800,
         auto_scroll_rounds=4,
@@ -290,6 +314,30 @@ def _extract_locator_attribute(locator: Any, attribute_name: str) -> str:
     return str(value or "").strip()
 
 
+def _extract_scope_text(scope: Any, selectors: tuple[str, ...]) -> str:
+    """按顺序在当前作用域内提取首个非空文本。"""
+    for selector in selectors:
+        try:
+            text = _extract_locator_text(scope.locator(selector).first)
+        except Exception:
+            continue
+        if text:
+            return text
+    return ""
+
+
+def _extract_scope_attribute(scope: Any, selectors: tuple[str, ...], attribute_name: str) -> str:
+    """按顺序在当前作用域内提取首个非空属性。"""
+    for selector in selectors:
+        try:
+            value = _extract_locator_attribute(scope.locator(selector).first, attribute_name)
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
 def _wait_for_first_visible_locator(page: Any, selectors: tuple[str, ...]) -> Any | None:
     """按顺序等待第一个可见元素。"""
     for selector in selectors:
@@ -424,12 +472,12 @@ def _wait_for_results_to_settle(
         _wait_for_load_state(
             page,
             "load",
-            min(engine_spec.result_ready_timeout_milliseconds, PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS),
+            engine_spec.load_state_timeout_milliseconds,
         )
         _wait_for_load_state(
             page,
             "networkidle",
-            min(engine_spec.result_ready_timeout_milliseconds, PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS),
+            engine_spec.load_state_timeout_milliseconds,
         )
 
     page.wait_for_timeout(engine_spec.post_submit_wait_milliseconds)
@@ -508,6 +556,162 @@ def _annotate_result_relevance(
 
     result.relevance_score = score
     result.relevance_summary = summary
+    result.relevance_reason = ""
+    result.relevance_source = "rule"
+
+
+def _normalize_model_relevance_label(raw_label: str) -> str | None:
+    """将模型返回的标签归一化为固定的相关性枚举。"""
+    normalized_label = _normalize_whitespace(raw_label)
+    lowered_label = normalized_label.lower()
+    if not normalized_label:
+        return None
+    if "不相关" in normalized_label or "无关" in normalized_label or "irrelevant" in lowered_label:
+        return "不相关"
+    if "高度相关" in normalized_label or "非常相关" in normalized_label:
+        return "高度相关"
+    if "弱相关" in normalized_label or "低相关" in normalized_label or "部分相关" in normalized_label:
+        return "弱相关"
+    if normalized_label == "相关" or "相关" in normalized_label or "relevant" in lowered_label:
+        return "相关"
+    return None
+
+
+def _default_model_relevance_score(label: str) -> int:
+    """为模型相关性标签提供默认分数。"""
+    score_mapping = {
+        "高度相关": 95,
+        "相关": 75,
+        "弱相关": 40,
+        "不相关": 0,
+    }
+    return score_mapping.get(label, 0)
+
+
+def evaluate_results_with_model(
+    capability_registry: CapabilityRegistry | None,
+    query: str,
+    results: list[SearchResult],
+) -> list[str]:
+    """使用统一模型封装评估搜索结果与目标查询的真实相关性。"""
+    if capability_registry is None or not results:
+        return []
+
+    candidate_results = results[:MODEL_RELEVANCE_EVALUATION_LIMIT]
+    payload = []
+    for index, result in enumerate(candidate_results, start=1):
+        payload.append(
+            {
+                "index": index,
+                "title": result.title,
+                "url": result.url,
+                "snippet": result.snippet,
+                "visited": result.visited,
+                "page_excerpt": result.page_excerpt[:MODEL_RELEVANCE_PAGE_EXCERPT_MAX_CHARS],
+            }
+        )
+
+    system_prompt = """
+你是网页搜索结果相关性评估器。请根据用户查询、搜索结果标题、摘要、真实页面摘录，判断每个结果是否真正回答了用户要找的内容。
+输出必须是 JSON 对象，不要输出 Markdown，不要输出额外说明。
+
+JSON 字段要求：
+- results: array
+  - index: integer，对应输入编号
+  - label: string，只能是 高度相关 / 相关 / 弱相关 / 不相关
+  - score: integer，0 到 100
+  - reason: string，用中文简述判断依据，不超过 60 字
+
+评估要求：
+1. 优先判断“页面本身是否真正回答查询”，不要被搜索摘要误导。
+2. 登录页、广告页、导航页、聚合页、验证码页、空白页，如果不能直接回答查询，应判为弱相关或不相关。
+3. 如果页面摘录不足，只能基于标题、摘要、URL 谨慎判断，不要虚构正文内容。
+4. 输出要保守，只有内容明显直击查询时才判为高度相关。
+""".strip()
+    user_prompt = (
+        f"用户查询:\n{query}\n\n"
+        "候选结果:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+    try:
+        parsed_data = capability_registry.invoke_json_prompt(system_prompt, user_prompt)
+    except ExecutionInterruptedError:
+        raise
+    except Exception as exc:
+        return [f"模型相关性判定失败，已回退到规则判断：{exc}"]
+
+    raw_results = parsed_data.get("results")
+    if not isinstance(raw_results, list):
+        return ["模型相关性判定返回结构异常，已回退到规则判断。"]
+
+    updated_count = 0
+    for raw_result in raw_results:
+        if not isinstance(raw_result, dict):
+            continue
+        try:
+            result_index = int(raw_result.get("index", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if result_index < 0 or result_index >= len(candidate_results):
+            continue
+
+        normalized_label = _normalize_model_relevance_label(str(raw_result.get("label", "")))
+        if normalized_label is None:
+            continue
+
+        try:
+            score = int(raw_result.get("score", _default_model_relevance_score(normalized_label)))
+        except (TypeError, ValueError):
+            score = _default_model_relevance_score(normalized_label)
+        score = max(0, min(score, 100))
+        reason = _normalize_whitespace(str(raw_result.get("reason", "")))[:MODEL_RELEVANCE_REASON_MAX_CHARS]
+
+        target_result = candidate_results[result_index]
+        target_result.relevance_summary = normalized_label
+        target_result.relevance_score = score
+        target_result.relevance_reason = reason
+        target_result.relevance_source = "model"
+        updated_count += 1
+
+    if updated_count <= 0:
+        return ["模型相关性判定未返回可用结果，已保留规则判断。"]
+    return [f"已使用模型完成 {updated_count} 条结果的相关性判定。"]
+
+
+def _extract_result_from_card(
+    page: Any,
+    result_card: Any | None,
+    engine_spec: SearchEngineSpec,
+    index: int,
+) -> SearchResult | None:
+    """优先在单个结果卡片内抽取标题、链接与摘要，必要时回退到全局定位。"""
+    title = ""
+    raw_url = ""
+    snippet = ""
+
+    if result_card is not None:
+        title = _extract_scope_text(result_card, engine_spec.card_title_selectors)
+        raw_url = _extract_scope_attribute(result_card, engine_spec.card_link_selectors, "href")
+        snippet = _extract_scope_text(result_card, engine_spec.card_snippet_selectors)
+
+    if not title:
+        title = _extract_locator_text(page.locator(engine_spec.title_selector).nth(index))
+    if not raw_url:
+        raw_url = _extract_locator_attribute(page.locator(engine_spec.link_selector).nth(index), "href")
+    if not snippet:
+        snippet = _extract_page_snippet_by_index(page, engine_spec.snippet_selectors, index)
+
+    url = _unwrap_search_result_url(raw_url, str(getattr(page, "url", "")))
+    if not title or not url or url.startswith("javascript:"):
+        return None
+
+    return SearchResult(
+        title=title,
+        url=url,
+        snippet=snippet,
+        source_engine=engine_spec.name,
+    )
 
 
 def _page_looks_blocked(page: Any, engine_spec: SearchEngineSpec) -> bool:
@@ -568,36 +772,28 @@ def _search_with_single_engine(
 
     results: list[SearchResult] = []
     inspect_count = max(result_limit * PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER, result_limit)
-    title_locators = page.locator(engine_spec.title_selector)
-    title_count = int(title_locators.count())
-    if title_count <= 0:
+    result_cards = page.locator(engine_spec.result_selector)
+    result_card_count = _count_locators(result_cards)
+    fallback_title_count = _count_locators(page.locator(engine_spec.title_selector))
+    available_result_count = max(result_card_count, fallback_title_count)
+    if available_result_count <= 0:
         return [], f"{engine_spec.name} 未解析到可用结果。"
 
-    link_locators = page.locator(engine_spec.link_selector)
-    for index in range(min(title_count, inspect_count)):
+    for index in range(min(available_result_count, inspect_count)):
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()
 
-        title_locator = title_locators.nth(index)
-        link_locator = link_locators.nth(index)
-        title = _extract_locator_text(title_locator)
-        if not title:
-            continue
-
-        raw_url = _extract_locator_attribute(link_locator, "href")
-        url = _unwrap_search_result_url(raw_url, str(getattr(page, "url", "")))
-        snippet = _extract_page_snippet_by_index(page, engine_spec.snippet_selectors, index)
-        if not url or url.startswith("javascript:"):
-            continue
-
-        results.append(
-            SearchResult(
-                title=title,
-                url=url,
-                snippet=snippet,
-                source_engine=engine_spec.name,
-            )
+        result_card = result_cards.nth(index) if index < result_card_count else None
+        parsed_result = _extract_result_from_card(
+            page,
+            result_card,
+            engine_spec,
+            index,
         )
+        if parsed_result is None:
+            continue
+
+        results.append(parsed_result)
         _annotate_result_relevance(query, results[-1])
 
     if not results:
@@ -608,9 +804,32 @@ def _search_with_single_engine(
 def _build_query_terms(query: str) -> list[str]:
     """构建用于简单相关度打分的查询词片段。"""
     collapsed_query = _normalize_whitespace(query).lower()
-    query_terms = [term for term in re.split(r"\s+", collapsed_query) if term]
-    if collapsed_query and collapsed_query not in query_terms:
-        query_terms.append(collapsed_query)
+    if not collapsed_query:
+        return []
+
+    query_terms: list[str] = []
+    seen_terms: set[str] = set()
+
+    def add_term(term: str) -> None:
+        normalized_term = term.strip()
+        if not normalized_term or normalized_term in seen_terms:
+            return
+        seen_terms.add(normalized_term)
+        query_terms.append(normalized_term)
+
+    for term in re.split(r"\s+", collapsed_query):
+        add_term(term)
+
+    for chunk in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", collapsed_query):
+        add_term(chunk)
+        if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+            for term_length in (2, 3):
+                if len(chunk) < term_length:
+                    continue
+                for start_index in range(len(chunk) - term_length + 1):
+                    add_term(chunk[start_index : start_index + term_length])
+
+    add_term(collapsed_query)
     return query_terms
 
 
@@ -720,6 +939,7 @@ def enrich_results_with_page_visits(
                 if page_description:
                     result.snippet = page_description
                 result.visited = True
+                result.page_excerpt = page_text
                 _annotate_result_relevance(query, result, page_text=page_text)
             except ExecutionInterruptedError:
                 raise
@@ -735,6 +955,7 @@ def search_with_playwright(
     query: str,
     result_limit: int,
     execution_controller: ExecutionController | None = None,
+    capability_registry: CapabilityRegistry | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
     """使用 Playwright 按真人搜索流程执行浏览器搜索。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
@@ -790,6 +1011,13 @@ def search_with_playwright(
                     min(PLAYWRIGHT_VISIT_RESULT_LIMIT, len(ranked_results)),
                 )
             )
+            notes.extend(
+                evaluate_results_with_model(
+                    capability_registry,
+                    query,
+                    ranked_results,
+                )
+            )
             return rerank_results_by_relevance(ranked_results)[:result_limit], notes
         finally:
             search_page.close()
@@ -819,11 +1047,17 @@ def render_search_results(
         if result.visited:
             lines.append("   已访问: 是")
             if result.relevance_summary:
-                lines.append(f"   页面判断: {result.relevance_summary}")
+                relevance_source = "（模型）" if result.relevance_source == "model" else ""
+                lines.append(f"   页面判断: {result.relevance_summary}{relevance_source}")
+            if result.relevance_reason:
+                lines.append(f"   判定依据: {result.relevance_reason}")
         elif result.visit_summary:
             lines.append(f"   页面访问: {result.visit_summary}")
         elif result.relevance_summary:
-            lines.append(f"   结果判断: {result.relevance_summary}")
+            relevance_source = "（模型）" if result.relevance_source == "model" else ""
+            lines.append(f"   结果判断: {result.relevance_summary}{relevance_source}")
+            if result.relevance_reason:
+                lines.append(f"   判定依据: {result.relevance_reason}")
     return "\n".join(lines)
 
 
@@ -912,6 +1146,7 @@ def search_with_httpx(
 
 def create_search_web_tool(
     execution_controller: ExecutionController | None = None,
+    capability_registry: CapabilityRegistry | None = None,
 ):
     """创建对外可用的 Web 搜索工具。"""
 
@@ -942,6 +1177,7 @@ def create_search_web_tool(
                 normalized_query,
                 safe_result_count,
                 execution_controller,
+                capability_registry,
             )
         except ExecutionInterruptedError:
             raise

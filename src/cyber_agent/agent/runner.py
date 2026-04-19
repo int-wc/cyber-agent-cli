@@ -1,10 +1,18 @@
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_openai import ChatOpenAI
+
+    LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
+except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
+    ChatOpenAI = None
+    LANGCHAIN_OPENAI_IMPORT_ERROR = exc
 
 from ..capability_registry import CapabilityRegistry
 from ..config import settings
@@ -166,7 +174,9 @@ class AgentRunner:
         self.model_name = settings.get_model_name(model_name)
         self.api_key = api_key if api_key is not None else settings.openai_api_key
         self.base_url = settings.resolve_base_url(self.service, base_url=base_url)
-        self.llm = self._build_llm()
+        self.llm: Any | None = None
+        if ChatOpenAI is not None:
+            self.llm = self._build_llm()
         self.mode = mode
         self.extra_allowed_paths = extra_allowed_paths or []
         self.configured_registry = configured_registry or {}
@@ -195,8 +205,12 @@ class AgentRunner:
         self.compressed_message_count = 0
         self.reset()
 
-    def _build_llm(self) -> ChatOpenAI:
+    def _build_llm(self) -> Any:
         """按当前运行时服务商与模型配置重建模型实例。"""
+        if ChatOpenAI is None:
+            raise ModuleNotFoundError(
+                "缺少 `langchain_openai` 依赖，当前环境无法创建模型客户端。"
+            ) from LANGCHAIN_OPENAI_IMPORT_ERROR
         return ChatOpenAI(
             **settings.get_chat_openai_kwargs(
                 self.service,
@@ -205,6 +219,12 @@ class AgentRunner:
                 base_url=self.base_url,
             )
         )
+
+    def _get_llm(self) -> Any:
+        """按需构建模型客户端，避免非模型命令在缺依赖环境下提前失败。"""
+        if self.llm is None:
+            self.llm = self._build_llm()
+        return self.llm
 
     def update_llm_config(
         self,
@@ -224,7 +244,9 @@ class AgentRunner:
                 base_url=base_url,
             )
 
-        self.llm = self._build_llm()
+        self.llm = None
+        if ChatOpenAI is not None:
+            self.llm = self._build_llm()
         if self.capability_registry is not None:
             self.capability_registry.update_llm_config(
                 service_name=self.service,
@@ -366,7 +388,7 @@ class AgentRunner:
 4. 已创建的 capability、历史会话、路径、命令或关键标识。
 输出只要纯文本摘要，不要加标题，不要虚构内容。
 """.strip()
-        response = self.llm.invoke(
+        response = self._get_llm().invoke(
             [
                 SystemMessage(content=summary_prompt),
                 HumanMessage(
@@ -435,7 +457,7 @@ class AgentRunner:
     ) -> AIMessage:
         self.execution_controller.ensure_not_cancelled()
         messages = self._build_model_messages()
-        llm_with_tools = self.llm.bind_tools(self.tools, parallel_tool_calls=False)
+        llm_with_tools = self._get_llm().bind_tools(self.tools, parallel_tool_calls=False)
         accumulated_chunk: AIMessageChunk | None = None
 
         if event_handler is not None:
