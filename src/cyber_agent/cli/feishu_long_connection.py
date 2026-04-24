@@ -250,6 +250,23 @@ class FeishuLongConnectionDispatcher:
             )
             return
 
+        priority_response = self._handle_priority_event(outcome.event)
+        if priority_response is not None:
+            self.cli_renderer.print_info(
+                "收到飞书控制命令："
+                f"chat_id={outcome.event.metadata.get('chat_id', '') or 'unknown'} "
+                f"sender_id={outcome.event.sender_id} "
+                f"message_id={outcome.event.message_id} "
+                f"text={_normalize_preview_text(outcome.event.text)} "
+                "status=handled"
+            )
+            _report_gateway_response(
+                priority_response,
+                self.cli_renderer,
+                event=outcome.event,
+            )
+            return
+
         self.cli_renderer.print_info(
             "收到飞书文本消息："
             f"chat_id={outcome.event.metadata.get('chat_id', '') or 'unknown'} "
@@ -262,7 +279,22 @@ class FeishuLongConnectionDispatcher:
 
     def submit_event(self, event: WebhookEvent) -> None:
         """直接提交已归一化事件，供卡片动作等非文本入口复用后台处理链路。"""
+        priority_response = self._handle_priority_event(event)
+        if priority_response is not None:
+            _report_gateway_response(
+                priority_response,
+                self.cli_renderer,
+                event=event,
+            )
+            return
         self._queue.put(event)
+
+    def _handle_priority_event(self, event: WebhookEvent) -> WebhookHttpResponse | None:
+        """优先处理 /stop 等控制事件，避免排在长任务后面失效。"""
+        priority_handler = getattr(self.gateway, "handle_priority_event", None)
+        if not callable(priority_handler):
+            return None
+        return priority_handler(self.route, event)
 
     def wait_until_idle(self, timeout_seconds: float = 5.0) -> bool:
         deadline = time.time() + max(timeout_seconds, 0.0)
@@ -405,6 +437,10 @@ def serve_feishu_long_connection(
                 }
             }
 
+    def _on_message_read(data: object) -> None:
+        """飞书已读回执不需要进入 Agent，只注册处理器以避免 SDK 打印误导性错误。"""
+        _ = data
+
     event_handler = (
         # 长连接模式由飞书官方链路保证事件来源，不复用 webhook 的 token / encrypt 校验。
         lark.EventDispatcherHandler.builder(
@@ -412,6 +448,7 @@ def serve_feishu_long_connection(
             "",
         )
         .register_p2_im_message_receive_v1(_on_message_receive)
+        .register_p2_im_message_message_read_v1(_on_message_read)
         .register_p2_card_action_trigger(_on_card_action)
         .build()
     )

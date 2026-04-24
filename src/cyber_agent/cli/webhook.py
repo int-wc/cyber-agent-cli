@@ -31,6 +31,7 @@ from ..agent.approval import (
     get_approval_policy_label,
 )
 from ..agent.mode import get_mode_description, get_mode_label
+from ..execution_control import ExecutionInterruptedError
 from ..session_store import (
     create_session_id,
     get_session_storage_dir,
@@ -84,10 +85,14 @@ FEISHU_CREATE_API_MODE = "create_api"
 FEISHU_TOKEN_CACHE_SAFETY_SECONDS = 60.0
 FEISHU_CARD_MARKDOWN_MAX_CHARS = 3500
 FEISHU_CARD_LIST_LIMIT = 20
+FEISHU_SESSION_SWITCH_BUTTON_LIMIT = 12
 FEISHU_RICH_REPLY_CHUNK_MAX_CHARS = 2200
 FEISHU_RICH_REPLY_MAX_CHUNKS = 6
 FEISHU_TRACE_MAX_STEPS = 10
 FEISHU_TRACE_DETAIL_MAX_CHARS = 500
+FEISHU_TOOL_RESULT_KEY_VALUE_MAX_ROWS = 16
+FEISHU_TOOL_RESULT_KEY_MAX_CHARS = 48
+FEISHU_TOOL_RESULT_VALUE_MAX_CHARS = 260
 FEISHU_PROGRESS_HEARTBEAT_IDLE_SECONDS = 8.0
 FEISHU_PROGRESS_HEARTBEAT_POLL_SECONDS = 1.0
 FEISHU_PROGRESS_INPUT_PREVIEW_MAX_CHARS = 80
@@ -284,7 +289,7 @@ class FeishuTraceCollector:
                 FeishuTraceStep(
                     kind="tool_result",
                     title=f"采集结果 `{tool_name}`",
-                    detail=cls._build_code_block(normalized_content, language="text"),
+                    detail=cls._build_tool_result_detail(normalized_content),
                 )
             ]
 
@@ -324,6 +329,14 @@ class FeishuTraceCollector:
             f"{_escape_feishu_code_block(normalized_text)}\n"
             "```"
         )
+
+    @classmethod
+    def _build_tool_result_detail(cls, text: str) -> str:
+        """优先把普通工具输出里的键值结果渲染成飞书卡片键值列表。"""
+        structured_detail = _build_feishu_tool_result_key_value_detail(text)
+        if structured_detail:
+            return structured_detail
+        return cls._build_code_block(text, language="text")
 
 
 class FeishuProgressMessageEmitter:
@@ -432,6 +445,11 @@ class FeishuProgressMessageEmitter:
             else:
                 latest_status_title = "模型已生成最终结果"
                 latest_status_detail = "- 正在发送最终回复。"
+        elif event_type == "response_retry" and isinstance(payload, Mapping):
+            latest_status_title = "模型空回复，正在重试"
+            latest_status_detail = (
+                f"- 原因：{str(payload.get('reason', '')).strip() or '模型未生成文本。'}"
+            )
         elif event_type == "tool_call" and isinstance(payload, list):
             tool_names = [
                 str(tool_call.get("name", "")).strip()
@@ -787,6 +805,103 @@ def _build_feishu_key_value_table(
         f"- **{key}**：{value}"
         for key, value in normalized_rows
     )
+
+
+def _build_feishu_tool_result_key_value_detail(text: str) -> str:
+    """把工具返回中的 JSON 对象或多行键值结果转换成飞书可读键值块。"""
+    rows = _extract_feishu_tool_result_json_rows(text)
+    if not rows:
+        rows = _extract_feishu_tool_result_line_rows(text)
+    if not rows:
+        return ""
+
+    visible_rows = rows[:FEISHU_TOOL_RESULT_KEY_VALUE_MAX_ROWS]
+    detail = _build_feishu_key_value_table(visible_rows)
+    hidden_count = len(rows) - len(visible_rows)
+    if hidden_count > 0:
+        detail = f"{detail}\n- 其余 `{hidden_count}` 项未展开。"
+    return detail
+
+
+def _extract_feishu_tool_result_json_rows(text: str) -> list[tuple[str, str]]:
+    """识别工具输出中的 JSON 对象，常见于结构化扫描类工具。"""
+    normalized_text = text.strip()
+    if not normalized_text:
+        return []
+    try:
+        parsed = json.loads(normalized_text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, Mapping):
+        return []
+    rows: list[tuple[str, str]] = []
+    for raw_key, raw_value in parsed.items():
+        key = str(raw_key).strip()
+        if not _is_feishu_tool_result_key(key, raw_value):
+            continue
+        rows.append((key, _format_feishu_tool_result_value(raw_value)))
+    return rows
+
+
+def _extract_feishu_tool_result_line_rows(text: str) -> list[tuple[str, str]]:
+    """识别普通文本里的多行 `键: 值` / `键=值` 结果，避免误判表格输出。"""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+
+    rows: list[tuple[str, str]] = []
+    for raw_line in lines:
+        line = raw_line.lstrip("-*•").strip()
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", line):
+            continue
+        match = re.match(
+            rf"^(.{{1,{FEISHU_TOOL_RESULT_KEY_MAX_CHARS}}}?)\s*(?:[:：=])\s*(.*)$",
+            line,
+        )
+        if not match:
+            continue
+        key = match.group(1).strip()
+        value = match.group(2).strip()
+        if not _is_feishu_tool_result_key(key, value):
+            continue
+        rows.append((key, _format_feishu_tool_result_value(value)))
+
+    # 至少两行键值才认为是结构化结果，避免把单行日志误转成卡片字段。
+    if len(rows) < 2:
+        return []
+    return rows
+
+
+def _is_feishu_tool_result_key(key: str, value: object) -> bool:
+    """过滤路径、URL、代码片段等容易被 `:` 误拆的文本。"""
+    normalized_key = key.strip()
+    if not normalized_key or len(normalized_key) > FEISHU_TOOL_RESULT_KEY_MAX_CHARS:
+        return False
+    if "|" in normalized_key or "```" in normalized_key:
+        return False
+    normalized_value = str(value).strip()
+    if len(normalized_key) == 1 and normalized_value.startswith(("\\", "/")):
+        return False
+    if re.search(r"\s{3,}", normalized_key):
+        return False
+    return True
+
+
+def _format_feishu_tool_result_value(value: object) -> str:
+    """压缩工具结果值，避免单个字段把飞书卡片撑得过长。"""
+    if value is None:
+        normalized_value = "无"
+    elif isinstance(value, (dict, list, tuple)):
+        try:
+            normalized_value = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            normalized_value = str(value)
+    else:
+        normalized_value = str(value)
+    normalized_value = re.sub(r"\s+", " ", normalized_value).strip() or "（空）"
+    if len(normalized_value) <= FEISHU_TOOL_RESULT_VALUE_MAX_CHARS:
+        return normalized_value
+    return normalized_value[:FEISHU_TOOL_RESULT_VALUE_MAX_CHARS].rstrip() + "..."
 
 
 def _parse_feishu_tool_entries(tool_lines: Sequence[str]) -> list[tuple[str, str]]:
@@ -1393,7 +1508,6 @@ def _build_feishu_help_payload() -> dict[str, object]:
                 "/mode authorized",
                 "/service",
                 "/service <服务商>",
-                "/service <服务商> <基址>",
                 "/model",
                 "/model <模型名>",
             ),
@@ -2065,10 +2179,22 @@ def _build_feishu_model_config_payload(
         title,
         "\n\n".join(section for section in sections if section),
         template="turquoise",
-        action_rows=_build_feishu_command_action_rows(
-            ("/service", "/model", "/status", "/help"),
-            primary_commands=("/service",),
-        ),
+        action_rows=[
+            *_build_feishu_command_action_rows(
+                (
+                    ("切到 OpenAI", "/service openai"),
+                    ("切到 DeepSeek", "/service deepseek"),
+                    ("OpenAI 默认模型", "/model gpt-5.4"),
+                    ("DeepSeek 默认模型", "/model deepseek-v4-pro"),
+                ),
+                primary_commands=("/service openai", "/service deepseek"),
+                row_size=2,
+            ),
+            *_build_feishu_command_action_rows(
+                ("/service", "/model", "/status", "/help"),
+                primary_commands=("/service",),
+            ),
+        ],
     )
 
 
@@ -2241,6 +2367,132 @@ def _build_feishu_recent_session_button_specs(
             )
         )
     return button_specs
+
+
+def _build_feishu_session_switch_button_specs(
+    session_items: Sequence[Mapping[str, object]],
+    *,
+    limit: int = FEISHU_SESSION_SWITCH_BUTTON_LIMIT,
+) -> list[tuple[str, str]]:
+    """为 /session list 生成按序号快速切换的按钮。"""
+    button_specs: list[tuple[str, str]] = []
+    for session_item in session_items[: max(limit, 0)]:
+        raw_index = session_item.get("index")
+        index_text = str(raw_index).strip()
+        if not index_text:
+            continue
+        title = str(session_item.get("title", "")).strip() or "未命名会话"
+        label_prefix = "当前" if bool(session_item.get("active")) else "切换"
+        button_specs.append(
+            (
+                f"{label_prefix} {index_text}·{_truncate_feishu_button_label(title, max_chars=8)}",
+                f"/session use {index_text}",
+            )
+        )
+    return button_specs
+
+
+def _build_feishu_session_list_payload(
+    session_items: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """构造更接近聊天软件会话列表的飞书卡片，并附带快速切换按钮。"""
+    visible_session_items = list(session_items[:FEISHU_CARD_LIST_LIMIT])
+    hidden_session_count = len(session_items) - len(visible_session_items)
+    active_session = next(
+        (session_item for session_item in session_items if bool(session_item.get("active"))),
+        None,
+    )
+    summary_lines = [
+        f"- 会话总数：`{len(session_items)}`",
+        (
+            f"- 当前会话：`{active_session.get('index')}` · "
+            f"{active_session.get('title') or '未命名会话'}"
+            if active_session is not None
+            else "- 当前会话：未定位"
+        ),
+        "- 点击下方“切换 N”按钮可直接切到对应会话。",
+    ]
+    if hidden_session_count > 0:
+        summary_lines.append(
+            f"- 当前展示前 `{len(visible_session_items)}` 个，其余 `{hidden_session_count}` 个未展开。"
+        )
+    if len(session_items) > FEISHU_SESSION_SWITCH_BUTTON_LIMIT:
+        summary_lines.append(
+            f"- 快速切换按钮仅展示前 `{FEISHU_SESSION_SWITCH_BUTTON_LIMIT}` 个会话。"
+        )
+
+    body_elements: list[dict[str, object]] = [
+        {
+            "tag": "markdown",
+            "content": _build_feishu_markdown_section("概览", summary_lines),
+        }
+    ]
+    if not visible_session_items:
+        body_elements.append(
+            {
+                "tag": "markdown",
+                "content": _build_feishu_markdown_section(
+                    "当前聊天会话",
+                    ["- 当前聊天下还没有可切换的会话。"],
+                ),
+            }
+        )
+    for session_item in visible_session_items:
+        index_text = str(session_item.get("index", "")).strip() or "?"
+        title = str(session_item.get("title", "")).strip() or "未命名会话"
+        status_label = (
+            "当前会话"
+            if bool(session_item.get("active"))
+            else ("默认会话" if bool(session_item.get("is_default")) else "历史会话")
+        )
+        session_detail = _build_feishu_key_value_table(
+            (
+                ("状态", status_label),
+                ("会话 ID", f"`{session_item.get('session_id', '')}`"),
+                ("标题", title),
+                ("轮数", f"`{session_item.get('turn_count', 0)}`"),
+                ("消息数", f"`{session_item.get('message_count', 0)}`"),
+                ("更新时间", f"`{session_item.get('updated_at', '未开始')}`"),
+            )
+        )
+        body_elements.append(
+            {
+                "tag": "markdown",
+                "content": _truncate_feishu_markdown(
+                    f"**{status_label} · {index_text}. {title}**\n{session_detail}",
+                    max_chars=FEISHU_RICH_REPLY_CHUNK_MAX_CHARS,
+                ),
+            }
+        )
+
+    switch_button_specs = _build_feishu_session_switch_button_specs(session_items)
+    primary_switch_commands = tuple(
+        f"/session use {session_item.get('index')}"
+        for session_item in session_items[:FEISHU_SESSION_SWITCH_BUTTON_LIMIT]
+        if bool(session_item.get("active")) and str(session_item.get("index", "")).strip()
+    )
+    action_rows = [
+        *_build_feishu_command_action_rows(
+            switch_button_specs,
+            primary_commands=primary_switch_commands,
+            row_size=3,
+        ),
+        *_build_feishu_command_action_rows(
+            (
+                ("新建会话", "/session new"),
+                ("刷新列表", "/session list"),
+                ("当前会话", "/session current"),
+                ("回到默认", "/session default"),
+            ),
+            primary_commands=("/session list",),
+        ),
+    ]
+    return _build_feishu_interactive_card_elements_payload(
+        "飞书会话列表",
+        body_elements,
+        template="wathet",
+        action_rows=action_rows,
+    )
 
 
 def _build_feishu_start_menu_payload(
@@ -3688,6 +3940,11 @@ def build_webhook_session_id(provider: str, session_key: str) -> str:
     return f"webhook-{normalized_provider}-{normalized_key}-{digest}"
 
 
+def _is_webhook_stop_command_event(event: WebhookEvent) -> bool:
+    """判断事件是否为需要抢占处理的停止命令。"""
+    return event.text.strip().lower() == "/stop"
+
+
 class WebhookGateway:
     """承载 webhook 解析、Agent 调用与回复投递的统一网关。"""
 
@@ -3789,6 +4046,10 @@ class WebhookGateway:
                 }
             )
 
+        priority_response = self.handle_priority_event(route, outcome.event)
+        if priority_response is not None:
+            return priority_response
+
         if self._should_handle_event_async(route, outcome.event):
             self._enqueue_async_event(route, outcome.event)
             self.cli_renderer.print_info(
@@ -3807,10 +4068,89 @@ class WebhookGateway:
         route: WebhookRouteConfig,
         event: WebhookEvent,
     ) -> WebhookHttpResponse:
+        priority_response = self.handle_priority_event(route, event)
+        if priority_response is not None:
+            return priority_response
+
         adapter = WEBHOOK_PROVIDER_ADAPTERS[route.provider]
         with self._processing_lock:
             agent_reply = self._run_agent_turn(route, event)
         return self._deliver_reply(route, adapter, event, agent_reply)
+
+    def handle_priority_event(
+        self,
+        route: WebhookRouteConfig,
+        event: WebhookEvent,
+    ) -> WebhookHttpResponse | None:
+        """处理必须抢占普通队列的控制命令。"""
+        if _is_webhook_stop_command_event(event):
+            return self._handle_stop_command_event(route, event)
+        return None
+
+    def _handle_stop_command_event(
+        self,
+        route: WebhookRouteConfig,
+        event: WebhookEvent,
+    ) -> WebhookHttpResponse:
+        """立即处理 /stop，不等待当前长任务释放 webhook 队列。"""
+        execution_controller = self.runtime_context.get("execution_controller")
+        stop_message = "当前没有正在执行的任务。"
+        accepted_stop = False
+
+        is_running = False
+        if execution_controller is not None:
+            is_running_method = getattr(execution_controller, "is_running", None)
+            if callable(is_running_method):
+                is_running = bool(is_running_method())
+            cancel_requested_method = getattr(
+                execution_controller,
+                "is_cancel_requested",
+                None,
+            )
+            cancel_requested = (
+                bool(cancel_requested_method())
+                if callable(cancel_requested_method)
+                else False
+            )
+            if is_running and cancel_requested:
+                accepted_stop = True
+                stop_message = "已请求停止当前任务，正在等待执行链路收尾。"
+            elif is_running:
+                request_stop_method = getattr(execution_controller, "request_stop", None)
+                if callable(request_stop_method) and bool(
+                    request_stop_method("用户通过 webhook /stop 请求停止当前任务")
+                ):
+                    accepted_stop = True
+                    stop_message = "已收到 /stop，正在终止当前模型、Shell 与工具执行。"
+
+        self.cli_renderer.print_info(stop_message)
+        resolved_session_key = (
+            self._resolve_feishu_active_session_key(event)
+            if event.provider == "feishu"
+            else event.session_key
+        )
+        session_id = build_webhook_session_id(event.provider, resolved_session_key)
+        reply_payload_override = (
+            _build_feishu_notice_payload(
+                "停止任务",
+                stop_message,
+                template="red" if accepted_stop else "grey",
+                button_commands=("/status", "/start"),
+            )
+            if event.provider == "feishu"
+            else None
+        )
+        agent_reply = WebhookAgentReply(
+            session_id=session_id,
+            reply_text=stop_message,
+            reply_payload_override=reply_payload_override,
+        )
+        return self._deliver_reply(
+            route,
+            WEBHOOK_PROVIDER_ADAPTERS[route.provider],
+            event,
+            agent_reply,
+        )
 
     def _should_handle_event_async(
         self,
@@ -4232,41 +4572,7 @@ class WebhookGateway:
 
         if normalized_text == "/session list":
             session_items = self._list_feishu_chat_sessions(event)
-            session_lines = [
-                (
-                    f"- {'**当前** ' if bool(session_item['active']) else ''}"
-                    f"`{session_item['index']}` `"
-                    f"{session_item['session_id']}` | "
-                    f"{session_item['title']} | "
-                    f"轮数 `{session_item['turn_count']}` | "
-                    f"更新时间 `{session_item['updated_at']}`"
-                )
-                for session_item in session_items
-            ] or ["- 当前聊天下还没有可切换的会话。"]
-            payload = _build_feishu_interactive_card_payload(
-                "飞书会话列表",
-                "\n\n".join(
-                    section
-                    for section in (
-                        _build_feishu_markdown_section("当前聊天会话", session_lines),
-                        _build_feishu_markdown_section(
-                            "切换方法",
-                            [
-                                "- 发送 `/session use 1` 按序号切换",
-                                "- 或发送 `/session use <会话ID>` 精确切换",
-                                "- 发送 `/session default` 快速回到默认会话",
-                            ],
-                        ),
-                    )
-                    if section
-                ),
-                template="wathet",
-                action_rows=_build_feishu_command_action_rows(
-                    FEISHU_SESSION_SHORTCUT_COMMANDS,
-                    primary_commands=("/session list",),
-                    row_size=3,
-                ),
-            )
+            payload = _build_feishu_session_list_payload(session_items)
             return WebhookAgentReply(
                 session_id=session_id,
                 reply_text="已显示当前聊天下的飞书会话列表。",
@@ -4414,6 +4720,16 @@ class WebhookGateway:
                 reply_text=(
                     "可用快捷命令："
                     + " ".join(FEISHU_START_MENU_COMMANDS)
+                ),
+            )
+
+        if event.provider == "feishu" and normalized_text == "/status":
+            return WebhookAgentReply(
+                session_id=session_id,
+                reply_text="已发送飞书会话状态卡片。",
+                reply_payload_override=_build_feishu_status_payload(
+                    runner,
+                    self.runtime_context,
                 ),
             )
 
@@ -4645,6 +4961,12 @@ class WebhookGateway:
                 approval_handler=create_webhook_approval_handler(approval_policy),
             )
             history_snapshot = runner.get_history_snapshot()
+        except ExecutionInterruptedError as exc:
+            reply_text = str(exc) or "当前任务已被 /stop 中断。"
+            history_snapshot = [
+                *runner.get_history_snapshot(),
+                AIMessage(content=reply_text),
+            ]
         except ModuleNotFoundError as exc:
             reply_text = f"运行失败：{exc}"
             history_snapshot = [

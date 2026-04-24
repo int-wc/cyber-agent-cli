@@ -43,7 +43,6 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/config allow-path add <目录>", "将目录持久化写入本地配置"),
     BuiltinCommandSpec("/service", "查看当前模型服务商"),
     BuiltinCommandSpec("/service <服务商>", "切换当前会话的模型服务商"),
-    BuiltinCommandSpec("/service <服务商> <基址>", "切换服务商并显式指定兼容接口基址"),
     BuiltinCommandSpec("/model", "查看当前模型名称"),
     BuiltinCommandSpec("/model <模型名>", "切换当前会话的模型名称"),
     BuiltinCommandSpec("/allow-path", "查看当前允许访问目录", show_in_banner=True),

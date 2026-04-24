@@ -18,6 +18,10 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由�
 from ..capability_registry import CapabilityRegistry
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
+from ..openai_compat import (
+    ensure_deepseek_reasoning_content_compat,
+    prepare_messages_for_openai_compatible_service,
+)
 from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
 from .approval import ApprovalDecision
 from .mode import AgentMode, get_mode_system_prompt
@@ -30,6 +34,10 @@ MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
 MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
 MAX_MODEL_STREAM_START_ATTEMPTS = 2
 MODEL_STREAM_START_RETRY_DELAY_SECONDS = 0.3
+MAX_EMPTY_FINAL_RESPONSE_RETRIES = 1
+EMPTY_FINAL_RESPONSE_ERROR = (
+    "模型返回空最终回复：本轮没有新的工具调用，也没有生成可发送文本。"
+)
 TRANSIENT_MODEL_STREAM_ERROR_PATTERNS = (
     "empty_stream",
     "upstream stream closed before first payload",
@@ -190,8 +198,8 @@ class AgentRunner:
         context_summary_max_chars: int | None = None,
     ):
         self.service = settings.normalize_service_name(service_name)
-        self.model_name = settings.get_model_name(model_name)
-        self.api_key = api_key if api_key is not None else settings.openai_api_key
+        self.model_name = settings.get_model_name(model_name, service_name=self.service)
+        self.api_key = settings.get_api_key(self.service, api_key=api_key)
         self.base_url = settings.resolve_base_url(self.service, base_url=base_url)
         self.llm: Any | None = None
         self.mode = mode
@@ -228,6 +236,8 @@ class AgentRunner:
             raise ModuleNotFoundError(
                 "缺少 `langchain_openai` 依赖，当前环境无法创建模型客户端。"
             ) from LANGCHAIN_OPENAI_IMPORT_ERROR
+        if self.service == "deepseek":
+            ensure_deepseek_reasoning_content_compat()
         return ChatOpenAI(
             **settings.get_chat_openai_kwargs(
                 self.service,
@@ -254,7 +264,14 @@ class AgentRunner:
         if service_name is not None:
             self.service = settings.normalize_service_name(service_name)
         if model_name is not None:
-            self.model_name = settings.get_model_name(model_name)
+            self.model_name = settings.get_model_name(
+                model_name,
+                service_name=self.service,
+            )
+        elif service_name is not None:
+            self.model_name = settings.get_model_name(service_name=self.service)
+        if service_name is not None:
+            self.api_key = settings.get_api_key(self.service)
         if service_name is not None or base_url is not None:
             self.base_url = settings.resolve_base_url(
                 self.service,
@@ -482,7 +499,13 @@ class AgentRunner:
                 )
             )
         model_messages.extend(self.history[1 + self.compressed_message_count :])
-        return model_messages
+        return prepare_messages_for_openai_compatible_service(
+            model_messages,
+            self.service,
+            deepseek_thinking_enabled=(
+                self.service == "deepseek" and settings.is_deepseek_thinking_enabled()
+            ),
+        )
 
     def _stream_model_response(
         self,
@@ -653,6 +676,7 @@ class AgentRunner:
 
             self.history.append(HumanMessage(content=user_input))
             tool_round_signatures: list[str] = []
+            empty_final_response_retries = 0
 
             for _ in range(MAX_TOOL_ITERATIONS):
                 self.execution_controller.ensure_not_cancelled()
@@ -688,6 +712,20 @@ class AgentRunner:
                     continue
 
                 final_response = extract_text_content(ai_message.content)
+                if not final_response.strip():
+                    self.history.pop()
+                    if empty_final_response_retries < MAX_EMPTY_FINAL_RESPONSE_RETRIES:
+                        empty_final_response_retries += 1
+                        if event_handler is not None:
+                            event_handler(
+                                "response_retry",
+                                {
+                                    "reason": EMPTY_FINAL_RESPONSE_ERROR,
+                                    "attempt": empty_final_response_retries,
+                                },
+                            )
+                        continue
+                    raise RuntimeError(EMPTY_FINAL_RESPONSE_ERROR)
                 if event_handler is None and verbose:
                     print(f"最终回复: {final_response}")
                 return final_response

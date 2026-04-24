@@ -313,7 +313,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 app,
                 [],
                 input=(
-                    "/service deepseek\n"
+                    "/service deepseek https://example.test/v1\n"
                     "/model deepseek-chat\n"
                     "/service\n"
                     "/status\n"
@@ -322,12 +322,13 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("已忽略 /service 中的基址参数", result.output)
         self.assertIn("已切换当前会话服务商：deepseek", result.output)
         self.assertIn("已切换当前会话模型：deepseek / deepseek-chat", result.output)
         self.assertIn("当前服务", result.output)
         self.assertIn("当前模型", result.output)
         self.assertIn("deepseek-chat", result.output)
-        self.assertIn("https://api.deepseek.com/v1", result.output)
+        self.assertIn("http://localhost:8317/", result.output)
 
     def test_runtime_context_uses_configured_service_and_model_at_startup(self) -> None:
         """
@@ -337,8 +338,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         with (
             patch.object(settings, "service_name", "deepseek"),
-            patch.object(settings, "openai_model", "deepseek-chat"),
+            patch.object(settings, "deepseek_model", "deepseek-chat"),
             patch.object(settings, "openai_base_url", None),
+            patch.object(settings, "deepseek_base_url", None),
             patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
         ):
             result = cli_runner.invoke(

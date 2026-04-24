@@ -16,9 +16,22 @@ from cyber_agent.cli.webhook import (
 class _FakeGateway:
     def __init__(self) -> None:
         self.events = []
+        self.priority_events = []
 
     def handle_event(self, route, event):
         self.events.append((route, event))
+        return build_json_http_response(
+            {
+                "status": "ok",
+                "session_id": "webhook:feishu:oc_test_chat",
+                "delivery": {"method": "feishu_reply_api"},
+            }
+        )
+
+    def handle_priority_event(self, route, event):
+        if event.text.strip().lower() != "/stop":
+            return None
+        self.priority_events.append((route, event))
         return build_json_http_response(
             {
                 "status": "ok",
@@ -187,6 +200,42 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
         _, event = gateway.events[0]
         self.assertEqual(event.text, "/help")
         self.assertEqual(event.metadata["feishu_delivery_mode"], FEISHU_CREATE_API_MODE)
+
+    def test_dispatcher_handles_stop_before_queueing(self) -> None:
+        """测试：长连接 /stop 会优先处理，不会排在普通后台队列后面。"""
+        route = WebhookRouteConfig(
+            provider="feishu",
+            path="/webhook/feishu",
+        )
+        gateway = _FakeGateway()
+        renderer = _RecordingRenderer()
+        dispatcher = FeishuLongConnectionDispatcher(route, gateway, renderer)
+        dispatcher.start()
+
+        dispatcher.submit_event(
+            WebhookEvent(
+                provider="feishu",
+                session_key="oc_test_chat",
+                sender_id="ou_test_user",
+                sender_name="ou_test_user",
+                message_id="stop-001",
+                text="/stop",
+                metadata={
+                    "chat_id": "oc_test_chat",
+                    "feishu_delivery_mode": FEISHU_CREATE_API_MODE,
+                },
+            )
+        )
+
+        self.assertTrue(dispatcher.wait_until_idle())
+        self.assertEqual(gateway.events, [])
+        self.assertEqual(len(gateway.priority_events), 1)
+        _, event = gateway.priority_events[0]
+        self.assertEqual(event.text, "/stop")
+        self.assertTrue(
+            any("飞书消息已处理并完成回复" in info for info in renderer.infos),
+            msg=f"未找到处理完成提示：{renderer.infos}",
+        )
 
 
 if __name__ == "__main__":

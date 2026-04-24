@@ -177,8 +177,8 @@ def build_runtime_context(
         cli_allowed_paths,
     )
     service_name = settings.get_service()
-    model_name = settings.get_model_name()
-    api_key = settings.openai_api_key
+    model_name = settings.get_model_name(service_name=service_name)
+    api_key = settings.get_api_key(service_name)
     base_url = settings.resolve_base_url(service_name)
     configured_registry = parse_registered_tool_specs(tool_specs)
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
@@ -507,11 +507,14 @@ def switch_runtime_service(
     *,
     base_url: str | None = None,
 ) -> None:
-    """在当前会话中切换服务商，并按规则重算兼容接口基址。"""
+    """在当前会话中切换服务商，模型网关入口保持固定。"""
     normalized_service_name = settings.normalize_service_name(raw_service_name)
+    if base_url is not None and base_url.strip():
+        cli_renderer.print_info(
+            "模型基址固定为 http://localhost:8317/，已忽略 /service 中的基址参数。"
+        )
     runner.update_llm_config(
         service_name=normalized_service_name,
-        base_url=base_url,
     )
     sync_runtime_context_from_runner(runtime_context, runner)
     cli_renderer.print_info(

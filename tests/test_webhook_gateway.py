@@ -15,10 +15,12 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from cyber_agent.agent.approval import ApprovalPolicy
 from cyber_agent.agent.mode import AgentMode
+from cyber_agent.execution_control import ExecutionController, ExecutionInterruptedError
 from cyber_agent.cli.webhook import (
     FEISHU_NONCE_HEADER,
     FEISHU_SIGNATURE_HEADER,
     FEISHU_TIMESTAMP_HEADER,
+    FeishuTraceCollector,
     WECOM_ECHOSTR_QUERY_KEY,
     WECOM_MESSAGE_SIGNATURE_QUERY_KEY,
     WECOM_NONCE_QUERY_KEY,
@@ -114,6 +116,44 @@ class BlockingWebhookRunner(FakeWebhookRunner):
             event_handler=event_handler,
             approval_handler=approval_handler,
         )
+
+
+class StoppableBlockingWebhookRunner(FakeWebhookRunner):
+    """用于验证 /stop 能绕过飞书队列并打断正在执行的任务。"""
+
+    def __init__(
+        self,
+        execution_controller: ExecutionController,
+        started_event: threading.Event,
+        stopped_event: threading.Event,
+    ) -> None:
+        super().__init__()
+        self.execution_controller = execution_controller
+        self.started_event = started_event
+        self.stopped_event = stopped_event
+
+    def run(
+        self,
+        user_input: str,
+        verbose: bool = False,
+        event_handler=None,
+        approval_handler=None,
+    ) -> str:
+        _ = verbose, approval_handler
+        self.execution_controller.begin_run()
+        try:
+            if event_handler is not None:
+                event_handler("turn_start", {"input": user_input})
+            self.started_event.set()
+            while True:
+                try:
+                    self.execution_controller.ensure_not_cancelled()
+                except ExecutionInterruptedError:
+                    self.stopped_event.set()
+                    raise
+                time.sleep(0.01)
+        finally:
+            self.execution_controller.finish_run()
 
 
 class RichReplyWebhookRunner(FakeWebhookRunner):
@@ -1201,6 +1241,70 @@ class WebhookGatewayTestCase(unittest.TestCase):
         self.assertNotIn("处理中 ·", final_text)
         self.assertIn("当前系统空间充足", final_text)
 
+    def test_feishu_tool_result_key_value_output_uses_card_style(self) -> None:
+        """测试：普通工具输出中的多行键值结果会自动渲染成飞书卡片键值块。"""
+        steps = FeishuTraceCollector.build_steps(
+            "tool_result",
+            {
+                "tool_name": "repo_quick_audit",
+                "content": (
+                    "target: D:\\cyber-agent-cli\n"
+                    "files: 128\n"
+                    "status: ok"
+                ),
+            },
+        )
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].kind, "tool_result")
+        self.assertIn("**target**", steps[0].detail)
+        self.assertIn("D:\\cyber-agent-cli", steps[0].detail)
+        self.assertIn("**files**", steps[0].detail)
+        self.assertIn("128", steps[0].detail)
+        self.assertNotIn("```text", steps[0].detail)
+        self.assertNotIn("target: D", steps[0].detail)
+
+    def test_feishu_tool_result_json_object_uses_card_style(self) -> None:
+        """测试：结构化工具返回的 JSON 对象会复用同一套飞书键值块。"""
+        steps = FeishuTraceCollector.build_steps(
+            "tool_result",
+            {
+                "tool_name": "nmap_scanner",
+                "content": json.dumps(
+                    {
+                        "target": "127.0.0.1",
+                        "open_ports": [80, 443],
+                        "service_summary": "http, https",
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        )
+
+        self.assertEqual(len(steps), 1)
+        self.assertIn("**target**", steps[0].detail)
+        self.assertIn("127.0.0.1", steps[0].detail)
+        self.assertIn("**open_ports**", steps[0].detail)
+        self.assertIn("[80, 443]", steps[0].detail)
+        self.assertNotIn("```text", steps[0].detail)
+
+    def test_feishu_tool_result_tabular_output_stays_code_block(self) -> None:
+        """测试：普通命令表格输出不被误判为键值卡片。"""
+        steps = FeishuTraceCollector.build_steps(
+            "tool_result",
+            {
+                "tool_name": "run_shell_command",
+                "content": (
+                    "Filesystem Size Used Avail Use% Mounted on\n"
+                    "/dev/sdb 1007G 149G 808G 16% /"
+                ),
+            },
+        )
+
+        self.assertEqual(len(steps), 1)
+        self.assertIn("```text", steps[0].detail)
+        self.assertIn("/dev/sdb 1007G 149G 808G 16% /", steps[0].detail)
+
     def test_feishu_ai_reply_can_send_heartbeat_when_runner_stays_silent(self) -> None:
         """测试：长时间没有新事件时，飞书会补发一条“仍在执行中”的心跳消息。"""
         sent_requests: list[tuple[str, dict[str, object], dict[str, str] | None]] = []
@@ -1697,6 +1801,41 @@ class WebhookGatewayTestCase(unittest.TestCase):
         self.assertIn("playwright", serialized_card)
         self.assertIn("D:/project", serialized_card)
 
+    def test_feishu_status_command_can_reply_without_cli_capture(self) -> None:
+        """测试：飞书 `/status` 直接构造状态卡片，不依赖终端输出捕获。"""
+        route = WebhookRouteConfig(provider="feishu", path="/webhook/feishu")
+        gateway = WebhookGateway(
+            [route],
+            {
+                "approval_policy": ApprovalPolicy.NEVER,
+                "saved_allowed_paths": ["D:/project"],
+                "session_id": "webhook-feishu-oc_test_chat",
+            },
+            lambda runtime_context: FakeWebhookRunner(),
+        )
+
+        with patch(
+            "cyber_agent.cli.webhook._capture_builtin_command_output_for_webhook",
+            side_effect=AssertionError("/status 不应依赖 CLI 捕获输出"),
+        ):
+            response = gateway.handle_event(
+                route,
+                _build_feishu_event("/status", message_id="om_status"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.body)
+        reply_payload = dict(payload["reply_payload"])
+        self.assertEqual(reply_payload["msg_type"], "interactive")
+        card_payload = json.loads(str(reply_payload["content"]))
+        serialized_card = json.dumps(card_payload, ensure_ascii=False)
+        self.assertEqual(card_payload["header"]["title"]["content"], "会话状态")
+        self.assertIn("**会话概览**", serialized_card)
+        self.assertIn("**上下文**", serialized_card)
+        self.assertIn("openai", serialized_card)
+        self.assertIn("gpt-5.4", serialized_card)
+        self.assertIn("webhook-feishu-oc_test_chat", serialized_card)
+
     def test_feishu_help_command_can_reply_with_pretty_card(self) -> None:
         """测试：飞书 /help 会返回结构化卡片，而不是把终端边框原样发出去。"""
         sent_requests: list[tuple[str, dict[str, object], dict[str, str] | None]] = []
@@ -1997,14 +2136,28 @@ class WebhookGatewayTestCase(unittest.TestCase):
             reply_payload = dict(list_payload["reply_payload"])
             card_payload = json.loads(str(reply_payload["content"]))
             serialized_card = json.dumps(card_payload, ensure_ascii=False)
+            button_commands = [
+                str(action.get("value", {}).get("command", ""))
+                for element in card_payload.get("elements", [])
+                if isinstance(element, dict) and element.get("tag") == "action"
+                for action in element.get("actions", [])
+                if isinstance(action, dict)
+            ]
 
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(reply_payload["msg_type"], "interactive")
         self.assertIn("飞书会话列表", serialized_card)
+        self.assertIn("**概览**", serialized_card)
+        self.assertIn("点击下方“切换 N”按钮", serialized_card)
+        self.assertIn("**会话 ID**", serialized_card)
+        self.assertIn("**轮数**", serialized_card)
         self.assertIn(default_session_id, serialized_card)
         self.assertIn(new_session_id, serialized_card)
-        self.assertIn("/session use 1", serialized_card)
-        self.assertIn("/session use <会话ID>", serialized_card)
+        self.assertIn("/session use 1", button_commands)
+        self.assertIn("/session use 2", button_commands)
+        self.assertIn("/session default", button_commands)
+        self.assertNotIn(" | 轮数 ", serialized_card)
+        self.assertNotIn("/session use <会话ID>", serialized_card)
 
     def test_feishu_fallback_builtin_command_can_strip_terminal_borders(self) -> None:
         """测试：暂未专门适配的飞书命令会清洗 Rich 边框后再放进兜底卡片。"""
@@ -2219,6 +2372,126 @@ class WebhookGatewayTestCase(unittest.TestCase):
         self.assertTrue(gateway.wait_until_async_idle())
         self.assertEqual(len(sent_requests), 3)
         self.assertTrue(sent_requests[2][0].endswith("/messages/om_async/reply"))
+
+    def test_feishu_stop_command_can_interrupt_async_running_task(self) -> None:
+        """测试：飞书 /stop 会绕过异步队列，立即中断正在执行的任务。"""
+        execution_controller = ExecutionController()
+        started_event = threading.Event()
+        stopped_event = threading.Event()
+        sent_requests: list[tuple[str, dict[str, object], dict[str, str] | None]] = []
+
+        def fake_reply_sender(
+            url: str,
+            payload: dict[str, object],
+            timeout_seconds: float,
+            headers: dict[str, str] | None = None,
+        ) -> WebhookDeliveryReceipt:
+            _ = timeout_seconds
+            sent_requests.append((url, payload, headers))
+            if url.endswith("/auth/v3/tenant_access_token/internal"):
+                return WebhookDeliveryReceipt(
+                    status_code=200,
+                    response_text=json.dumps(
+                        {
+                            "code": 0,
+                            "tenant_access_token": "tenant-token",
+                            "expire": 7200,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            if "/open-apis/im/v1/messages/" in url and url.endswith("/reply"):
+                return WebhookDeliveryReceipt(
+                    status_code=200,
+                    response_text=json.dumps(
+                        {
+                            "code": 0,
+                            "data": {
+                                "message_id": "om_stop_reply",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            raise AssertionError(f"未预期的请求地址: {url}")
+
+        def build_request_body(text: str, message_id: str) -> bytes:
+            return json.dumps(
+                {
+                    "schema": "2.0",
+                    "token": "feishu-token",
+                    "type": "event_callback",
+                    "event": {
+                        "sender": {
+                            "sender_id": {
+                                "open_id": "ou_feishu_user",
+                            }
+                        },
+                        "message": {
+                            "message_id": message_id,
+                            "chat_id": "oc_test_chat",
+                            "message_type": "text",
+                            "content": json.dumps({"text": text}, ensure_ascii=False),
+                        },
+                    },
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+        gateway = WebhookGateway(
+            [
+                WebhookRouteConfig(
+                    provider="feishu",
+                    path="/webhook/feishu",
+                    provider_options={
+                        "verification_token": "feishu-token",
+                        "app_id": "cli_test_app",
+                        "app_secret": "test-secret",
+                        "reply_mode": "reply_api",
+                    },
+                )
+            ],
+            {
+                "approval_policy": ApprovalPolicy.NEVER,
+                "execution_controller": execution_controller,
+            },
+            lambda runtime_context: StoppableBlockingWebhookRunner(
+                execution_controller,
+                started_event,
+                stopped_event,
+            ),
+            reply_sender=fake_reply_sender,
+        )
+
+        response = gateway.handle_request(
+            "POST",
+            "/webhook/feishu",
+            {"content-type": "application/json"},
+            build_request_body("执行一个长任务", "om_long_running"),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(started_event.wait(timeout=1.0))
+        self.assertTrue(execution_controller.is_running())
+
+        started_at = time.monotonic()
+        stop_response = gateway.handle_request(
+            "POST",
+            "/webhook/feishu",
+            {"content-type": "application/json"},
+            build_request_body("/stop", "om_stop"),
+        )
+        elapsed_seconds = time.monotonic() - started_at
+
+        self.assertLess(elapsed_seconds, 0.5)
+        self.assertEqual(stop_response.status_code, 200)
+        self.assertTrue(stopped_event.wait(timeout=1.0))
+        self.assertTrue(gateway.wait_until_async_idle())
+        serialized_requests = json.dumps(sent_requests, ensure_ascii=False)
+        self.assertIn("停止任务", serialized_requests)
+        self.assertIn("已收到 /stop", serialized_requests)
+        self.assertTrue(
+            any(url.endswith("/messages/om_stop/reply") for url, _payload, _headers in sent_requests)
+        )
 
     def test_feishu_reply_api_reuses_cached_tenant_access_token(self) -> None:
         """测试：飞书官方回复模式会缓存 tenant_access_token，避免重复请求。"""

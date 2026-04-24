@@ -53,7 +53,9 @@ python -m playwright install chromium
 ```env
 OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-5.4
-OPENAI_BASE_URL=
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_THINKING_MODE=disabled
 SERVICE_NAME=openai
 SEARCH_SHOW_BROWSER=true
 ```
@@ -64,7 +66,9 @@ SEARCH_SHOW_BROWSER=true
 
 - `OPENAI_API_KEY`：必填。
 - `OPENAI_MODEL`：可选，默认是 `gpt-5.4`。
-- `OPENAI_BASE_URL`：可选，适用于兼容 OpenAI API 的代理服务；当 `SERVICE_NAME=deepseek` 时，会优先使用内置的 `https://api.deepseek.com/v1`，如需覆盖请在 CLI 中使用 `/service deepseek <基址>` 或在代码侧显式传入基址。
+- 模型网关基址固定为 `http://localhost:8317/`；切换服务商时只改变 `provider` 和模型名称。
+- `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`：可选，DeepSeek 专属配置。
+- `DEEPSEEK_THINKING_MODE`：可选，默认 `disabled`。DeepSeek thinking 模式在工具调用后要求完整回传 `reasoning_content`，当前工具链默认关闭 thinking 以保证飞书长连接和动态 capability 流程稳定。
 - `SERVICE_NAME`：可选，默认是 `openai`，当前支持 `openai`、`deepseek` 以及其他手动指定兼容基址的 OpenAI 兼容服务。
 
 ### 3. 启动
@@ -221,7 +225,6 @@ cyber-agent --mode authorized --approval-policy never webhook serve --config web
 - `/config allow-path add <目录>`
 - `/service`
 - `/service <服务商>`
-- `/service <服务商> <基址>`
 - `/model`
 - `/model <模型名>`
 - `/allow-path`
@@ -238,6 +241,7 @@ cyber-agent --mode authorized --approval-policy never webhook serve --config web
 - `/allow-path add <目录>` 只对当前会话生效。
 - `/config allow-path add <目录>` 会把目录写入工作目录下的 `.cyber-agent-cli.json`，供后续会话复用。
 - `/service <服务商>` 和 `/model <模型名>` 只对当前会话生效，不会改写 `.env`。
+- `/service <服务商>` 会继续使用固定模型网关 `http://localhost:8317/`。
 - `/history export <会话ID> [路径]` 默认导出为 Markdown；若路径以 `.json` 结尾，则导出结构化 JSON。
 
 ## Webhook 移动交互

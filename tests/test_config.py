@@ -3,15 +3,19 @@ import os
 import sys
 import unittest
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, Optional, TypeVar
+from typing import Any, Dict, Generator, Optional
 
 # 定义环境变量键名的类型别名
-EnvKeys = tuple[str, str, str]
+EnvKeys = tuple[str, ...]
 
 CONFIG_ENV_KEYS: EnvKeys = (
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
     "OPENAI_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_THINKING_MODE",
     "SERVICE_NAME",
 )
 
@@ -89,11 +93,12 @@ class SettingsTestCase(unittest.TestCase):
 
     def test_settings_can_build_deepseek_compatible_kwargs(self) -> None:
         """
-        测试：切换到 deepseek 时，应保留模型名并自动补出默认兼容基址。
+        测试：切换到 deepseek 时，应保留模型名并继续使用统一模型网关。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="deepseek-key",
-            OPENAI_MODEL="deepseek-chat",
+            OPENAI_API_KEY="openai-key",
+            DEEPSEEK_API_KEY="deepseek-key",
+            DEEPSEEK_MODEL="deepseek-v4-pro",
             SERVICE_NAME="deepseek",
         ):
             config_module = import_config_module()
@@ -102,18 +107,23 @@ class SettingsTestCase(unittest.TestCase):
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
 
         self.assertEqual(settings.get_service(), "deepseek")
-        self.assertEqual(kwargs["model"], "deepseek-chat")
+        self.assertEqual(kwargs["model"], "deepseek-v4-pro")
         self.assertEqual(kwargs["api_key"], "deepseek-key")
-        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
+        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+        self.assertEqual(
+            kwargs["extra_body"],
+            {"provider": "deepseek", "thinking": {"type": "disabled"}},
+        )
 
-    def test_deepseek_default_base_url_should_override_generic_proxy_base_url(self) -> None:
+    def test_service_base_url_always_uses_local_model_gateway(self) -> None:
         """
-        测试：当服务商是 deepseek 时，不应继续沿用 OPENAI_BASE_URL 中的通用代理地址。
+        测试：切换服务商时不使用服务商专属基址，只走本地模型网关。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="deepseek-key",
-            OPENAI_MODEL="deepseek-chat",
+            DEEPSEEK_API_KEY="deepseek-key",
+            DEEPSEEK_MODEL="deepseek-v4-pro",
             OPENAI_BASE_URL="https://example.test/v1",
+            DEEPSEEK_BASE_URL="https://deepseek.example/v1",
             SERVICE_NAME="deepseek",
         ):
             config_module = import_config_module()
@@ -121,7 +131,74 @@ class SettingsTestCase(unittest.TestCase):
 
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
 
-        self.assertEqual(kwargs["base_url"], "https://api.deepseek.com/v1")
+        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+
+    def test_deepseek_thinking_mode_can_be_enabled_explicitly(self) -> None:
+        """
+        测试：只有显式配置时才为 DeepSeek 启用 thinking 模式。
+        """
+        with temporary_config_env(
+            DEEPSEEK_API_KEY="deepseek-key",
+            DEEPSEEK_THINKING_MODE="enabled",
+            SERVICE_NAME="deepseek",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertTrue(settings.is_deepseek_thinking_enabled())
+        self.assertEqual(
+            kwargs["extra_body"],
+            {"provider": "deepseek", "thinking": {"type": "enabled"}},
+        )
+
+    def test_deepseek_thinking_mode_rejects_unknown_value(self) -> None:
+        """
+        测试：DeepSeek thinking 模式只接受 enabled 或 disabled，避免静默错配。
+        """
+        with temporary_config_env(
+            DEEPSEEK_API_KEY="deepseek-key",
+            DEEPSEEK_THINKING_MODE="maybe",
+            SERVICE_NAME="deepseek",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        with self.assertRaisesRegex(ValueError, "DEEPSEEK_THINKING_MODE"):
+            settings.get_chat_openai_kwargs(settings.get_service())
+
+    def test_deepseek_api_key_can_fallback_to_legacy_openai_key(self) -> None:
+        """
+        测试：未配置 DEEPSEEK_API_KEY 时，仍兼容旧版只写 OPENAI_API_KEY 的配置。
+        """
+        with temporary_config_env(
+            OPENAI_API_KEY="legacy-deepseek-key",
+            SERVICE_NAME="deepseek",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(kwargs["api_key"], "legacy-deepseek-key")
+
+    def test_openai_kwargs_include_provider_for_local_gateway(self) -> None:
+        """
+        测试：OpenAI 服务也会向本地网关传递 provider 字段。
+        """
+        with temporary_config_env(
+            OPENAI_API_KEY="openai-key",
+            OPENAI_MODEL="gpt-5.4-mini",
+            SERVICE_NAME="openai",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+        self.assertEqual(kwargs["extra_body"], {"provider": "openai"})
 
     def test_package_root_import_should_not_eagerly_import_heavy_submodules(self) -> None:
         """

@@ -266,6 +266,87 @@ class TransientStreamStartErrorFakeChatOpenAI:
         raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
 
+class EmptyFinalReplyFakeChatOpenAI:
+    """
+    用于测试模型在工具执行完成后第一次返回空最终消息时，运行器会补一次重试。
+    """
+
+    tool_message_attempt_count = 0
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "echo_tool",
+                        "args": json.dumps({"text": "empty-final"}),
+                        "id": "call_empty_final",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+            return
+
+        if isinstance(last_message, ToolMessage):
+            self.__class__.tool_message_attempt_count += 1
+            if self.__class__.tool_message_attempt_count == 1:
+                yield AIMessageChunk(content="")
+                return
+            yield AIMessageChunk(content="最终总结:")
+            yield AIMessageChunk(content=str(last_message.content))
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
+class AlwaysEmptyFinalReplyFakeChatOpenAI:
+    """
+    用于测试模型连续返回空最终消息时，运行器会明确报错而不是发送空回复。
+    """
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "echo_tool",
+                        "args": json.dumps({"text": "always-empty-final"}),
+                        "id": "call_always_empty_final",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+            return
+
+        if isinstance(last_message, ToolMessage):
+            yield AIMessageChunk(content="")
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
 class AgentRunnerTestCase(unittest.TestCase):
     def test_iter_stream_characters_splits_stream_chunk_into_single_characters(self) -> None:
         """
@@ -465,16 +546,24 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         self.assertEqual(runner.service, "openai")
         self.assertEqual(runner.model_name, "gpt-5.4-mini")
-        self.assertEqual(runner.base_url, "https://example.test/v1")
+        self.assertEqual(runner.base_url, "http://localhost:8317/")
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[0]["model"], "deepseek-chat")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[0]["base_url"],
-            "https://api.deepseek.com/v1",
+            "http://localhost:8317/",
+        )
+        self.assertEqual(
+            FakeChatOpenAI.init_kwargs_history[0]["extra_body"],
+            {"provider": "deepseek", "thinking": {"type": "disabled"}},
         )
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[-1]["model"], "gpt-5.4-mini")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["base_url"],
-            "https://example.test/v1",
+            "http://localhost:8317/",
+        )
+        self.assertEqual(
+            FakeChatOpenAI.init_kwargs_history[-1]["extra_body"],
+            {"provider": "openai"},
         )
 
     def test_runner_allows_long_non_repeating_tool_sequences(self) -> None:
@@ -535,6 +624,61 @@ class AgentRunnerTestCase(unittest.TestCase):
             TransientStreamStartErrorFakeChatOpenAI.tool_message_attempt_count,
             2,
         )
+
+    def test_runner_retries_empty_final_response_after_tools(self) -> None:
+        """
+        测试：工具执行完成后模型第一次返回空最终消息时，会自动重试并拿到总结。
+        """
+        tool_inputs: list[str] = []
+        retry_events: list[object] = []
+        EmptyFinalReplyFakeChatOpenAI.tool_message_attempt_count = 0
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """返回输入文本，便于验证重试不会重复执行工具。"""
+            tool_inputs.append(text)
+            return f"processed:{text}"
+
+        def capture_event(event_type: str, payload: object) -> None:
+            if event_type == "response_retry":
+                retry_events.append(payload)
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", EmptyFinalReplyFakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            response = runner.run(
+                "请执行后总结",
+                verbose=False,
+                event_handler=capture_event,
+            )
+
+        self.assertEqual(response, "最终总结:processed:empty-final")
+        self.assertEqual(tool_inputs, ["empty-final"])
+        self.assertEqual(EmptyFinalReplyFakeChatOpenAI.tool_message_attempt_count, 2)
+        self.assertEqual(len(retry_events), 1)
+        self.assertIsInstance(runner.history[-1], AIMessage)
+        self.assertEqual(runner.history[-1].content, "最终总结:processed:empty-final")
+
+    def test_runner_rejects_repeated_empty_final_response_after_retry(self) -> None:
+        """
+        测试：模型连续返回空最终消息时，仍会明确报错且不会保存空 AI 消息。
+        """
+        tool_inputs: list[str] = []
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """返回输入文本，便于验证工具只执行一次。"""
+            tool_inputs.append(text)
+            return f"processed:{text}"
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", AlwaysEmptyFinalReplyFakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            with self.assertRaises(RuntimeError) as captured:
+                runner.run("请执行后总结", verbose=False)
+
+        self.assertIn("模型返回空最终回复", str(captured.exception))
+        self.assertEqual(tool_inputs, ["always-empty-final"])
+        self.assertIsInstance(runner.history[-1], ToolMessage)
+        self.assertEqual(runner.history[-1].content, "processed:always-empty-final")
 
     def test_runner_respects_approval_handler_for_high_risk_tools(self) -> None:
         """
