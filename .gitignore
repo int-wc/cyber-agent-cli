@@ -2,6 +2,7 @@
 .env
 __pycache__/
 *.pyc
+*.log
 .cyber-agent-cli.json
 .pytest_cache/
 .cyber-agent-cli-sessions/
