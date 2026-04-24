@@ -3,6 +3,7 @@ Name: cyber-agent-cli
 Version: 0.1.0
 Summary: 一个基于LangChain的网络安全智能体CLI工具
 Author-email: Your Name <you@example.com>
+Requires-Python: >=3.11
 Requires-Dist: langchain>=0.2.0
 Requires-Dist: langgraph>=0.2.0
 Requires-Dist: langchain-openai
@@ -16,3 +17,4 @@ Requires-Dist: httpx>=0.28.1
 Requires-Dist: playwright>=1.0.0
 Requires-Dist: python-dotenv>=1.0.0
 Requires-Dist: aiofiles>=23.2.0
+Requires-Dist: lark-oapi>=1.5.3

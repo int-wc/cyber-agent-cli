@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,13 @@ MAX_TOOL_ITERATIONS = 48
 MAX_IDENTICAL_TOOL_ROUNDS = 3
 MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
 MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
+MAX_MODEL_STREAM_START_ATTEMPTS = 2
+MODEL_STREAM_START_RETRY_DELAY_SECONDS = 0.3
+TRANSIENT_MODEL_STREAM_ERROR_PATTERNS = (
+    "empty_stream",
+    "upstream stream closed before first payload",
+    "internal_server_error",
+)
 
 
 def extract_text_content(content: str | list[str | dict]) -> str:
@@ -107,6 +115,17 @@ def serialize_tool_args_for_signature(tool_call: dict) -> str:
         return str(normalized_args)
 
 
+def should_retry_model_stream_start_error(error: Exception) -> bool:
+    """判断模型是否命中了可安全重试的首包前断流错误。"""
+    normalized_error = str(error).strip().lower()
+    if not normalized_error:
+        return False
+    return any(
+        pattern in normalized_error
+        for pattern in TRANSIENT_MODEL_STREAM_ERROR_PATTERNS
+    )
+
+
 def build_tool_round_signature(
     tool_calls: list[dict],
     tool_messages: list[ToolMessage],
@@ -175,8 +194,6 @@ class AgentRunner:
         self.api_key = api_key if api_key is not None else settings.openai_api_key
         self.base_url = settings.resolve_base_url(self.service, base_url=base_url)
         self.llm: Any | None = None
-        if ChatOpenAI is not None:
-            self.llm = self._build_llm()
         self.mode = mode
         self.extra_allowed_paths = extra_allowed_paths or []
         self.configured_registry = configured_registry or {}
@@ -245,8 +262,6 @@ class AgentRunner:
             )
 
         self.llm = None
-        if ChatOpenAI is not None:
-            self.llm = self._build_llm()
         if self.capability_registry is not None:
             self.capability_registry.update_llm_config(
                 service_name=self.service,
@@ -404,6 +419,20 @@ class AgentRunner:
             return f"{summary_text[:self.context_summary_max_chars]}..."
         return summary_text
 
+    def _adjust_compression_boundary(
+        self,
+        non_system_messages: list[BaseMessage],
+        compression_boundary: int,
+    ) -> int:
+        """避免压缩边界把工具回合切成半截，留下孤立的 ToolMessage。"""
+        resolved_boundary = compression_boundary
+        while (
+            resolved_boundary < len(non_system_messages)
+            and isinstance(non_system_messages[resolved_boundary], ToolMessage)
+        ):
+            resolved_boundary += 1
+        return resolved_boundary
+
     def _ensure_context_window(self) -> None:
         """在模型调用前按阈值压缩较早消息，避免上下文持续无限增长。"""
         non_system_messages = self.history[1:]
@@ -417,6 +446,10 @@ class AgentRunner:
 
         keep_recent_messages = max(1, self.context_keep_recent_messages)
         compression_boundary = max(1, len(non_system_messages) - keep_recent_messages)
+        compression_boundary = self._adjust_compression_boundary(
+            non_system_messages,
+            compression_boundary,
+        )
         if compression_boundary <= self.compressed_message_count:
             return
 
@@ -458,18 +491,39 @@ class AgentRunner:
         self.execution_controller.ensure_not_cancelled()
         messages = self._build_model_messages()
         llm_with_tools = self._get_llm().bind_tools(self.tools, parallel_tool_calls=False)
-        accumulated_chunk: AIMessageChunk | None = None
 
         if event_handler is not None:
             event_handler("response_begin", None)
 
-        for chunk in llm_with_tools.stream(messages):
-            self.execution_controller.ensure_not_cancelled()
-            accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
-            token_text = extract_text_content(chunk.content)
-            if token_text and event_handler is not None:
-                for character in iter_stream_characters(token_text):
-                    event_handler("response_token", character)
+        accumulated_chunk: AIMessageChunk | None = None
+        for attempt_index in range(1, MAX_MODEL_STREAM_START_ATTEMPTS + 1):
+            accumulated_chunk = None
+            try:
+                for chunk in llm_with_tools.stream(messages):
+                    self.execution_controller.ensure_not_cancelled()
+                    accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
+                    token_text = extract_text_content(chunk.content)
+                    if token_text and event_handler is not None:
+                        for character in iter_stream_characters(token_text):
+                            event_handler("response_token", character)
+            except ExecutionInterruptedError:
+                raise
+            except Exception as exc:
+                can_retry = (
+                    accumulated_chunk is None
+                    and attempt_index < MAX_MODEL_STREAM_START_ATTEMPTS
+                    and should_retry_model_stream_start_error(exc)
+                )
+                if not can_retry:
+                    raise
+                time.sleep(MODEL_STREAM_START_RETRY_DELAY_SECONDS)
+                continue
+
+            if accumulated_chunk is not None:
+                break
+            if attempt_index < MAX_MODEL_STREAM_START_ATTEMPTS:
+                time.sleep(MODEL_STREAM_START_RETRY_DELAY_SECONDS)
+                continue
 
         if accumulated_chunk is None:
             raise RuntimeError("模型未返回任何响应分片。")

@@ -268,14 +268,50 @@ cyber-agent webhook example-config webhook-routes.json
 
 ```json
 {
-  "routes": [
-    {
-      "provider": "feishu",
+  "providers": {
+    "feishu": {
       "path": "/webhook/feishu",
-      "secret": "replace-with-shared-secret",
-      "reply_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/your-feishu-webhook"
+      "reply_webhook_url": "",
+      "provider_options": {
+        "verification_token": "",
+        "encrypt_key": "",
+        "app_id": "",
+        "app_secret": "",
+        "reply_mode": "",
+        "reply_in_thread": "",
+        "reply_retry_attempts": "",
+        "reply_retry_backoff_seconds": "",
+        "reply_signing_secret": ""
+      }
+    },
+    "dingtalk": {
+      "path": "/webhook/dingtalk",
+      "secret": "",
+      "reply_webhook_url": "",
+      "provider_options": {}
+    },
+    "wecom": {
+      "path": "/webhook/wecom",
+      "reply_webhook_url": "",
+      "provider_options": {
+        "token": "",
+        "encoding_aes_key": "",
+        "receive_id": "",
+        "reply_mode": ""
+      }
+    },
+    "email": {
+      "path": "/webhook/email",
+      "secret": "",
+      "reply_webhook_url": "",
+      "provider_options": {
+        "reply_retry_attempts": "",
+        "reply_retry_backoff_seconds": "",
+        "reply_signing_secret": "",
+        "reply_dead_letter_dir": ""
+      }
     }
-  ]
+  }
 }
 ```
 
@@ -285,14 +321,28 @@ cyber-agent webhook example-config webhook-routes.json
 cyber-agent --mode authorized --approval-policy never webhook serve --config webhook-routes.json --host 0.0.0.0 --port 8787
 ```
 
+若你没有公网地址，飞书应用机器人可直接使用官方长连接模式：
+
+```bash
+cyber-agent --mode authorized --approval-policy never webhook serve-feishu-long-connection --config webhook-routes.json
+```
+
 补充说明：
 
 - webhook 场景下不支持交互式审批；若使用 `prompt`，高风险工具会被拒绝。
+- `providers` 是面向统一运维的通用配置格式：保留全部平台入口即可，某个平台只要没有填写 `secret`、`reply_webhook_url` 或 `provider_options` 中的有效字段，就会在启动时自动跳过，不会注册该 webhook。
+- 若你已有旧版 `routes` 数组配置，当前版本仍然兼容；只是 `routes` 中每条都视为显式启用，不会做自动跳过。
 - `dingtalk` 会优先使用请求体中的 `sessionWebhook` 回包；若没有，则尝试同步 HTTP 响应。
-- `feishu`、`wecom`、`email` 默认支持把回复投递到配置中的 `reply_webhook_url`；若未配置，则会把建议回包作为 HTTP 响应 JSON 返回给上游桥接层。
-- `wecom` 当前仅支持经网关解密后的 JSON 回调；官方 XML 加密回调仍需结合真实企业配置补充验签与解密。
+- `secret` 是项目自定义的共享密钥校验；若接入飞书/企微官方回调，通常应改为在 `provider_options` 中配置各平台自己的验签参数，而不是继续依赖 `secret`。
+- `feishu` 现已支持官方 `Verification Token` 校验、`Encrypt Key` 解密和 `X-Lark-*` 签名校验；开启 `Encrypt Key` 后，普通事件会校验签名，`challenge` 校验会按官方流程直接解密后返回。
+- `feishu` 若配置 `provider_options.app_id`、`provider_options.app_secret`，且未显式指定 `reply_webhook_url`，会默认走官方消息回复 API 回到原消息；若希望强制使用官方回复，可把 `provider_options.reply_mode` 设为 `reply_api`，并可用 `provider_options.reply_in_thread=true` 控制是否按话题回复。
+- `feishu` 的 `https://open.feishu.cn/open-apis/bot/v2/hook/...` 属于群自定义机器人 webhook，只适合单向推送通知；若要实现“用户发消息给机器人，机器人在同一会话继续回复”，需要使用飞书应用机器人、订阅 `im.message.receive_v1` 事件并启用上面的官方回复 API 模式。
+- `webhook serve-feishu-long-connection` 会复用同一份 `webhook-routes.json` 中的 `feishu` 路由配置，通过飞书官方 SDK 建立长连接，不需要公网回调地址；若配置里存在多条 `feishu` 路由，可追加 `--path /webhook/feishu` 显式选择。
+- `wecom` 现已支持官方回调模式的 GET URL 校验、POST XML 验签解密，以及默认的加密被动文本回包。若希望继续把回复转发给外部桥接层，可把 `provider_options.reply_mode` 改为 `reply_webhook` 并配置 `reply_webhook_url`。
+- `reply_webhook_url` 现在支持 `provider_options.reply_retry_attempts`、`reply_retry_backoff_seconds`、`reply_signing_secret`、`reply_signature_header`、`reply_timestamp_header` 和 `reply_dead_letter_dir`，用于控制重试、HMAC 签名头和失败死信落盘。
 - `email` 当前默认支持 JSON 和 `application/x-www-form-urlencoded` 两类 webhook；若邮件服务使用 `multipart/form-data`，需要按真实供应商字段继续补充。
 - webhook 会按“provider + 会话键”自动复用本地历史会话，因此同一聊天线程会继承上下文。
+- 飞书/企微官方加密回调依赖运行环境中存在 `pycryptodome` 或 `cryptography` 之一；若两者都没有，网关会明确返回缺少加解密依赖的错误。
 
 ## 本地配置
 

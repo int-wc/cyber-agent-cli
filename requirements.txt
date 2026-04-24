@@ -12,3 +12,4 @@ httpx>=0.28.1
 playwright>=1.0.0
 python-dotenv>=1.0.0
 aiofiles>=23.2.0
+lark-oapi>=1.5.3

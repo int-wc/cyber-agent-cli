@@ -18,6 +18,7 @@ dependencies = [
     "playwright>=1.0.0",
     "python-dotenv>=1.0.0",
     "aiofiles>=23.2.0",
+    "lark-oapi>=1.5.3",
     # 根据你的网络安全工具需求添加更多依赖
 ]
 
@@ -33,6 +34,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
 
 [build-system]
 requires = ["setuptools>=61.0"]

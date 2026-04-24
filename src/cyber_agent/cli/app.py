@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import re
 import threading
@@ -20,7 +22,6 @@ from ..agent.approval import (
     parse_approval_policy,
 )
 from ..agent.mode import AgentMode, get_mode_label, parse_agent_mode
-from ..agent.runner import AgentRunner, extract_text_content
 from ..capability_registry import CapabilityRegistry
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
@@ -85,6 +86,23 @@ TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 renderer = CliRenderer()
 _cli_prompt_session = None
 _prompt_toolkit_disabled = False
+
+
+def _load_feishu_long_connection_support():
+    """按需加载飞书长连接支持，避免普通 CLI 启动被 SDK 导入拖慢。"""
+    from .feishu_long_connection import (
+        select_feishu_long_connection_route,
+        serve_feishu_long_connection,
+    )
+
+    return select_feishu_long_connection_route, serve_feishu_long_connection
+
+
+def _load_agent_runner_support():
+    """按需加载运行器支持，避免命令解析阶段提前初始化模型依赖。"""
+    from ..agent.runner import AgentRunner, extract_text_content
+
+    return AgentRunner, extract_text_content
 
 
 def _print_version_and_exit(value: bool) -> None:
@@ -207,6 +225,7 @@ def build_runtime_context(
 
 def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
     """按运行上下文创建会话运行器。"""
+    AgentRunner, _ = _load_agent_runner_support()
     runner = AgentRunner(
         runtime_context["tools"],
         mode=runtime_context["mode"],
@@ -546,6 +565,7 @@ def _format_context_message(message: BaseMessage, index: int) -> str:
     elif isinstance(message, SystemMessage):
         role_label = "系统"
 
+    _, extract_text_content = _load_agent_runner_support()
     content = extract_text_content(message.content).strip()
     if isinstance(message, AIMessage) and message.tool_calls and not content:
         content = f"工具调用：{json.dumps(message.tool_calls, ensure_ascii=False)}"
@@ -956,6 +976,8 @@ def run_agent_turn_with_stop_support(
             worker_errors.append(exc)
 
     worker_thread = threading.Thread(target=run_agent, daemon=True)
+    if runner.llm is None:
+        renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
     worker_thread.start()
 
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -1409,6 +1431,7 @@ def main_callback(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if ctx.invoked_subcommand is None:
+        renderer.print_info("正在初始化运行器，首次启动可能需要数秒。")
         run_chat_loop(
             create_runner(ctx.obj["runtime_context"]),
             ctx.obj["runtime_context"],
@@ -1429,9 +1452,12 @@ def chat(
     进入交互式聊天模式，或执行单轮对话。
     """
     runtime_context = ctx.obj["runtime_context"]
+    renderer.print_info("正在初始化运行器，首次启动可能需要数秒。")
     runner = create_runner(runtime_context)
     if message is not None:
         try:
+            if runner.llm is None:
+                renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
             runner.run(
                 message,
                 verbose=False,
@@ -1458,6 +1484,8 @@ def run(
     runtime_context = ctx.obj["runtime_context"]
     runner = create_runner(runtime_context)
     try:
+        if runner.llm is None:
+            renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
         runner.run(
             message,
             verbose=False,
@@ -1611,6 +1639,58 @@ def webhook_serve(
         base_dir=resolved_storage_dir,
         reply_timeout_seconds=reply_timeout_seconds,
     )
+
+
+@webhook_app.command("serve-feishu-long-connection")
+def webhook_serve_feishu_long_connection(
+    ctx: typer.Context,
+    config_path: str = typer.Option(
+        ...,
+        "--config",
+        help="飞书长连接使用的 webhook JSON 配置文件路径。",
+    ),
+    route_path: str | None = typer.Option(
+        None,
+        "--path",
+        help="当配置中存在多条 feishu 路由时，用于指定要复用的路由路径。",
+    ),
+    storage_dir: str | None = typer.Option(
+        None,
+        "--storage-dir",
+        help="长连接会话历史落盘使用的工作根目录；省略时默认使用当前工作目录。",
+    ),
+    reply_timeout_seconds: float = typer.Option(
+        DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
+        "--reply-timeout-seconds",
+        help="调用飞书官方回复接口时的超时时间（秒）。",
+    ),
+) -> None:
+    """
+    启动飞书官方 SDK 长连接客户端，无需公网回调地址即可接收消息并回复。
+    """
+    runtime_context = ctx.obj["runtime_context"]
+    try:
+        select_feishu_long_connection_route, serve_feishu_long_connection = (
+            _load_feishu_long_connection_support()
+        )
+        routes = load_webhook_routes_from_file(config_path)
+        resolved_route = select_feishu_long_connection_route(routes, route_path)
+        resolved_storage_dir = (
+            Path(storage_dir).expanduser().resolve()
+            if storage_dir is not None
+            else None
+        )
+        serve_feishu_long_connection(
+            resolved_route,
+            runtime_context,
+            create_runner,
+            cli_renderer=renderer,
+            base_dir=resolved_storage_dir,
+            reply_timeout_seconds=reply_timeout_seconds,
+        )
+    except (ModuleNotFoundError, ValueError) as exc:
+        renderer.print_error(f"运行失败：{exc}")
+        raise typer.Exit(code=1) from exc
 
 
 @app.command(name="doctor")

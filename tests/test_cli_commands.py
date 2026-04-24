@@ -3,7 +3,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from typer.testing import CliRunner
@@ -460,12 +460,60 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         payload = json.loads(result.output)
-        self.assertIn("routes", payload)
-        self.assertEqual(len(payload["routes"]), 4)
+        self.assertIn("providers", payload)
+        self.assertEqual(len(payload["providers"]), 4)
         self.assertEqual(
-            {route["provider"] for route in payload["routes"]},
+            set(payload["providers"]),
             {"feishu", "dingtalk", "wecom", "email"},
         )
+
+    def test_webhook_feishu_long_connection_command_can_start_with_config(self) -> None:
+        """
+        测试：webhook serve-feishu-long-connection 会加载配置并调用飞书长连接入口。
+        """
+        cli_runner = CliRunner()
+
+        with cli_runner.isolated_filesystem():
+            config_path = Path("webhook-routes.json")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "providers": {
+                            "feishu": {
+                                "path": "/webhook/feishu",
+                                "provider_options": {
+                                    "app_id": "cli_test_app",
+                                    "app_secret": "test-secret",
+                                },
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("cyber_agent.cli.app._load_feishu_long_connection_support") as mock_load:
+                mock_serve = Mock()
+                mock_load.return_value = (
+                    lambda routes, route_path=None: routes[0],
+                    mock_serve,
+                )
+                result = cli_runner.invoke(
+                    app,
+                    [
+                        "webhook",
+                        "serve-feishu-long-connection",
+                        "--config",
+                        str(config_path),
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        mock_serve.assert_called_once()
+        resolved_route = mock_serve.call_args.args[0]
+        self.assertEqual(resolved_route.provider, "feishu")
+        self.assertEqual(resolved_route.path, "/webhook/feishu")
 
     def test_run_command_reports_missing_langchain_openai_dependency_cleanly(self) -> None:
         """

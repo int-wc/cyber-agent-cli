@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -90,6 +91,40 @@ def _build_subprocess_options() -> dict[str, object]:
     return {"start_new_session": True}
 
 
+def _start_stream_reader(stream: object) -> tuple[list[str], threading.Thread]:
+    """异步持续读取子进程输出，避免主线程轮询时管道写满阻塞。"""
+    chunks: list[str] = []
+
+    def reader() -> None:
+        if not hasattr(stream, "read"):
+            return
+        try:
+            while True:
+                chunk = stream.read(1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            if hasattr(stream, "close"):
+                stream.close()
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    return chunks, reader_thread
+
+
+def _collect_stream_output(
+    stdout_chunks: list[str],
+    stderr_chunks: list[str],
+    stdout_thread: threading.Thread,
+    stderr_thread: threading.Thread,
+) -> tuple[str, str]:
+    """等待输出读取线程收尾，并归并标准输出与标准错误。"""
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    return "".join(stdout_chunks), "".join(stderr_chunks)
+
+
 def _run_process_with_controller(
     command: list[str],
     *,
@@ -99,6 +134,10 @@ def _run_process_with_controller(
 ) -> subprocess.CompletedProcess[str]:
     """以可轮询方式执行外部进程，便于 /stop 中途终止。"""
     process: subprocess.Popen[str] | None = None
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
     started_at = time.monotonic()
 
     try:
@@ -115,14 +154,19 @@ def _run_process_with_controller(
         )
         if execution_controller is not None:
             execution_controller.register_process(process)
+        stdout_chunks, stdout_thread = _start_stream_reader(process.stdout)
+        stderr_chunks, stderr_thread = _start_stream_reader(process.stderr)
 
         while True:
             if execution_controller is not None:
                 execution_controller.ensure_not_cancelled()
 
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=PROCESS_POLL_INTERVAL_SECONDS
+            if process.poll() is not None:
+                stdout, stderr = _collect_stream_output(
+                    stdout_chunks,
+                    stderr_chunks,
+                    stdout_thread,
+                    stderr_thread,
                 )
                 return subprocess.CompletedProcess(
                     process.args,
@@ -130,17 +174,39 @@ def _run_process_with_controller(
                     stdout,
                     stderr,
                 )
+            if time.monotonic() - started_at >= timeout_seconds:
+                terminate_process_tree(process)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                stdout, stderr = _collect_stream_output(
+                    stdout_chunks,
+                    stderr_chunks,
+                    stdout_thread,
+                    stderr_thread,
+                )
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout_seconds,
+                    output=stdout,
+                    stderr=stderr,
+                ) from None
+            time.sleep(PROCESS_POLL_INTERVAL_SECONDS)
+    except ExecutionInterruptedError:
+        if process is not None and process.poll() is None:
+            terminate_process_tree(process)
+            try:
+                process.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                if time.monotonic() - started_at >= timeout_seconds:
-                    terminate_process_tree(process)
-                    stdout, stderr = process.communicate()
-                    raise subprocess.TimeoutExpired(
-                        command,
-                        timeout_seconds,
-                        output=stdout,
-                        stderr=stderr,
-                    ) from None
+                process.kill()
+        raise
     finally:
+        if process is not None:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+            if process.stderr is not None and not process.stderr.closed:
+                process.stderr.close()
         if process is not None and execution_controller is not None:
             execution_controller.unregister_process(process)
 

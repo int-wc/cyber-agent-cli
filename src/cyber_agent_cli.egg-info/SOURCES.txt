@@ -16,11 +16,14 @@ src/cyber_agent/agent/state.py
 src/cyber_agent/cli/__init__.py
 src/cyber_agent/cli/app.py
 src/cyber_agent/cli/branding.py
+src/cyber_agent/cli/doctor.py
+src/cyber_agent/cli/feishu_long_connection.py
 src/cyber_agent/cli/interactive.py
 src/cyber_agent/cli/prompting.py
 src/cyber_agent/cli/render.py
 src/cyber_agent/cli/theme.py
 src/cyber_agent/cli/tui.py
+src/cyber_agent/cli/webhook.py
 src/cyber_agent/tools/__init__.py
 src/cyber_agent/tools/filesystem.py
 src/cyber_agent/tools/metadata.py
@@ -34,6 +37,8 @@ src/cyber_agent_cli.egg-info/dependency_links.txt
 src/cyber_agent_cli.egg-info/entry_points.txt
 src/cyber_agent_cli.egg-info/requires.txt
 src/cyber_agent_cli.egg-info/top_level.txt
+tests/test_000_bootstrap.py
+tests/test_agent_mode.py
 tests/test_agent_runner.py
 tests/test_agent_tool_call.py
 tests/test_authorized_mode_tools.py
@@ -42,5 +47,7 @@ tests/test_cli_chat_e2e.py
 tests/test_cli_commands.py
 tests/test_cli_interactive.py
 tests/test_config.py
+tests/test_feishu_long_connection.py
 tests/test_search_tool.py
 tests/test_session_store.py
+tests/test_webhook_gateway.py

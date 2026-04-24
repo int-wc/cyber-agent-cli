@@ -27,8 +27,15 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 encoding="utf-8",
                 errors="replace",
             )
-            return
         except FileNotFoundError:
+            process.kill()
+            return
+        if process.poll() is not None:
+            return
+        try:
+            process.wait(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
             process.kill()
             return
 

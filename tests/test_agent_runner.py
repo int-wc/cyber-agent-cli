@@ -217,6 +217,55 @@ class RepeatedLoopFakeChatOpenAI:
         raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
 
+class TransientStreamStartErrorFakeChatOpenAI:
+    """
+    用于测试模型在首个分片前断流时，运行器会做一次安全重试。
+    首轮先请求工具；工具结果回填后，第一次续跑抛出上游 empty_stream，
+    第二次再正常给出最终回答。
+    """
+
+    tool_message_attempt_count = 0
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "echo_tool",
+                        "args": json.dumps({"text": "retry-me"}),
+                        "id": "call_retry_once",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+            return
+
+        if isinstance(last_message, ToolMessage):
+            self.__class__.tool_message_attempt_count += 1
+            if self.__class__.tool_message_attempt_count == 1:
+                raise RuntimeError(
+                    "Error code: 500 - {'error': {'message': "
+                    "'empty_stream: upstream stream closed before first payload', "
+                    "'type': 'server_error', 'code': 'internal_server_error'}}"
+                )
+            yield AIMessageChunk(content="final:")
+            yield AIMessageChunk(content=str(last_message.content))
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
 class AgentRunnerTestCase(unittest.TestCase):
     def test_iter_stream_characters_splits_stream_chunk_into_single_characters(self) -> None:
         """
@@ -356,6 +405,42 @@ class AgentRunnerTestCase(unittest.TestCase):
         self.assertEqual(model_messages[-2].content, "c" * 40)
         self.assertEqual(model_messages[-1].content, "d" * 40)
 
+    def test_runner_compression_boundary_can_skip_orphan_tool_messages(self) -> None:
+        """
+        测试：压缩边界若落在工具回合中间，应自动前移，避免模型上下文里留下孤立 ToolMessage。
+        """
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            runner = AgentRunner(
+                [],
+                max_context_chars=40,
+                context_keep_recent_messages=4,
+            )
+            runner.history.extend(
+                [
+                    HumanMessage(content="旧问题"),
+                    AIMessage(content="", tool_calls=[{"id": "call-001", "name": "echo_tool", "args": {"text": "hi"}}]),
+                    ToolMessage(content="工具结果", name="echo_tool", tool_call_id="call-001"),
+                    AIMessage(content="旧回答"),
+                    HumanMessage(content="新问题"),
+                    AIMessage(content="新回答"),
+                ]
+            )
+
+            with patch.object(
+                runner,
+                "_summarize_messages_for_context",
+                return_value="压缩摘要",
+            ):
+                model_messages = runner.get_model_context_snapshot()
+
+        self.assertEqual(runner.compressed_summary, "压缩摘要")
+        self.assertEqual(runner.compressed_message_count, 3)
+        self.assertEqual(len(model_messages), 5)
+        self.assertIn("压缩摘要", model_messages[1].content)
+        self.assertIsInstance(model_messages[2], AIMessage)
+        self.assertEqual(model_messages[2].content, "旧回答")
+        self.assertFalse(any(isinstance(message, ToolMessage) for message in model_messages[2:3]))
+
     def test_runner_can_use_and_switch_openai_compatible_service_config(self) -> None:
         """
         测试：运行器支持非 openai 服务商，并可在当前会话内切换模型配置。
@@ -368,11 +453,15 @@ class AgentRunnerTestCase(unittest.TestCase):
                 service_name="deepseek",
                 model_name="deepseek-chat",
             )
+            self.assertEqual(FakeChatOpenAI.init_kwargs_history, [])
+            runner._get_llm()
             runner.update_llm_config(
                 service_name="openai",
                 model_name="gpt-5.4-mini",
                 base_url="https://example.test/v1",
             )
+            self.assertIsNone(runner.llm)
+            runner._get_llm()
 
         self.assertEqual(runner.service, "openai")
         self.assertEqual(runner.model_name, "gpt-5.4-mini")
@@ -420,6 +509,32 @@ class AgentRunnerTestCase(unittest.TestCase):
                 runner.run("进入循环", verbose=False)
 
         self.assertIn("重复工具调用循环", str(captured.exception))
+
+    def test_runner_retries_transient_empty_stream_before_first_payload(self) -> None:
+        """
+        测试：若模型在首个分片前遇到上游 empty_stream，运行器会重试一次，
+        且不会重复执行已经完成的工具调用。
+        """
+
+        tool_inputs: list[str] = []
+        TransientStreamStartErrorFakeChatOpenAI.tool_message_attempt_count = 0
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """回显文本，用于确认重试不会重复执行工具。"""
+            tool_inputs.append(text)
+            return f"processed:{text}"
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", TransientStreamStartErrorFakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            response = runner.run("请继续", verbose=False)
+
+        self.assertEqual(response, "final:processed:retry-me")
+        self.assertEqual(tool_inputs, ["retry-me"])
+        self.assertEqual(
+            TransientStreamStartErrorFakeChatOpenAI.tool_message_attempt_count,
+            2,
+        )
 
     def test_runner_respects_approval_handler_for_high_risk_tools(self) -> None:
         """
