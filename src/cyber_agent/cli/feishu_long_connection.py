@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from queue import Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .render import CliRenderer
 from .webhook import (
@@ -22,13 +22,9 @@ from .webhook import (
 
 FEISHU_LONG_CONNECTION_DEDUP_WINDOW_SECONDS = 300.0
 
-try:
-    import lark_oapi as lark
-except ModuleNotFoundError as exc:  # pragma: no cover - 通过 CLI 测试覆盖缺依赖分支
-    lark = None
-    LARK_OAPI_IMPORT_ERROR = exc
-else:  # pragma: no cover - 常量赋值无需单独测试
-    LARK_OAPI_IMPORT_ERROR = None
+lark: Any | None = None
+LARK_OAPI_IMPORT_ERROR: ModuleNotFoundError | None = None
+ObservableLarkClient: Any | None = None
 
 if TYPE_CHECKING:
     from ..agent.runner import AgentRunner
@@ -65,17 +61,32 @@ def select_feishu_long_connection_route(
     return candidate_routes[0]
 
 
-def _ensure_lark_oapi_available() -> None:
-    if lark is None:
+def _ensure_lark_oapi_available() -> Any:
+    """按需导入飞书 SDK，避免普通测试和 CLI 启动被 SDK 导入拖慢。"""
+    global lark, LARK_OAPI_IMPORT_ERROR
+
+    if lark is not None:
+        return lark
+    if LARK_OAPI_IMPORT_ERROR is not None:
+        raise LARK_OAPI_IMPORT_ERROR
+
+    try:
+        import lark_oapi as loaded_lark
+    except ModuleNotFoundError as exc:  # pragma: no cover - 通过 CLI 测试覆盖缺依赖分支
+        LARK_OAPI_IMPORT_ERROR = exc
         raise ModuleNotFoundError(
             "缺少 `lark-oapi` 依赖，请先执行 `pip install -r requirements.txt`。"
-        ) from LARK_OAPI_IMPORT_ERROR
+        ) from exc
+
+    lark = loaded_lark
+    LARK_OAPI_IMPORT_ERROR = None
+    return lark
 
 
 def _serialize_lark_event(event: object) -> dict[str, object]:
-    _ensure_lark_oapi_available()
+    lark_module = _ensure_lark_oapi_available()
     try:
-        payload = json.loads(lark.JSON.marshal(event))
+        payload = json.loads(lark_module.JSON.marshal(event))
     except json.JSONDecodeError as exc:
         raise ValueError("飞书长连接事件序列化后不是合法 JSON。") from exc
     if not isinstance(payload, dict):
@@ -337,11 +348,10 @@ class FeishuLongConnectionDispatcher:
                 self._queue.task_done()
 
 
-if lark is None:  # pragma: no cover - 无依赖时不会真正实例化客户端
-    class ObservableLarkClient:  # type: ignore[no-redef]
-        pass
-else:
-    class ObservableLarkClient(lark.ws.Client):
+def _build_observable_lark_client_class(lark_module: Any) -> Any:
+    """按需创建可观察连接状态的飞书客户端子类。"""
+
+    class _ObservableLarkClient(lark_module.ws.Client):
         def __init__(
             self,
             *args,
@@ -371,6 +381,8 @@ else:
                 )
                 self._has_connected_once = True
 
+    return _ObservableLarkClient
+
 
 def serve_feishu_long_connection(
     route: WebhookRouteConfig,
@@ -381,7 +393,7 @@ def serve_feishu_long_connection(
     base_dir: Path | None = None,
     reply_timeout_seconds: float = DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
 ) -> None:
-    _ensure_lark_oapi_available()
+    lark_module = _ensure_lark_oapi_available()
     if route.provider != "feishu":
         raise ValueError("飞书长连接仅支持 provider=feishu 的路由。")
 
@@ -441,25 +453,31 @@ def serve_feishu_long_connection(
         """飞书已读回执不需要进入 Agent，只注册处理器以避免 SDK 打印误导性错误。"""
         _ = data
 
+    def _on_bot_p2p_chat_entered(data: object) -> None:
+        """机器人被用户打开单聊窗口时不触发 Agent，只显式吞掉系统事件。"""
+        _ = data
+
     event_handler = (
         # 长连接模式由飞书官方链路保证事件来源，不复用 webhook 的 token / encrypt 校验。
-        lark.EventDispatcherHandler.builder(
+        lark_module.EventDispatcherHandler.builder(
             "",
             "",
         )
         .register_p2_im_message_receive_v1(_on_message_receive)
         .register_p2_im_message_message_read_v1(_on_message_read)
+        .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(_on_bot_p2p_chat_entered)
         .register_p2_card_action_trigger(_on_card_action)
         .build()
     )
     cli_renderer.print_info(
         "正在启动飞书长连接客户端，将复用现有 Agent 会话和飞书官方回复接口。"
     )
-    client = ObservableLarkClient(
+    client_class = ObservableLarkClient or _build_observable_lark_client_class(lark_module)
+    client = client_class(
         app_id,
         app_secret,
         event_handler=event_handler,
-        log_level=lark.LogLevel.INFO,
+        log_level=lark_module.LogLevel.INFO,
         cli_renderer=cli_renderer,
         route=route,
     )

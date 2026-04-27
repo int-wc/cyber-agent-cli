@@ -1,9 +1,11 @@
 import unittest
+from unittest.mock import patch
 
 from cyber_agent.cli.feishu_long_connection import (
     FeishuLongConnectionDispatcher,
     _build_feishu_card_command_event,
     select_feishu_long_connection_route,
+    serve_feishu_long_connection,
 )
 from cyber_agent.cli.webhook import (
     FEISHU_CREATE_API_MODE,
@@ -235,6 +237,79 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
         self.assertTrue(
             any("飞书消息已处理并完成回复" in info for info in renderer.infos),
             msg=f"未找到处理完成提示：{renderer.infos}",
+        )
+
+    def test_serve_registers_bot_p2p_chat_entered_handler(self) -> None:
+        """测试：注册机器人进入单聊事件处理器，避免 SDK 报 processor not found。"""
+        registered_handlers: list[str] = []
+
+        class FakeBuilder:
+            def register_p2_im_message_receive_v1(self, handler):
+                registered_handlers.append("im.message.receive_v1")
+                return self
+
+            def register_p2_im_message_message_read_v1(self, handler):
+                registered_handlers.append("im.message.message_read_v1")
+                return self
+
+            def register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self, handler):
+                registered_handlers.append("im.chat.access_event.bot_p2p_chat_entered_v1")
+                return self
+
+            def register_p2_card_action_trigger(self, handler):
+                registered_handlers.append("card.action.trigger")
+                return self
+
+            def build(self):
+                return object()
+
+        class FakeEventDispatcherHandler:
+            @staticmethod
+            def builder(encrypt_key: str, verification_token: str):
+                return FakeBuilder()
+
+        class FakeLogLevel:
+            INFO = "info"
+
+        class FakeLark:
+            EventDispatcherHandler = FakeEventDispatcherHandler
+            LogLevel = FakeLogLevel
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs) -> None:
+                self.args = args
+                self.kwargs = kwargs
+
+            def start(self) -> None:
+                return None
+
+        route = WebhookRouteConfig(
+            provider="feishu",
+            path="/webhook/feishu",
+            provider_options={
+                "app_id": "cli_test_app",
+                "app_secret": "test-secret",
+            },
+        )
+        renderer = _RecordingRenderer()
+
+        with (
+            patch("cyber_agent.cli.feishu_long_connection.lark", FakeLark),
+            patch(
+                "cyber_agent.cli.feishu_long_connection.ObservableLarkClient",
+                FakeClient,
+            ),
+        ):
+            serve_feishu_long_connection(
+                route,
+                {},
+                lambda runtime_context: None,
+                cli_renderer=renderer,
+            )
+
+        self.assertIn(
+            "im.chat.access_event.bot_p2p_chat_entered_v1",
+            registered_handlers,
         )
 
 

@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .tools.filesystem import normalize_allowed_roots
-
 LOCAL_CONFIG_FILENAME = ".cyber-agent-cli.json"
 
 
@@ -13,6 +11,21 @@ class LocalCliConfig:
     """表示当前工作目录下的本地 CLI 配置。"""
 
     allow_paths: list[Path]
+
+
+def normalize_allowed_roots(allowed_roots: list[Path | str]) -> list[Path]:
+    """轻量规范化允许路径，避免读取本地配置时导入完整工具集合。"""
+    normalized_roots: list[Path] = []
+    seen_roots: set[Path] = set()
+
+    for raw_root in allowed_roots:
+        root_path = Path(raw_root).expanduser().resolve()
+        if root_path in seen_roots:
+            continue
+        normalized_roots.append(root_path)
+        seen_roots.add(root_path)
+
+    return normalized_roots
 
 
 def get_local_config_path(base_dir: Path | None = None) -> Path:

@@ -5,13 +5,13 @@ import re
 import threading
 import time
 import sys
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
+from typing import TYPE_CHECKING, Any
 
 import typer
 from click.exceptions import Abort
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import BaseTool
 from rich.console import Console, RenderableType
 
 from .. import __version__
@@ -22,8 +22,6 @@ from ..agent.approval import (
     parse_approval_policy,
 )
 from ..agent.mode import AgentMode, get_mode_label, parse_agent_mode
-from ..capability_registry import CapabilityRegistry
-from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..local_config import (
     add_allow_path_to_local_config,
@@ -31,24 +29,6 @@ from ..local_config import (
     load_local_cli_config,
     merge_allow_paths,
 )
-from ..session_store import (
-    create_session_id,
-    export_session_history,
-    get_session_storage_dir,
-    list_stored_sessions,
-    load_session_history,
-    save_session_history,
-    search_stored_sessions,
-)
-from ..tools import (
-    describe_allowed_roots,
-    describe_command_registry,
-    describe_tool_instances,
-    get_default_tools,
-    resolve_allowed_roots,
-    resolve_command_registry,
-)
-from .doctor import build_doctor_payload, build_doctor_rows
 from .interactive import (
     EXIT_COMMANDS,
     InteractionUiMode,
@@ -56,15 +36,25 @@ from .interactive import (
     parse_interaction_ui_mode,
 )
 from .render import CliRenderer
-from .webhook import (
-    DEFAULT_WEBHOOK_HOST,
-    DEFAULT_WEBHOOK_PORT,
-    DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
-    SUPPORTED_WEBHOOK_PROVIDERS,
-    build_default_webhook_routes,
-    build_webhook_example_config,
-    load_webhook_routes_from_file,
-    serve_webhook_gateway,
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+    from langchain_core.tools import BaseTool
+    from ..agent.runner import AgentRunner
+    from ..capability_registry import CapabilityRegistry
+
+SUPPORTED_WEBHOOK_PROVIDERS = ("feishu", "dingtalk", "wecom", "email")
+DEFAULT_WEBHOOK_HOST = "0.0.0.0"
+DEFAULT_WEBHOOK_PORT = 8787
+DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS = 10.0
+SESSION_STORAGE_DIRNAME = ".cyber-agent-cli-sessions"
+RUNTIME_CAPABILITY_REQUIRED_KEYS = (
+    "execution_controller",
+    "service_name",
+    "model_name",
+    "api_key",
+    "mode",
+    "extra_allowed_paths",
+    "configured_registry",
 )
 
 app = typer.Typer(
@@ -98,11 +88,112 @@ def _load_feishu_long_connection_support():
     return select_feishu_long_connection_route, serve_feishu_long_connection
 
 
+def _get_settings():
+    """按需读取配置对象，避免版本和帮助命令导入 pydantic-settings。"""
+    from ..config import settings
+
+    return settings
+
+
 def _load_agent_runner_support():
     """按需加载运行器支持，避免命令解析阶段提前初始化模型依赖。"""
     from ..agent.runner import AgentRunner, extract_text_content
 
     return AgentRunner, extract_text_content
+
+
+def _load_message_type_support():
+    """按需加载 LangChain 消息类型，避免普通 CLI 启动提前导入 LangChain。"""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    return AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+
+def _load_capability_registry_support():
+    """按需加载动态 capability 注册表。"""
+    from ..capability_registry import CapabilityRegistry
+
+    return CapabilityRegistry
+
+
+def _load_tool_support():
+    """按需加载工具集合，避免 `--help` 和 `version` 命令承担工具导入成本。"""
+    from ..tools import (
+        describe_allowed_roots,
+        describe_command_registry,
+        describe_tool_instances,
+        get_default_tools,
+        resolve_allowed_roots,
+        resolve_command_registry,
+    )
+
+    return {
+        "describe_allowed_roots": describe_allowed_roots,
+        "describe_command_registry": describe_command_registry,
+        "describe_tool_instances": describe_tool_instances,
+        "get_default_tools": get_default_tools,
+        "resolve_allowed_roots": resolve_allowed_roots,
+        "resolve_command_registry": resolve_command_registry,
+    }
+
+
+def _load_session_store_support():
+    """按需加载历史会话存储，避免帮助和版本命令导入 LangChain 消息类型。"""
+    from ..session_store import (
+        create_session_id,
+        export_session_history,
+        get_session_storage_dir,
+        list_stored_sessions,
+        load_session_history,
+        save_session_history,
+        search_stored_sessions,
+    )
+
+    return {
+        "create_session_id": create_session_id,
+        "export_session_history": export_session_history,
+        "get_session_storage_dir": get_session_storage_dir,
+        "list_stored_sessions": list_stored_sessions,
+        "load_session_history": load_session_history,
+        "save_session_history": save_session_history,
+        "search_stored_sessions": search_stored_sessions,
+    }
+
+
+def create_runtime_session_id(now: datetime | None = None) -> str:
+    """轻量生成会话 ID，避免启动阶段导入完整历史存储模块。"""
+    resolved_now = now or datetime.now().astimezone()
+    return resolved_now.strftime("%Y%m%d-%H%M%S-%f")
+
+
+def get_runtime_session_storage_dir(base_dir: Path | None = None) -> Path:
+    """轻量计算历史目录路径，真正读写时再加载 session_store。"""
+    resolved_base_dir = (base_dir or Path.cwd()).resolve()
+    return resolved_base_dir / SESSION_STORAGE_DIRNAME
+
+
+def _load_doctor_support():
+    """按需加载 doctor 诊断模块，避免普通启动导入 prompt_toolkit/Textual。"""
+    from .doctor import build_doctor_payload, build_doctor_rows
+
+    return build_doctor_payload, build_doctor_rows
+
+
+def _load_webhook_support():
+    """按需加载 webhook 网关，避免普通 CLI 启动提前导入移动端桥接链路。"""
+    from .webhook import (
+        build_default_webhook_routes,
+        build_webhook_example_config,
+        load_webhook_routes_from_file,
+        serve_webhook_gateway,
+    )
+
+    return {
+        "build_default_webhook_routes": build_default_webhook_routes,
+        "build_webhook_example_config": build_webhook_example_config,
+        "load_webhook_routes_from_file": load_webhook_routes_from_file,
+        "serve_webhook_gateway": serve_webhook_gateway,
+    }
 
 
 def _print_version_and_exit(value: bool) -> None:
@@ -176,29 +267,17 @@ def build_runtime_context(
         persisted_allowed_paths,
         cli_allowed_paths,
     )
+    settings = _get_settings()
     service_name = settings.get_service()
     model_name = settings.get_model_name(service_name=service_name)
     api_key = settings.get_api_key(service_name)
     base_url = settings.resolve_base_url(service_name)
     configured_registry = parse_registered_tool_specs(tool_specs)
-    allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
-    command_registry = resolve_command_registry(mode, configured_registry)
+    allowed_roots = [Path.cwd().resolve()]
+    if mode is AgentMode.AUTHORIZED:
+        allowed_roots = merge_allow_paths(allowed_roots, extra_allowed_paths)
+    command_registry = configured_registry if mode is AgentMode.AUTHORIZED else {}
     execution_controller = ExecutionController()
-    capability_registry = CapabilityRegistry(
-        execution_controller=execution_controller,
-        service_name=service_name,
-        model_name=model_name,
-        api_key=api_key,
-        base_url=base_url,
-    )
-    tools = get_default_tools(
-        mode,
-        extra_allowed_paths,
-        configured_registry,
-        execution_controller,
-        capability_registry,
-    )
-
     return {
         "mode": mode,
         "extra_allowed_paths": extra_allowed_paths,
@@ -207,20 +286,139 @@ def build_runtime_context(
         "allowed_roots": allowed_roots,
         "configured_registry": configured_registry,
         "command_registry": command_registry,
-        "tools": tools,
+        "tools": [],
         "approval_policy": approval_policy,
         "ui_mode": ui_mode,
         "execution_controller": execution_controller,
-        "capability_registry": capability_registry,
+        "capability_registry": None,
+        "runtime_capabilities_loaded": False,
         "service_name": service_name,
         "model_name": model_name,
         "base_url": base_url,
         "api_key": api_key,
-        "session_id": create_session_id(),
+        "session_id": create_runtime_session_id(),
         "session_source_id": None,
-        "session_storage_dir": get_session_storage_dir(),
+        "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
     }
+
+
+def get_or_build_runtime_context(ctx: typer.Context) -> dict[str, object]:
+    """按需构建运行上下文，让不需要 Agent 的命令快速启动。"""
+    ctx.ensure_object(dict)
+    runtime_context = ctx.obj.get("runtime_context")
+    if isinstance(runtime_context, dict):
+        return runtime_context
+
+    runtime_options = ctx.obj.get("runtime_options")
+    if not isinstance(runtime_options, dict):
+        raise RuntimeError("运行上下文尚未初始化。")
+
+    runtime_context = build_runtime_context(
+        runtime_options["mode"],
+        runtime_options["allow_paths"],
+        runtime_options["tool_specs"],
+        runtime_options["approval_policy"],
+        runtime_options["ui_mode"],
+    )
+    ctx.obj["runtime_context"] = runtime_context
+    return runtime_context
+
+
+def _sync_runner_capabilities_from_context(
+    runtime_context: dict[str, object],
+    runner: AgentRunner,
+) -> None:
+    """把上下文中已有的工具作用域同步给运行器，兼容 webhook 最小上下文。"""
+    runner.allowed_roots = list(
+        runtime_context.get("allowed_roots", getattr(runner, "allowed_roots", []))
+    )
+    runner.command_registry = dict(
+        runtime_context.get(
+            "command_registry",
+            getattr(runner, "command_registry", {}),
+        )
+    )
+    runner.tools = list(runtime_context.get("tools", getattr(runner, "tools", [])))
+    runner.capability_registry = runtime_context.get(
+        "capability_registry",
+        getattr(runner, "capability_registry", None),
+    )
+
+
+def ensure_runtime_capabilities(
+    runtime_context: dict[str, object],
+    runner: AgentRunner | None = None,
+) -> None:
+    """在真正需要工具或 capability 时再加载重依赖。"""
+    if runtime_context.get("runtime_capabilities_loaded") is True:
+        if runner is not None:
+            _sync_runner_capabilities_from_context(runtime_context, runner)
+        return
+
+    missing_runtime_keys = [
+        key for key in RUNTIME_CAPABILITY_REQUIRED_KEYS if key not in runtime_context
+    ]
+    if missing_runtime_keys:
+        if runner is None:
+            raise KeyError(missing_runtime_keys[0])
+        runtime_context["allowed_roots"] = list(getattr(runner, "allowed_roots", []))
+        runtime_context["command_registry"] = dict(
+            getattr(runner, "command_registry", {})
+        )
+        runtime_context["tools"] = list(getattr(runner, "tools", []))
+        runtime_context["capability_registry"] = getattr(
+            runner,
+            "capability_registry",
+            None,
+        )
+        runtime_context["runtime_capabilities_loaded"] = True
+        _sync_runner_capabilities_from_context(runtime_context, runner)
+        return
+
+    CapabilityRegistry = _load_capability_registry_support()
+    tool_support = _load_tool_support()
+    capability_registry = CapabilityRegistry(
+        execution_controller=runtime_context["execution_controller"],
+        service_name=str(runtime_context["service_name"]),
+        model_name=str(runtime_context["model_name"]),
+        api_key=str(runtime_context["api_key"]),
+        base_url=(
+            str(runtime_context["base_url"])
+            if runtime_context.get("base_url") is not None
+            else None
+        ),
+    )
+    allowed_roots = tool_support["resolve_allowed_roots"](
+        runtime_context["mode"],
+        runtime_context["extra_allowed_paths"],
+    )
+    command_registry = tool_support["resolve_command_registry"](
+        runtime_context["mode"],
+        runtime_context["configured_registry"],
+    )
+    tools = tool_support["get_default_tools"](
+        runtime_context["mode"],
+        runtime_context["extra_allowed_paths"],
+        runtime_context["configured_registry"],
+        runtime_context["execution_controller"],
+        capability_registry,
+    )
+
+    runtime_context["allowed_roots"] = allowed_roots
+    runtime_context["command_registry"] = command_registry
+    runtime_context["tools"] = tools
+    runtime_context["capability_registry"] = capability_registry
+    runtime_context["runtime_capabilities_loaded"] = True
+
+    if runner is not None:
+        runner.allowed_roots = list(allowed_roots)
+        runner.command_registry = dict(command_registry)
+        runner.tools = list(tools)
+        runner.capability_registry = capability_registry
+        capability_registry.register_refresh_callback(
+            lambda: _refresh_runner_capabilities(runtime_context, runner)
+        )
 
 
 def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
@@ -241,10 +439,19 @@ def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
         base_url=runtime_context["base_url"],
     )
     capability_registry = runtime_context.get("capability_registry")
-    if isinstance(capability_registry, CapabilityRegistry):
-        capability_registry.register_refresh_callback(
+    register_refresh_callback = getattr(
+        capability_registry,
+        "register_refresh_callback",
+        None,
+    )
+    if callable(register_refresh_callback):
+        register_refresh_callback(
             lambda: _refresh_runner_capabilities(runtime_context, runner)
         )
+    runner.runtime_capability_loader = lambda: ensure_runtime_capabilities(
+        runtime_context,
+        runner,
+    )
     return runner
 
 
@@ -288,6 +495,20 @@ def print_banner(
     )
 
 
+def print_runtime_banner(
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer = renderer,
+) -> None:
+    """在运行器尚未创建时输出轻量欢迎信息。"""
+    cli_renderer.print_banner(
+        mode=runtime_context["mode"],
+        service=str(runtime_context["service_name"]),
+        model=str(runtime_context["model_name"]),
+        cwd=Path.cwd(),
+        approval_policy=runtime_context["approval_policy"],
+    )
+
+
 def print_help(cli_renderer: CliRenderer = renderer) -> None:
     """输出交互模式内建命令。"""
     cli_renderer.print_help()
@@ -295,10 +516,14 @@ def print_help(cli_renderer: CliRenderer = renderer) -> None:
 
 def print_tools(
     runner: AgentRunner,
+    runtime_context: dict[str, object] | None = None,
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出默认工具清单。"""
-    cli_renderer.print_tools(describe_tool_instances(runner.tools))
+    if runtime_context is not None:
+        ensure_runtime_capabilities(runtime_context, runner)
+    tool_support = _load_tool_support()
+    cli_renderer.print_tools(tool_support["describe_tool_instances"](runner.tools))
 
 
 def describe_capability_lines(capability_registry: CapabilityRegistry) -> list[str]:
@@ -323,6 +548,8 @@ def print_status(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出便于试用排障的运行状态。"""
+    ensure_runtime_capabilities(runtime_context, runner)
+    tool_support = _load_tool_support()
     capability_registry = runtime_context["capability_registry"]
     context_diagnostics = runner.get_context_diagnostics()
     api_key_configured = (
@@ -331,11 +558,11 @@ def print_status(
         else "未配置或仍为默认占位值"
     )
     saved_allowed_path_lines = "\n".join(
-        describe_allowed_roots(runtime_context["saved_allowed_paths"])
+        tool_support["describe_allowed_roots"](runtime_context["saved_allowed_paths"])
     ) or "无"
-    allowed_root_lines = "\n".join(describe_allowed_roots(runner.allowed_roots))
+    allowed_root_lines = "\n".join(tool_support["describe_allowed_roots"](runner.allowed_roots))
     registered_tool_lines = "\n".join(
-        describe_command_registry(runner.command_registry)
+        tool_support["describe_command_registry"](runner.command_registry)
     ) or "无"
     capability_lines = "\n".join(describe_capability_lines(capability_registry))
     cli_renderer.print_status(
@@ -382,6 +609,8 @@ def print_doctor_report(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出更接近真实环境检查的 doctor 诊断结果。"""
+    ensure_runtime_capabilities(runtime_context, runner)
+    _, build_doctor_rows = _load_doctor_support()
     cli_renderer.print_status(
         build_doctor_rows(runner, runtime_context),
         title="运行诊断",
@@ -393,7 +622,10 @@ def print_allowed_roots(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出当前会话允许访问的目录根路径。"""
-    cli_renderer.print_allowed_roots(describe_allowed_roots(runner.allowed_roots))
+    tool_support = _load_tool_support()
+    cli_renderer.print_allowed_roots(
+        tool_support["describe_allowed_roots"](runner.allowed_roots)
+    )
 
 
 def print_local_config(
@@ -401,8 +633,9 @@ def print_local_config(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """输出当前工作目录下的本地配置内容。"""
+    tool_support = _load_tool_support()
     saved_allowed_path_lines = "\n".join(
-        describe_allowed_roots(runtime_context["saved_allowed_paths"])
+        tool_support["describe_allowed_roots"](runtime_context["saved_allowed_paths"])
     ) or "无"
     cli_renderer.print_status(
         [
@@ -491,6 +724,7 @@ def switch_runtime_model(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """在当前会话中切换模型名称。"""
+    settings = _get_settings()
     normalized_model_name = settings.get_model_name(raw_model_name)
     runner.update_llm_config(model_name=normalized_model_name)
     sync_runtime_context_from_runner(runtime_context, runner)
@@ -507,11 +741,12 @@ def switch_runtime_service(
     *,
     base_url: str | None = None,
 ) -> None:
-    """在当前会话中切换服务商，模型网关入口保持固定。"""
+    """在当前会话中切换服务商，模型网关入口固定读取 OPENAI_BASE_URL。"""
+    settings = _get_settings()
     normalized_service_name = settings.normalize_service_name(raw_service_name)
     if base_url is not None and base_url.strip():
         cli_renderer.print_info(
-            "模型基址固定为 http://localhost:8317/，已忽略 /service 中的基址参数。"
+            "模型基址固定使用 OPENAI_BASE_URL，已忽略 /service 中的基址参数。"
         )
     runner.update_llm_config(
         service_name=normalized_service_name,
@@ -529,7 +764,7 @@ def start_new_runtime_session(
     source_session_id: str | None = None,
 ) -> str:
     """为当前运行上下文分配新的会话标识，避免覆盖既有历史。"""
-    session_id = create_session_id()
+    session_id = create_runtime_session_id()
     runtime_context["session_id"] = session_id
     runtime_context["session_source_id"] = source_session_id
     runtime_context["_stop_input_buffer"] = ""
@@ -545,7 +780,8 @@ def persist_runtime_session(
     if len(history) <= 1 and runner.get_turn_count() == 0:
         return None
 
-    session_path = save_session_history(
+    session_store = _load_session_store_support()
+    session_path = session_store["save_session_history"](
         str(runtime_context["session_id"]),
         history,
         mode=runner.mode.value,
@@ -558,6 +794,7 @@ def persist_runtime_session(
 
 def _format_context_message(message: BaseMessage, index: int) -> str:
     """将消息压缩为适合终端浏览的一行上下文摘要。"""
+    AIMessage, HumanMessage, SystemMessage, ToolMessage = _load_message_type_support()
     role_label = "系统"
     if isinstance(message, HumanMessage):
         role_label = "用户"
@@ -642,7 +879,8 @@ def print_history_list(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """列出当前工作目录下可访问的历史会话摘要。"""
-    stored_sessions = list_stored_sessions()
+    session_store = _load_session_store_support()
+    stored_sessions = session_store["list_stored_sessions"]()
     if not stored_sessions:
         cli_renderer.print_info("当前工作目录下还没有已保存的历史会话。")
         return
@@ -669,7 +907,8 @@ def print_history_search_results(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """按关键词检索历史会话，便于从长会话中快速定位线索。"""
-    search_results = search_stored_sessions(query)
+    session_store = _load_session_store_support()
+    search_results = session_store["search_stored_sessions"](query)
     if not search_results:
         cli_renderer.print_info(f"未检索到包含关键词 `{query}` 的历史会话。")
         return
@@ -699,7 +938,8 @@ def show_history_session(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """显示指定历史会话的完整内容。"""
-    stored_session = load_session_history(session_id)
+    session_store = _load_session_store_support()
+    stored_session = session_store["load_session_history"](session_id)
     cli_renderer.print_status(
         [
             ("会话 ID", stored_session.summary.session_id),
@@ -725,7 +965,8 @@ def load_history_session_into_runner(
     cli_renderer: CliRenderer = renderer,
 ) -> None:
     """将历史会话恢复进当前上下文，并作为新会话继续演进。"""
-    stored_session = load_session_history(session_id)
+    session_store = _load_session_store_support()
+    stored_session = session_store["load_session_history"](session_id)
     target_mode = parse_agent_mode(stored_session.summary.mode)
     target_approval_policy = parse_approval_policy(
         stored_session.summary.approval_policy
@@ -752,7 +993,11 @@ def export_history_session(
 ) -> None:
     """导出指定历史会话为更适合排查的 Markdown 或 JSON 文件。"""
     target_path = Path(raw_output_path).expanduser() if raw_output_path else None
-    exported_path = export_session_history(session_id, output_path=target_path)
+    session_store = _load_session_store_support()
+    exported_path = session_store["export_session_history"](
+        session_id,
+        output_path=target_path,
+    )
     cli_renderer.print_info(f"已导出历史会话：{session_id} -> {exported_path}")
 
 
@@ -1038,7 +1283,7 @@ def handle_builtin_command(
         print_help(cli_renderer)
         return True
     if normalized_input == "/tools":
-        print_tools(runner, cli_renderer)
+        print_tools(runner, runtime_context, cli_renderer)
         return True
     if normalized_input == "/context":
         print_context(runner, runtime_context, cli_renderer)
@@ -1279,7 +1524,7 @@ def capture_builtin_command_renderables(
 
 
 def run_chat_loop(
-    runner: AgentRunner,
+    runner: AgentRunner | None,
     runtime_context: dict[str, object],
     show_banner: bool = True,
 ) -> None:
@@ -1289,6 +1534,8 @@ def run_chat_loop(
         renderer.clear_screen()
 
     if ui_mode is InteractionUiMode.TUI:
+        if runner is None:
+            runner = create_runner(runtime_context)
         try:
             from .tui import launch_textual_chat
         except (ModuleNotFoundError, RuntimeError) as exc:
@@ -1302,6 +1549,8 @@ def run_chat_loop(
         and sys.stdin.isatty()
         and sys.stdout.isatty()
     ):
+        if runner is None:
+            runner = create_runner(runtime_context)
         try:
             from .tui import launch_textual_chat
         except (ModuleNotFoundError, RuntimeError):
@@ -1312,7 +1561,10 @@ def run_chat_loop(
 
     if show_banner:
         renderer.print_startup_splash()
-        print_banner(runner, runtime_context)
+        if runner is None:
+            print_runtime_banner(runtime_context)
+        else:
+            print_banner(runner, runtime_context)
 
     while True:
         try:
@@ -1325,6 +1577,11 @@ def run_chat_loop(
             continue
 
         renderer.print_user_message(user_input)
+        if user_input.strip().lower() in EXIT_COMMANDS:
+            renderer.print_info("\n👋 再见！")
+            break
+        if runner is None:
+            runner = create_runner(runtime_context)
         builtin_result = handle_builtin_command(user_input, runner, runtime_context)
         if builtin_result is False:
             break
@@ -1424,20 +1681,21 @@ def main_callback(
         parsed_mode = parse_agent_mode(mode)
         parsed_approval_policy = parse_approval_policy(approval_policy)
         parsed_ui_mode = parse_interaction_ui_mode(ui)
-        ctx.obj["runtime_context"] = build_runtime_context(
-            parsed_mode,
-            allow_paths,
-            tool_specs,
-            parsed_approval_policy,
-            parsed_ui_mode,
-        )
+        ctx.obj["runtime_options"] = {
+            "mode": parsed_mode,
+            "allow_paths": allow_paths,
+            "tool_specs": tool_specs,
+            "approval_policy": parsed_approval_policy,
+            "ui_mode": parsed_ui_mode,
+        }
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if ctx.invoked_subcommand is None:
-        renderer.print_info("正在初始化运行器，首次启动可能需要数秒。")
+        runtime_context = get_or_build_runtime_context(ctx)
+        renderer.print_info("正在初始化会话，首次模型调用时会按需加载工具。")
         run_chat_loop(
-            create_runner(ctx.obj["runtime_context"]),
-            ctx.obj["runtime_context"],
+            None,
+            runtime_context,
         )
 
 
@@ -1454,10 +1712,10 @@ def chat(
     """
     进入交互式聊天模式，或执行单轮对话。
     """
-    runtime_context = ctx.obj["runtime_context"]
-    renderer.print_info("正在初始化运行器，首次启动可能需要数秒。")
-    runner = create_runner(runtime_context)
+    runtime_context = get_or_build_runtime_context(ctx)
     if message is not None:
+        renderer.print_info("正在初始化运行器，首次启动可能需要数秒。")
+        runner = create_runner(runtime_context)
         try:
             if runner.llm is None:
                 renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
@@ -1473,7 +1731,7 @@ def chat(
         finally:
             persist_runtime_session(runner, runtime_context)
         return
-    run_chat_loop(runner, runtime_context)
+    run_chat_loop(None, runtime_context)
 
 
 @app.command()
@@ -1484,7 +1742,7 @@ def run(
     """
     执行单轮对话，适合脚本或快速试验。
     """
-    runtime_context = ctx.obj["runtime_context"]
+    runtime_context = get_or_build_runtime_context(ctx)
     runner = create_runner(runtime_context)
     try:
         if runner.llm is None:
@@ -1507,8 +1765,9 @@ def tools(ctx: typer.Context) -> None:
     """
     查看当前默认启用的工具列表。
     """
-    runner = create_runner(ctx.obj["runtime_context"])
-    print_tools(runner)
+    runtime_context = get_or_build_runtime_context(ctx)
+    runner = create_runner(runtime_context)
+    print_tools(runner, runtime_context)
 
 
 @history_app.callback(invoke_without_command=True)
@@ -1516,7 +1775,7 @@ def history_callback(ctx: typer.Context) -> None:
     """默认列出当前工作目录下的历史会话。"""
     if ctx.invoked_subcommand is not None:
         return
-    print_history_list(ctx.obj["runtime_context"])
+    print_history_list(get_or_build_runtime_context(ctx))
 
 
 @history_app.command("show")
@@ -1566,8 +1825,9 @@ def webhook_example_config(
     """
     输出 webhook 路由示例配置，便于对接第三方平台或中继网关。
     """
+    webhook_support = _load_webhook_support()
     serialized_config = json.dumps(
-        build_webhook_example_config(),
+        webhook_support["build_webhook_example_config"](),
         ensure_ascii=False,
         indent=2,
     )
@@ -1621,18 +1881,19 @@ def webhook_serve(
     """
     启动 webhook HTTP 服务，将第三方消息桥接到当前智能体会话。
     """
-    runtime_context = ctx.obj["runtime_context"]
+    runtime_context = get_or_build_runtime_context(ctx)
+    webhook_support = _load_webhook_support()
     if config_path is not None:
-        routes = load_webhook_routes_from_file(config_path)
+        routes = webhook_support["load_webhook_routes_from_file"](config_path)
     else:
-        routes = build_default_webhook_routes(providers)
+        routes = webhook_support["build_default_webhook_routes"](providers)
 
     resolved_storage_dir = (
         Path(storage_dir).expanduser().resolve()
         if storage_dir is not None
         else None
     )
-    serve_webhook_gateway(
+    webhook_support["serve_webhook_gateway"](
         host,
         port,
         routes,
@@ -1671,12 +1932,13 @@ def webhook_serve_feishu_long_connection(
     """
     启动飞书官方 SDK 长连接客户端，无需公网回调地址即可接收消息并回复。
     """
-    runtime_context = ctx.obj["runtime_context"]
+    runtime_context = get_or_build_runtime_context(ctx)
     try:
         select_feishu_long_connection_route, serve_feishu_long_connection = (
             _load_feishu_long_connection_support()
         )
-        routes = load_webhook_routes_from_file(config_path)
+        webhook_support = _load_webhook_support()
+        routes = webhook_support["load_webhook_routes_from_file"](config_path)
         resolved_route = select_feishu_long_connection_route(routes, route_path)
         resolved_storage_dir = (
             Path(storage_dir).expanduser().resolve()
@@ -1708,9 +1970,10 @@ def doctor(
     """
     检查当前 CLI 运行所依赖的关键配置。
     """
-    runtime_context = ctx.obj["runtime_context"]
+    runtime_context = get_or_build_runtime_context(ctx)
     runner = create_runner(runtime_context)
     if json_output:
+        build_doctor_payload, _ = _load_doctor_support()
         typer.echo(
             json.dumps(
                 build_doctor_payload(runner, runtime_context),

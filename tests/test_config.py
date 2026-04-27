@@ -70,6 +70,8 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.openai_api_key, "test-key")
         self.assertEqual(settings.openai_model, "gpt-5.4")
         self.assertIsNone(settings.openai_base_url)
+        self.assertEqual(settings.resolve_base_url(), "http://127.0.0.1:8317/v1")
+        self.assertEqual(settings.max_context_tokens, 1_000_000)
         self.assertEqual(settings.get_service(), "openai")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:
@@ -99,6 +101,7 @@ class SettingsTestCase(unittest.TestCase):
             OPENAI_API_KEY="openai-key",
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_MODEL="deepseek-v4-pro",
+            OPENAI_BASE_URL="http://127.0.0.1:8317/v1",
             SERVICE_NAME="deepseek",
         ):
             config_module = import_config_module()
@@ -109,15 +112,15 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.get_service(), "deepseek")
         self.assertEqual(kwargs["model"], "deepseek-v4-pro")
         self.assertEqual(kwargs["api_key"], "deepseek-key")
-        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+        self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
         self.assertEqual(
             kwargs["extra_body"],
             {"provider": "deepseek", "thinking": {"type": "disabled"}},
         )
 
-    def test_service_base_url_always_uses_local_model_gateway(self) -> None:
+    def test_service_base_url_always_uses_openai_base_url(self) -> None:
         """
-        测试：切换服务商时不使用服务商专属基址，只走本地模型网关。
+        测试：切换服务商时不使用服务商专属基址，只走 OPENAI_BASE_URL。
         """
         with temporary_config_env(
             DEEPSEEK_API_KEY="deepseek-key",
@@ -131,7 +134,7 @@ class SettingsTestCase(unittest.TestCase):
 
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
 
-        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+        self.assertEqual(kwargs["base_url"], "https://example.test/v1")
 
     def test_deepseek_thinking_mode_can_be_enabled_explicitly(self) -> None:
         """
@@ -190,6 +193,7 @@ class SettingsTestCase(unittest.TestCase):
         with temporary_config_env(
             OPENAI_API_KEY="openai-key",
             OPENAI_MODEL="gpt-5.4-mini",
+            OPENAI_BASE_URL="http://127.0.0.1:8317/v1",
             SERVICE_NAME="openai",
         ):
             config_module = import_config_module()
@@ -197,7 +201,7 @@ class SettingsTestCase(unittest.TestCase):
 
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
 
-        self.assertEqual(kwargs["base_url"], "http://localhost:8317/")
+        self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
         self.assertEqual(kwargs["extra_body"], {"provider": "openai"})
 
     def test_package_root_import_should_not_eagerly_import_heavy_submodules(self) -> None:

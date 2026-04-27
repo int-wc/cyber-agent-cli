@@ -14,20 +14,14 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 
-try:
-    from langchain_openai import ChatOpenAI
-
-    LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
-except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
-    ChatOpenAI = None
-    LANGCHAIN_OPENAI_IMPORT_ERROR = exc
-
 from .config import settings
 from .execution_control import ExecutionController, ExecutionInterruptedError
 from .openai_compat import ensure_deepseek_reasoning_content_compat
 from .tools.metadata import attach_tool_risk
 from .tools.system import _run_process_with_controller
 
+ChatOpenAI: Any | None = None
+LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
 CAPABILITY_STORAGE_DIRNAME = ".cyber-agent-cli-capabilities"
 CAPABILITY_ENTRYPOINT_FILENAME = "capability.py"
 CAPABILITY_TOOL_LAUNCHER_CMD = "run_tool.cmd"
@@ -53,6 +47,26 @@ RESERVED_TOOL_NAMES = {
     "show_generated_capability",
     "mark_generated_capability_satisfied",
 }
+
+
+def _load_chat_openai() -> Any:
+    """按需导入 ChatOpenAI，避免 CLI 启动阶段加载 OpenAI 全量依赖树。"""
+    global ChatOpenAI, LANGCHAIN_OPENAI_IMPORT_ERROR
+
+    if ChatOpenAI is not None:
+        return ChatOpenAI
+    if LANGCHAIN_OPENAI_IMPORT_ERROR is not None:
+        raise LANGCHAIN_OPENAI_IMPORT_ERROR
+
+    try:
+        from langchain_openai import ChatOpenAI as LoadedChatOpenAI
+    except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
+        LANGCHAIN_OPENAI_IMPORT_ERROR = exc
+        raise
+
+    ChatOpenAI = LoadedChatOpenAI
+    LANGCHAIN_OPENAI_IMPORT_ERROR = None
+    return ChatOpenAI
 @dataclass(slots=True)
 class CapabilityRevision:
     """记录一次 capability 生成或修订的审计结果。"""
@@ -273,7 +287,7 @@ class CapabilityRegistry:
         self.base_url = settings.resolve_base_url(self.service_name, base_url=base_url)
         self._capabilities: dict[str, GeneratedCapability] = {}
         self._refresh_callback = None
-        self._llm: ChatOpenAI | None = None
+        self._llm: Any | None = None
         self._load_capabilities()
 
     def update_llm_config(
@@ -548,16 +562,18 @@ class CapabilityRegistry:
             raise ValueError(f"capability 名称与现有工具冲突：{normalized_name}")
         return normalized_name
 
-    def _get_llm(self) -> ChatOpenAI:
+    def _get_llm(self) -> Any:
         """懒加载用于生成与审计 capability 的模型实例。"""
         if self._llm is None:
-            if ChatOpenAI is None:
+            try:
+                chat_openai_cls = _load_chat_openai()
+            except ModuleNotFoundError as exc:
                 raise ModuleNotFoundError(
                     "缺少 `langchain_openai` 依赖，当前环境无法创建 capability 模型客户端。"
-                ) from LANGCHAIN_OPENAI_IMPORT_ERROR
+                ) from exc
             if self.service_name == "deepseek":
                 ensure_deepseek_reasoning_content_compat()
-            self._llm = ChatOpenAI(
+            self._llm = chat_openai_cls(
                 **settings.get_chat_openai_kwargs(
                     self.service_name,
                     model_name=self.model_name,

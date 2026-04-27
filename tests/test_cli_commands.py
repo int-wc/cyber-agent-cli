@@ -308,7 +308,10 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         """
         cli_runner = CliRunner()
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with (
+            patch.object(settings, "openai_base_url", "http://127.0.0.1:8317/v1"),
+            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+        ):
             result = cli_runner.invoke(
                 app,
                 [],
@@ -322,13 +325,13 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("已忽略 /service 中的基址参数", result.output)
+        self.assertIn("模型基址固定使用 OPENAI_BASE_URL", result.output)
         self.assertIn("已切换当前会话服务商：deepseek", result.output)
         self.assertIn("已切换当前会话模型：deepseek / deepseek-chat", result.output)
         self.assertIn("当前服务", result.output)
         self.assertIn("当前模型", result.output)
         self.assertIn("deepseek-chat", result.output)
-        self.assertIn("http://localhost:8317/", result.output)
+        self.assertIn("http://127.0.0.1:8317/v1", result.output)
 
     def test_runtime_context_uses_configured_service_and_model_at_startup(self) -> None:
         """
@@ -339,8 +342,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         with (
             patch.object(settings, "service_name", "deepseek"),
             patch.object(settings, "deepseek_model", "deepseek-chat"),
-            patch.object(settings, "openai_base_url", None),
+            patch.object(settings, "openai_base_url", "http://127.0.0.1:8317/v1"),
             patch.object(settings, "deepseek_base_url", None),
+            patch("cyber_agent.cli.app._get_settings", return_value=settings),
             patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
         ):
             result = cli_runner.invoke(

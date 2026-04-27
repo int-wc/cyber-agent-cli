@@ -57,6 +57,26 @@ class FakeChatOpenAI:
         raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
 
+class CapturingFinalFakeChatOpenAI:
+    """
+    用于上下文预算测试的假模型。
+    记录实际发给模型的消息，并直接返回最终文本。
+    """
+
+    last_messages: list = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        self.__class__.last_messages = list(messages)
+        yield AIMessageChunk(content="已处理")
+
+
 class ApprovalFakeChatOpenAI:
     """
     用于审批测试的假模型。
@@ -522,13 +542,79 @@ class AgentRunnerTestCase(unittest.TestCase):
         self.assertEqual(model_messages[2].content, "旧回答")
         self.assertFalse(any(isinstance(message, ToolMessage) for message in model_messages[2:3]))
 
+    def test_runner_shrinks_single_oversized_message_before_model_call(self) -> None:
+        """
+        测试：单条用户输入超过 token 预算时，也会在模型调用前本地压缩。
+        """
+        CapturingFinalFakeChatOpenAI.last_messages = []
+        huge_input = "x" * 5000
+
+        with patch("cyber_agent.agent.runner.ChatOpenAI", CapturingFinalFakeChatOpenAI):
+            runner = AgentRunner(
+                [],
+                max_context_chars=10_000_000,
+                max_context_tokens=3000,
+            )
+            response = runner.run(huge_input, verbose=False)
+
+        self.assertEqual(response, "已处理")
+        self.assertEqual(runner.history[-2].content, huge_input)
+        self.assertLessEqual(
+            runner._estimate_context_token_count(CapturingFinalFakeChatOpenAI.last_messages),
+            runner.max_context_tokens,
+        )
+        self.assertIn("上下文保护", CapturingFinalFakeChatOpenAI.last_messages[-1].content)
+        self.assertLess(len(CapturingFinalFakeChatOpenAI.last_messages[-1].content), len(huge_input))
+
+    def test_runner_uses_local_summary_when_summarizer_input_is_too_large(self) -> None:
+        """
+        测试：需要压缩的历史本身已超过模型预算时，不再调用模型摘要器。
+        """
+        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            runner = AgentRunner(
+                [],
+                max_context_chars=10_000_000,
+                max_context_tokens=3000,
+                context_keep_recent_messages=1,
+                context_summary_max_chars=600,
+            )
+            runner.history.extend(
+                [
+                    HumanMessage(content="旧输入" + "a" * 2500),
+                    AIMessage(content="旧回答" + "b" * 2500),
+                    HumanMessage(content="当前问题"),
+                ]
+            )
+
+            with patch.object(
+                runner,
+                "_summarize_messages_for_context",
+                side_effect=AssertionError("不应调用模型摘要器"),
+            ):
+                model_messages = runner.get_model_context_snapshot()
+
+        self.assertIn("本地压缩", runner.compressed_summary)
+        self.assertEqual(runner.compressed_message_count, 2)
+        self.assertLessEqual(
+            runner._estimate_context_token_count(model_messages),
+            runner.max_context_tokens,
+        )
+        self.assertIsInstance(model_messages[-1], HumanMessage)
+        self.assertEqual(model_messages[-1].content, "当前问题")
+
     def test_runner_can_use_and_switch_openai_compatible_service_config(self) -> None:
         """
         测试：运行器支持非 openai 服务商，并可在当前会话内切换模型配置。
         """
         FakeChatOpenAI.init_kwargs_history = []
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with (
+            patch(
+                "cyber_agent.agent.runner.settings.openai_base_url",
+                "http://127.0.0.1:8317/v1",
+            ),
+            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+        ):
             runner = AgentRunner(
                 [],
                 service_name="deepseek",
@@ -546,11 +632,11 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         self.assertEqual(runner.service, "openai")
         self.assertEqual(runner.model_name, "gpt-5.4-mini")
-        self.assertEqual(runner.base_url, "http://localhost:8317/")
+        self.assertEqual(runner.base_url, "http://127.0.0.1:8317/v1")
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[0]["model"], "deepseek-chat")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[0]["base_url"],
-            "http://localhost:8317/",
+            "http://127.0.0.1:8317/v1",
         )
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[0]["extra_body"],
@@ -559,7 +645,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[-1]["model"], "gpt-5.4-mini")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["base_url"],
-            "http://localhost:8317/",
+            "http://127.0.0.1:8317/v1",
         )
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["extra_body"],

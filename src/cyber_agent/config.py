@@ -3,10 +3,10 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-MODEL_GATEWAY_BASE_URL = "http://localhost:8317/"
+DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
-    "deepseek": "deepseek-v4-pro",
+    "deepseek": "deepseek-v4-flash",
 }
 
 
@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     max_context_chars: int = Field(
         default=14000,
         validation_alias="MAX_CONTEXT_CHARS",
+    )
+    max_context_tokens: int = Field(
+        default=1_000_000,
+        validation_alias="MAX_CONTEXT_TOKENS",
     )
     context_keep_recent_messages: int = Field(
         default=8,
@@ -126,9 +130,10 @@ class Settings(BaseSettings):
         return resolved_api_key
 
     def get_default_base_url_for_service(self, service_name: str | None = None) -> str | None:
-        """返回统一模型网关基址，切换服务商时不改变请求入口。"""
+        """返回统一模型网关基址，切换服务商时只改变 provider 与模型名称。"""
         _ = service_name
-        return MODEL_GATEWAY_BASE_URL
+        configured_base_url = (self.openai_base_url or "").strip()
+        return configured_base_url or DEFAULT_MODEL_GATEWAY_BASE_URL
 
     def get_deepseek_thinking_mode(self) -> str:
         """返回 DeepSeek thinking 模式开关，默认关闭以兼容工具调用长链路。"""
@@ -148,7 +153,11 @@ class Settings(BaseSettings):
         service_name: str | None = None,
         base_url: str | None = None,
     ) -> str | None:
-        """解析运行时应使用的模型服务基址。"""
+        """解析运行时应使用的模型服务基址。
+
+        `/service` 只负责切换 provider；模型网关入口统一来自 OPENAI_BASE_URL，
+        避免切换到 deepseek 时误走服务商专属地址或缺失 `/v1` 路径。
+        """
         _ = base_url
         return self.get_default_base_url_for_service(service_name)
 

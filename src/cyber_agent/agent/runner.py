@@ -1,33 +1,30 @@
+from __future__ import annotations
+
 import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-try:
-    from langchain_openai import ChatOpenAI
-
-    LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
-except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
-    ChatOpenAI = None
-    LANGCHAIN_OPENAI_IMPORT_ERROR = exc
-
-from ..capability_registry import CapabilityRegistry
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..openai_compat import (
     ensure_deepseek_reasoning_content_compat,
     prepare_messages_for_openai_compatible_service,
 )
-from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
 from .approval import ApprovalDecision
 from .mode import AgentMode, get_mode_system_prompt
 
+if TYPE_CHECKING:
+    from ..capability_registry import CapabilityRegistry
+
 AgentEventHandler = Callable[[str, object], None]
 ApprovalHandler = Callable[[BaseTool, dict], ApprovalDecision]
+ChatOpenAI: Any | None = None
+LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
 MAX_TOOL_ITERATIONS = 48
 MAX_IDENTICAL_TOOL_ROUNDS = 3
 MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
@@ -35,6 +32,9 @@ MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
 MAX_MODEL_STREAM_START_ATTEMPTS = 2
 MODEL_STREAM_START_RETRY_DELAY_SECONDS = 0.3
 MAX_EMPTY_FINAL_RESPONSE_RETRIES = 1
+CONTEXT_TOKEN_SAFETY_MARGIN_RATIO = 0.95
+LOCAL_CONTEXT_COMPACT_MIN_CHARS = 800
+LOCAL_CONTEXT_COMPACT_MAX_CHARS = 12000
 EMPTY_FINAL_RESPONSE_ERROR = (
     "模型返回空最终回复：本轮没有新的工具调用，也没有生成可发送文本。"
 )
@@ -43,6 +43,33 @@ TRANSIENT_MODEL_STREAM_ERROR_PATTERNS = (
     "upstream stream closed before first payload",
     "internal_server_error",
 )
+
+
+def _load_tool_support():
+    """按需加载默认工具集合，避免创建运行器时导入搜索和 Playwright。"""
+    from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
+
+    return get_default_tools, resolve_allowed_roots, resolve_command_registry
+
+
+def _load_chat_openai() -> Any:
+    """按需导入 ChatOpenAI，避免 CLI 启动阶段加载 OpenAI 全量依赖树。"""
+    global ChatOpenAI, LANGCHAIN_OPENAI_IMPORT_ERROR
+
+    if ChatOpenAI is not None:
+        return ChatOpenAI
+    if LANGCHAIN_OPENAI_IMPORT_ERROR is not None:
+        raise LANGCHAIN_OPENAI_IMPORT_ERROR
+
+    try:
+        from langchain_openai import ChatOpenAI as LoadedChatOpenAI
+    except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
+        LANGCHAIN_OPENAI_IMPORT_ERROR = exc
+        raise
+
+    ChatOpenAI = LoadedChatOpenAI
+    LANGCHAIN_OPENAI_IMPORT_ERROR = None
+    return ChatOpenAI
 
 
 def extract_text_content(content: str | list[str | dict]) -> str:
@@ -100,6 +127,42 @@ def format_message_for_context_summary(message: BaseMessage) -> str:
     if not content:
         content = "（空内容）"
     return f"{role_label}: {content}"
+
+
+def estimate_message_token_count(message: BaseMessage) -> int:
+    """保守估算消息 token 数，避免没有 tokenizer 时低估超长中文或 JSON。"""
+    return max(1, len(format_message_for_context_summary(message)))
+
+
+def compact_text_for_model_context(text: str, max_chars: int) -> str:
+    """将超长单条消息压缩为首尾片段，完整原文仍保存在本地历史中。"""
+    normalized_max_chars = max(LOCAL_CONTEXT_COMPACT_MIN_CHARS, max_chars)
+    if len(text) <= normalized_max_chars:
+        return text
+
+    marker = (
+        "[上下文保护] 该条消息过长，已在发送给模型前做本地压缩；"
+        f"原始长度约 {len(text)} 字符，完整内容仍保存在本地历史中。"
+    )
+    marker_budget = len(marker) + 32
+    slice_budget = max(LOCAL_CONTEXT_COMPACT_MIN_CHARS, normalized_max_chars - marker_budget)
+    head_chars = max(1, slice_budget * 2 // 3)
+    tail_chars = max(1, slice_budget - head_chars)
+    return (
+        f"{marker}\n\n"
+        "【开头片段】\n"
+        f"{text[:head_chars]}\n\n"
+        "【结尾片段】\n"
+        f"{text[-tail_chars:]}"
+    )
+
+
+def copy_message_with_content(message: BaseMessage, content: str) -> BaseMessage:
+    """复制 LangChain 消息并替换 content，保留 tool_call_id 等结构字段。"""
+    model_copy = getattr(message, "model_copy", None)
+    if callable(model_copy):
+        return model_copy(update={"content": content})
+    return message.copy(update={"content": content})
 
 
 def normalize_tool_signature_text(text: str) -> str:
@@ -194,6 +257,7 @@ class AgentRunner:
         api_key: str | None = None,
         base_url: str | None = None,
         max_context_chars: int | None = None,
+        max_context_tokens: int | None = None,
         context_keep_recent_messages: int | None = None,
         context_summary_max_chars: int | None = None,
     ):
@@ -214,31 +278,31 @@ class AgentRunner:
         self.context_summary_max_chars = (
             context_summary_max_chars or settings.context_summary_max_chars
         )
-        self.allowed_roots = allowed_roots or resolve_allowed_roots(
-            mode,
-            self.extra_allowed_paths,
-        )
-        self.command_registry = command_registry or resolve_command_registry(
-            mode,
-            self.configured_registry,
-        )
+        self.max_context_tokens = max_context_tokens or settings.max_context_tokens
+        self.allowed_roots = allowed_roots or [Path.cwd().resolve()]
+        self.command_registry = command_registry or {}
         self.tools = tools
         self.system_prompt = system_prompt or get_mode_system_prompt(self.mode)
         self.base_messages: list[BaseMessage] = []
         self.history: list[BaseMessage] = []
         self.compressed_summary = ""
         self.compressed_message_count = 0
+        self.runtime_capability_loader: Callable[[], None] | None = None
         self.reset()
 
     def _build_llm(self) -> Any:
         """按当前运行时服务商与模型配置重建模型实例。"""
-        if ChatOpenAI is None:
+        try:
+            chat_openai_cls = _load_chat_openai()
+        except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "缺少 `langchain_openai` 依赖，当前环境无法创建模型客户端。"
-            ) from LANGCHAIN_OPENAI_IMPORT_ERROR
-        if self.service == "deepseek":
+            ) from exc
+        if self.service == "deepseek" and str(
+            getattr(chat_openai_cls, "__module__", "")
+        ).startswith("langchain_openai."):
             ensure_deepseek_reasoning_content_compat()
-        return ChatOpenAI(
+        return chat_openai_cls(
             **settings.get_chat_openai_kwargs(
                 self.service,
                 model_name=self.model_name,
@@ -289,6 +353,9 @@ class AgentRunner:
 
     def _refresh_runtime_scope(self) -> None:
         """按当前模式与授权配置重建可用工具和访问范围。"""
+        get_default_tools, resolve_allowed_roots, resolve_command_registry = (
+            _load_tool_support()
+        )
         self.allowed_roots = resolve_allowed_roots(self.mode, self.extra_allowed_paths)
         self.command_registry = resolve_command_registry(
             self.mode,
@@ -401,6 +468,10 @@ class AgentRunner:
         """估算当前上下文占用字符数，用于触发压缩。"""
         return sum(len(format_message_for_context_summary(message)) for message in messages)
 
+    def _estimate_context_token_count(self, messages: list[BaseMessage]) -> int:
+        """估算当前上下文 token 数，用于百万级模型窗口保护。"""
+        return sum(estimate_message_token_count(message) for message in messages)
+
     def _summarize_messages_for_context(
         self,
         previous_summary: str,
@@ -436,6 +507,32 @@ class AgentRunner:
             return f"{summary_text[:self.context_summary_max_chars]}..."
         return summary_text
 
+    def _summarize_messages_locally_for_context(
+        self,
+        previous_summary: str,
+        messages_to_summarize: list[BaseMessage],
+    ) -> str:
+        """模型摘要本身也会超窗时，使用确定性首尾片段兜底压缩。"""
+        serialized_messages = "\n".join(
+            format_message_for_context_summary(message)
+            for message in messages_to_summarize
+        )
+        compacted_messages = compact_text_for_model_context(
+            serialized_messages,
+            self.context_summary_max_chars,
+        )
+        summary_parts = []
+        if previous_summary.strip():
+            summary_parts.append(previous_summary.strip())
+        summary_parts.append(
+            "以下历史消息因超过模型窗口预算已执行本地压缩，仅保留首尾片段，完整内容仍保存在本地历史中：\n"
+            f"{compacted_messages}"
+        )
+        summary_text = "\n\n".join(summary_parts)
+        if len(summary_text) > self.context_summary_max_chars:
+            return f"{summary_text[:self.context_summary_max_chars]}..."
+        return summary_text
+
     def _adjust_compression_boundary(
         self,
         non_system_messages: list[BaseMessage],
@@ -455,7 +552,12 @@ class AgentRunner:
         non_system_messages = self.history[1:]
         if not non_system_messages:
             return
-        if self._estimate_context_char_count(self.history) <= self.max_context_chars:
+        context_char_count = self._estimate_context_char_count(self.history)
+        context_token_count = self._estimate_context_token_count(self.history)
+        if (
+            context_char_count <= self.max_context_chars
+            and context_token_count <= self.max_context_tokens
+        ):
             return
 
         if len(non_system_messages) <= 1:
@@ -477,11 +579,75 @@ class AgentRunner:
             return
 
         self.execution_controller.ensure_not_cancelled()
-        self.compressed_summary = self._summarize_messages_for_context(
-            self.compressed_summary,
-            messages_to_summarize,
-        )
+        summarizer_messages = [
+            SystemMessage(content=self.compressed_summary or "无"),
+            HumanMessage(
+                content="\n".join(
+                    format_message_for_context_summary(message)
+                    for message in messages_to_summarize
+                )
+            ),
+        ]
+        if self._estimate_context_token_count(summarizer_messages) > self.max_context_tokens:
+            self.compressed_summary = self._summarize_messages_locally_for_context(
+                self.compressed_summary,
+                messages_to_summarize,
+            )
+        else:
+            self.compressed_summary = self._summarize_messages_for_context(
+                self.compressed_summary,
+                messages_to_summarize,
+            )
         self.compressed_message_count = compression_boundary
+
+    def _shrink_model_messages_to_token_budget(
+        self,
+        messages: list[BaseMessage],
+    ) -> list[BaseMessage]:
+        """最后一道模型窗口保护：压缩仍然过大的单条消息或工具结果。"""
+        if self._estimate_context_token_count(messages) <= self.max_context_tokens:
+            return messages
+
+        target_budget = max(
+            1,
+            int(self.max_context_tokens * CONTEXT_TOKEN_SAFETY_MARGIN_RATIO),
+        )
+        shrunk_messages = list(messages)
+
+        while self._estimate_context_token_count(shrunk_messages) > target_budget:
+            candidates: list[tuple[int, int, str]] = []
+            for index, message in enumerate(shrunk_messages):
+                if index == 0:
+                    continue
+                content_text = extract_text_content(message.content)
+                if len(content_text) <= LOCAL_CONTEXT_COMPACT_MIN_CHARS:
+                    continue
+                candidates.append((len(content_text), index, content_text))
+
+            if not candidates:
+                break
+
+            current_total = self._estimate_context_token_count(shrunk_messages)
+            longest_length, target_index, target_text = max(candidates)
+            overflow_chars = max(1, current_total - target_budget)
+            target_chars = max(
+                LOCAL_CONTEXT_COMPACT_MIN_CHARS,
+                min(
+                    LOCAL_CONTEXT_COMPACT_MAX_CHARS,
+                    longest_length - overflow_chars,
+                ),
+            )
+            if target_chars >= longest_length:
+                target_chars = max(
+                    LOCAL_CONTEXT_COMPACT_MIN_CHARS,
+                    longest_length // 2,
+                )
+            shrunk_messages[target_index] = copy_message_with_content(
+                shrunk_messages[target_index],
+                compact_text_for_model_context(target_text, target_chars),
+            )
+
+        return shrunk_messages
 
     def _build_model_messages(self) -> list[BaseMessage]:
         """构建模型实际读取的消息列表，必要时插入压缩摘要。"""
@@ -499,6 +665,7 @@ class AgentRunner:
                 )
             )
         model_messages.extend(self.history[1 + self.compressed_message_count :])
+        model_messages = self._shrink_model_messages_to_token_budget(model_messages)
         return prepare_messages_for_openai_compatible_service(
             model_messages,
             self.service,
@@ -666,6 +833,9 @@ class AgentRunner:
         """运行一次对话，并在会话内保留上下文。"""
         if not user_input.strip():
             return ""
+
+        if self.runtime_capability_loader is not None:
+            self.runtime_capability_loader()
 
         self.execution_controller.begin_run()
         try:
