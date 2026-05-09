@@ -107,18 +107,18 @@ if TEXTUAL_IMPORT_ERROR is None:
         #chat-view {{
             border: none;
             background: {SURFACE_BG};
-            height: 1fr;
             margin: 0;
             padding: 1 2;
         }}
 
         #composer {{
+            dock: bottom;
             border: none;
+            border-top: solid #334155;
             background: {SURFACE_BG};
             height: auto;
             margin: 0;
             padding: 1 2;
-            border-top: solid #334155;
         }}
 
         #composer-title {{
