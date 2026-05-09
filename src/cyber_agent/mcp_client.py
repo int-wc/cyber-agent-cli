@@ -23,7 +23,6 @@ except ModuleNotFoundError as exc:
     MCP_IMPORT_ERROR = exc
 
 PROJECT_MCP_CONFIG = ".mcp.json"
-GLOBAL_MCP_CONFIG = Path.home() / ".claude.json"
 MCP_CONNECTION_TIMEOUT_SECONDS = 30
 MCP_TOOL_CALL_TIMEOUT_SECONDS = 60
 
@@ -50,10 +49,9 @@ class MCPToolInfo:
 
 
 def discover_mcp_configs() -> list[MCPServerConfig]:
-    """扫描项目级和全局 MCP 配置文件，返回服务器配置列表。"""
+    """扫描项目级 MCP 配置文件，返回服务器配置列表。"""
     config_paths = [
         Path(PROJECT_MCP_CONFIG).resolve(),
-        GLOBAL_MCP_CONFIG,
     ]
 
     servers: dict[str, MCPServerConfig] = {}

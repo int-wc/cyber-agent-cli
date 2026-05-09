@@ -1812,8 +1812,8 @@ def skills(ctx: typer.Context) -> None:
     if not file_skills:
         renderer.print_info("当前没有加载任何 SKILLS.md 技能。")
         renderer.print_info(
-            "将 SKILL.md 放入 .claude/skills/<skill-name>/ 或 "
-            "~/.claude/skills/<skill-name>/ 目录即可自动加载。"
+            "将 SKILL.md 放入 .skills/<skill-name>/ 或 "
+            "~/.skills/<skill-name>/ 目录即可自动加载。"
         )
         return
 
@@ -1845,7 +1845,7 @@ def mcp(ctx: typer.Context) -> None:
     if mcp_client is None:
         renderer.print_info("当前未连接任何 MCP 服务器。")
         renderer.print_info(
-            "在项目根目录创建 .mcp.json 或 ~/.claude.json，"
+            "在项目根目录创建 .mcp.json，"
             '配置 mcpServers 字段即可自动连接。'
         )
         return

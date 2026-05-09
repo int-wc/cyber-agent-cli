@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_SKILL_DIRS = [
-    Path.home() / ".claude" / "skills",
-    Path(".claude/skills").resolve(),
+    Path(".skills").resolve(),
+    Path.home() / ".skills",
 ]
 
 SKILL_FILENAME = "SKILL.md"
@@ -86,14 +86,14 @@ def _parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], str]:
 
 def discover_skill_files(extra_dirs: list[str | Path] | None = None) -> list[Path]:
     """扫描默认和额外目录，返回按优先级排序的 SKILL.md 文件路径列表。
-    项目级 (.claude/skills/) 优先于个人级 (~/.claude/skills/)，同目录内按名称排序。
+    项目级 (.skills/) 优先于用户级 (~/.skills/)，同目录内按名称排序。
     """
     scan_dirs: list[Path] = []
     # 项目级优先
-    project_dir = Path(".claude/skills").resolve()
+    project_dir = Path(".skills").resolve()
     scan_dirs.append(project_dir)
-    # 个人级
-    scan_dirs.append(Path.home() / ".claude" / "skills")
+    # 用户级
+    scan_dirs.append(Path.home() / ".skills")
     # 额外目录
     for extra_dir in extra_dirs or []:
         scan_dirs.append(Path(extra_dir).expanduser().resolve())
