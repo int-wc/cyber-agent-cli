@@ -113,10 +113,8 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["model"], "deepseek-v4-pro")
         self.assertEqual(kwargs["api_key"], "deepseek-key")
         self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
-        self.assertEqual(
-            kwargs["extra_body"],
-            {"provider": "deepseek", "thinking": {"type": "disabled"}},
-        )
+        self.assertEqual(kwargs["extra_body"]["provider"], "deepseek")
+        self.assertNotIn("thinking", kwargs["extra_body"])
 
     def test_service_base_url_always_uses_openai_base_url(self) -> None:
         """

@@ -258,6 +258,7 @@ def build_runtime_context(
     tool_specs: list[str] | None,
     approval_policy: ApprovalPolicy,
     ui_mode: InteractionUiMode,
+    skill_dirs: list[str] | None = None,
 ) -> dict[str, object]:
     """统一构建 CLI 运行上下文，避免多处分散解析。"""
     local_config = load_local_cli_config()
@@ -278,6 +279,9 @@ def build_runtime_context(
         allowed_roots = merge_allow_paths(allowed_roots, extra_allowed_paths)
     command_registry = configured_registry if mode is AgentMode.AUTHORIZED else {}
     execution_controller = ExecutionController()
+    from ..skill_loader import load_all_skills as _load_skills
+
+    file_skills = _load_skills(extra_dirs=skill_dirs)
     return {
         "mode": mode,
         "extra_allowed_paths": extra_allowed_paths,
@@ -292,6 +296,7 @@ def build_runtime_context(
         "execution_controller": execution_controller,
         "capability_registry": None,
         "runtime_capabilities_loaded": False,
+        "file_skills": file_skills,
         "service_name": service_name,
         "model_name": model_name,
         "base_url": base_url,
@@ -320,6 +325,7 @@ def get_or_build_runtime_context(ctx: typer.Context) -> dict[str, object]:
         runtime_options["tool_specs"],
         runtime_options["approval_policy"],
         runtime_options["ui_mode"],
+        skill_dirs=runtime_options.get("skill_dirs"),
     )
     ctx.obj["runtime_context"] = runtime_context
     return runtime_context
@@ -397,18 +403,28 @@ def ensure_runtime_capabilities(
         runtime_context["mode"],
         runtime_context["configured_registry"],
     )
+    mcp_client = None
+    try:
+        from ..mcp_client import load_mcp_client as _load_mcp
+
+        mcp_client = _load_mcp()
+    except Exception:
+        pass
+
     tools = tool_support["get_default_tools"](
         runtime_context["mode"],
         runtime_context["extra_allowed_paths"],
         runtime_context["configured_registry"],
         runtime_context["execution_controller"],
         capability_registry,
+        mcp_client=mcp_client,
     )
 
     runtime_context["allowed_roots"] = allowed_roots
     runtime_context["command_registry"] = command_registry
     runtime_context["tools"] = tools
     runtime_context["capability_registry"] = capability_registry
+    runtime_context["mcp_client"] = mcp_client
     runtime_context["runtime_capabilities_loaded"] = True
 
     if runner is not None:
@@ -433,6 +449,7 @@ def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
         configured_registry=runtime_context["configured_registry"],
         execution_controller=runtime_context["execution_controller"],
         capability_registry=runtime_context["capability_registry"],
+        file_skills=runtime_context.get("file_skills", []),
         service_name=runtime_context["service_name"],
         model_name=runtime_context["model_name"],
         api_key=runtime_context["api_key"],
@@ -459,7 +476,7 @@ def _refresh_runner_capabilities(
     runtime_context: dict[str, object],
     runner: AgentRunner,
 ) -> None:
-    """鍦ㄥ姩鎬?capability 鍙樻洿鍚庡埛鏂拌繍琛屽櫒鍜?CLI 杩愯鏃朵笂涓嬫枃銆?"""
+    """在动态 capability 变更后刷新运行器和 CLI 运行时上下文。"""
     runner._refresh_runtime_scope()
     sync_runtime_context_from_runner(runtime_context, runner)
 
@@ -551,6 +568,7 @@ def print_status(
     ensure_runtime_capabilities(runtime_context, runner)
     tool_support = _load_tool_support()
     capability_registry = runtime_context["capability_registry"]
+    mcp_client = runtime_context.get("mcp_client")
     context_diagnostics = runner.get_context_diagnostics()
     api_key_configured = (
         "已配置"
@@ -599,6 +617,14 @@ def print_status(
             ("允许读取根路径", allowed_root_lines),
             ("已注册外部工具", registered_tool_lines),
             ("动态能力", capability_lines),
+            (
+                "MCP 服务器",
+                str(len(mcp_client._configs) if mcp_client is not None else 0),
+            ),
+            (
+                "MCP 工具",
+                str(len(mcp_client.tools) if mcp_client is not None else 0),
+            ),
         ]
     )
 
@@ -1674,6 +1700,11 @@ def main_callback(
         "--ui",
         help="界面模式，可选 auto、tui、cli。",
     ),
+    skill_dir: list[str] | None = typer.Option(
+        None,
+        "--skill-dir",
+        help="额外 skill 目录，可重复传入以加载多个目录下的 SKILL.md。",
+    ),
 ) -> None:
     """默认无子命令时直接进入交互式对话。"""
     ctx.ensure_object(dict)
@@ -1687,6 +1718,7 @@ def main_callback(
             "tool_specs": tool_specs,
             "approval_policy": parsed_approval_policy,
             "ui_mode": parsed_ui_mode,
+            "skill_dirs": skill_dir,
         }
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1768,6 +1800,83 @@ def tools(ctx: typer.Context) -> None:
     runtime_context = get_or_build_runtime_context(ctx)
     runner = create_runner(runtime_context)
     print_tools(runner, runtime_context)
+
+
+@app.command()
+def skills(ctx: typer.Context) -> None:
+    """
+    列出当前已加载的 SKILLS.md 技能。
+    """
+    runtime_context = get_or_build_runtime_context(ctx)
+    file_skills = runtime_context.get("file_skills", [])
+    if not file_skills:
+        renderer.print_info("当前没有加载任何 SKILLS.md 技能。")
+        renderer.print_info(
+            "将 SKILL.md 放入 .claude/skills/<skill-name>/ 或 "
+            "~/.claude/skills/<skill-name>/ 目录即可自动加载。"
+        )
+        return
+
+    rows = []
+    for skill in file_skills:
+        detail_lines = [
+            f"名称: {skill.name}",
+            f"描述: {skill.description}",
+            f"路径: {skill.source_path}",
+        ]
+        if skill.version:
+            detail_lines.append(f"版本: {skill.version}")
+        if skill.model:
+            detail_lines.append(f"模型: {skill.model}")
+        if skill.allowed_tools:
+            detail_lines.append(f"允许工具: {', '.join(skill.allowed_tools)}")
+        rows.append((skill.name, "\n".join(detail_lines)))
+
+    renderer.print_status(rows, title="已加载技能")
+
+
+@app.command()
+def mcp(ctx: typer.Context) -> None:
+    """
+    查看当前已连接的 MCP 服务器和工具。
+    """
+    runtime_context = get_or_build_runtime_context(ctx)
+    mcp_client = runtime_context.get("mcp_client")
+    if mcp_client is None:
+        renderer.print_info("当前未连接任何 MCP 服务器。")
+        renderer.print_info(
+            "在项目根目录创建 .mcp.json 或 ~/.claude.json，"
+            '配置 mcpServers 字段即可自动连接。'
+        )
+        return
+
+    configs = getattr(mcp_client, "_configs", [])
+    if not configs:
+        renderer.print_info("当前没有配置任何 MCP 服务器。")
+        return
+
+    rows: list[tuple[str, str]] = []
+
+    for config in configs:
+        detail_lines = [
+            f"命令: {config.command} {' '.join(config.args)}",
+        ]
+        if config.env:
+            detail_lines.append(
+                f"环境变量: {', '.join(config.env.keys())}"
+            )
+        rows.append((config.name, "\n".join(detail_lines)))
+
+    renderer.print_status(rows, title="MCP 服务器")
+
+    tools = mcp_client.tools
+    if tools:
+        tool_rows = []
+        for t in tools:
+            tool_rows.append(
+                (t.tool_name, f"[{t.server_name}] {t.description}")
+            )
+        renderer.print_status(tool_rows, title="MCP 工具")
 
 
 @history_app.callback(invoke_without_command=True)

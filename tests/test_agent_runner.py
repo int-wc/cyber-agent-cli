@@ -639,9 +639,10 @@ class AgentRunnerTestCase(unittest.TestCase):
             "http://127.0.0.1:8317/v1",
         )
         self.assertEqual(
-            FakeChatOpenAI.init_kwargs_history[0]["extra_body"],
-            {"provider": "deepseek", "thinking": {"type": "disabled"}},
+            FakeChatOpenAI.init_kwargs_history[0]["extra_body"]["provider"],
+            "deepseek",
         )
+        self.assertNotIn("thinking", FakeChatOpenAI.init_kwargs_history[0]["extra_body"])
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[-1]["model"], "gpt-5.4-mini")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["base_url"],

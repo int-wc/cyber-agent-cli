@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - 是否安装依赖由运行环
     tools_condition = None
     LANGGRAPH_AVAILABLE = False
 
-MAX_FALLBACK_TOOL_ROUNDS = 24
+MAX_FALLBACK_TOOL_ROUNDS = 9999
 
 
 class AgentState(TypedDict):
@@ -35,19 +35,11 @@ def agent(state: AgentState, llm: Any, tools: list[BaseTool]) -> dict[str, list[
 
 
 def _normalize_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
-    """兼容字典和 JSON 字符串两种工具参数格式。"""
-    raw_args = tool_call.get("args", {})
-    if isinstance(raw_args, dict):
-        return raw_args
-    if isinstance(raw_args, str):
-        stripped_args = raw_args.strip()
-        if not stripped_args:
-            return {}
-        parsed_args = json.loads(stripped_args)
-        if not isinstance(parsed_args, dict):
-            raise ValueError("工具参数必须是 JSON 对象。")
-        return parsed_args
-    raise ValueError("工具参数格式无效，必须是对象或 JSON 字符串。")
+    """兼容字典和 JSON 字符串两种工具参数格式。
+    委托给 tools 模块的统一实现。"""
+    from ..tools import normalize_tool_args as _normalize
+
+    return _normalize(tool_call)
 
 
 class _FallbackCompiledGraph:

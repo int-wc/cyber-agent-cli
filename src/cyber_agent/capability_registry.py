@@ -333,28 +333,39 @@ class CapabilityRegistry:
             raise ValueError(f"未找到 capability：{normalized_name}")
         return capability
 
-    def build_skill_prompt(self) -> str:
-        """将当前启用的 skill 能力拼接为系统提示补充。"""
+    def build_skill_prompt(self, file_skills: list | None = None) -> str:
+        """将当前启用的 skill 能力拼接为系统提示补充，可混入文件加载的 skill。"""
+        parts: list[str] = []
+
+        # 文件加载的 skill（SKILL.md）
+        if file_skills:
+            from .skill_loader import build_skill_system_prompt
+
+            file_prompt = build_skill_system_prompt(file_skills)
+            if file_prompt:
+                parts.append(file_prompt)
+
+        # 动态生成的 skill capability
         skill_capabilities = [
             capability
             for capability in self.list_capabilities()
             if capability.enabled and capability.kind == "skill"
         ]
-        if not skill_capabilities:
-            return ""
+        if skill_capabilities:
+            lines = ["以下是当前会话已激活的动态 skills："]
+            for index, capability in enumerate(skill_capabilities, start=1):
+                prompt_text = capability.system_prompt.strip()
+                if not prompt_text:
+                    refreshed_prompt = self._refresh_skill_prompt_from_artifacts(capability)
+                    prompt_text = refreshed_prompt.strip()
+                lines.append(f"{index}. {capability.name}: {capability.description}")
+                if prompt_text:
+                    lines.append(f"   技能提示: {prompt_text}")
+                if capability.usage_hint:
+                    lines.append(f"   使用提示: {capability.usage_hint}")
+            parts.append("\n".join(lines))
 
-        lines = ["以下是当前会话已激活的扩展 skills："]
-        for index, capability in enumerate(skill_capabilities, start=1):
-            prompt_text = capability.system_prompt.strip()
-            if not prompt_text:
-                refreshed_prompt = self._refresh_skill_prompt_from_artifacts(capability)
-                prompt_text = refreshed_prompt.strip()
-            lines.append(f"{index}. {capability.name}: {capability.description}")
-            if prompt_text:
-                lines.append(f"   技能提示: {prompt_text}")
-            if capability.usage_hint:
-                lines.append(f"   使用提示: {capability.usage_hint}")
-        return "\n".join(lines)
+        return "\n\n".join(part for part in parts if part.strip())
 
     def get_dynamic_tools(self) -> list[BaseTool]:
         """返回当前所有启用的动态工具与 capability 管理工具。"""
@@ -507,14 +518,29 @@ class CapabilityRegistry:
         self._trigger_refresh()
         return capability
 
-    def mark_capability_satisfied(
-        self,
-        name: str,
-        *,
-        notes: str = "",
-    ) -> GeneratedCapability:
-        """将 capability 标记为已满足当前用户要求。"""
-        capability = self.get_capability(name)
+    def mark_capability_satisfied(self, name: str, *, notes: str = "") -> GeneratedCapability:
+        capability = self.get_capability(name.strip())
+        # 重新审计以更新分数
+        if capability.kind == "skill":
+            self._refresh_skill_prompt_from_artifacts(capability)
+        artifacts = CapabilityArtifacts(
+            artifact_dir=Path(capability.artifact_dir),
+            entrypoint_path=Path(capability.entrypoint_path),
+            source_code=capability.source_code,
+            tool_launcher_path=None,
+            skill_launcher_path=None,
+        )
+        audit_result = self._audit_capability(
+            capability_spec=capability.to_dict(),
+            artifacts=artifacts,
+            skill_prompt_output=capability.system_prompt,
+            register_as_tool=capability.register_as_tool,
+            kind=capability.kind,
+        )
+        capability.audit_score = int(audit_result.get("score", 0))
+        capability.audit_summary = audit_result.get("summary", "")
+        capability.audit_issues = audit_result.get("issues", [])
+        capability.audit_recommendations = audit_result.get("recommendations", [])
         capability.status = "satisfied"
         capability.updated_at = datetime.now().astimezone().isoformat()
         if notes.strip():
@@ -992,7 +1018,7 @@ JSON 字段要求：
                 return "❌ request 不能为空。"
             if not capability.entrypoint_path:
                 return "❌ 当前 capability 缺少可执行代码文件。"
-            entrypoint_path = Path(capability.entrypoint_path)
+            entrypoint_path = Path(capability.entrypoint_path).expanduser()
             if not entrypoint_path.exists():
                 return f"❌ capability 代码文件不存在：{entrypoint_path}"
 

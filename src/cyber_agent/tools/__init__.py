@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..agent.mode import AgentMode
 from ..execution_control import ExecutionController
@@ -26,6 +27,26 @@ from .system import (
 
 if TYPE_CHECKING:
     from ..capability_registry import CapabilityRegistry
+    from ..mcp_client import MCPClient
+
+
+def normalize_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
+    """将模型返回的工具参数规范化为字典，兼容字符串形式的 JSON 参数。"""
+    raw_args = tool_call.get("args", {})
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str):
+        stripped_args = raw_args.strip()
+        if not stripped_args:
+            return {}
+        try:
+            parsed_args = json.loads(stripped_args)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"工具参数不是合法 JSON：{exc}") from exc
+        if not isinstance(parsed_args, dict):
+            raise ValueError("工具参数必须是 JSON 对象。")
+        return parsed_args
+    raise ValueError("工具参数格式无效，必须为对象或 JSON 字符串。")
 
 
 def resolve_allowed_roots(
@@ -55,6 +76,7 @@ def get_default_tools(
     command_registry: Mapping[str, Path | str] | None = None,
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
+    mcp_client: MCPClient | None = None,
 ):
     """返回默认启用的工具列表。"""
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
@@ -82,6 +104,8 @@ def get_default_tools(
         )
     if capability_registry is not None:
         tools.extend(capability_registry.get_dynamic_tools())
+    if mcp_client is not None and mcp_client.connected:
+        tools.extend(mcp_client.get_langchain_tools())
     return tools
 
 
@@ -117,6 +141,7 @@ __all__ = [
     "describe_tool_instances",
     "describe_tools",
     "get_default_tools",
+    "normalize_tool_args",
     "resolve_allowed_roots",
     "resolve_command_registry",
     "scan_port",

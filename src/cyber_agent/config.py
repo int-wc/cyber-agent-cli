@@ -7,6 +7,8 @@ DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
     "deepseek": "deepseek-v4-flash",
+    "mimo": "mimo-v2.5-pro",
+    "claude": "claude-opus-4-6"
 }
 
 
@@ -157,8 +159,15 @@ class Settings(BaseSettings):
 
         `/service` 只负责切换 provider；模型网关入口统一来自 OPENAI_BASE_URL，
         避免切换到 deepseek 时误走服务商专属地址或缺失 `/v1` 路径。
+        base_url 参数保留供未来扩展，当前版本固定使用 OPENAI_BASE_URL。
         """
-        _ = base_url
+        if base_url is not None and base_url.strip():
+            import warnings
+            warnings.warn(
+                "base_url 参数已被忽略，模型基址固定使用 OPENAI_BASE_URL。",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return self.get_default_base_url_for_service(service_name)
 
     def get_chat_openai_kwargs(
@@ -187,8 +196,8 @@ class Settings(BaseSettings):
         extra_body: dict[str, object] = {
             "provider": resolved_service_name,
         }
-        if resolved_service_name == "deepseek":
-            extra_body["thinking"] = {"type": self.get_deepseek_thinking_mode()}
+        if resolved_service_name == "deepseek" and self.is_deepseek_thinking_enabled():
+            extra_body["thinking"] = {"type": "enabled"}
 
         kwargs = {
             "model": resolved_model_name,

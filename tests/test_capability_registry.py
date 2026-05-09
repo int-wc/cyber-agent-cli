@@ -174,6 +174,12 @@ def handle_request(request: str, context: str) -> str:
                         "issues": [],
                         "recommendations": ["等待真实使用反馈"],
                     },
+                    {
+                        "score": 95,
+                        "summary": "质量达标",
+                        "issues": [],
+                        "recommendations": ["等待真实使用反馈"],
+                    },
                 ],
             ):
                 first_capability = registry.create_or_update_capability(

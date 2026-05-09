@@ -25,7 +25,7 @@ AgentEventHandler = Callable[[str, object], None]
 ApprovalHandler = Callable[[BaseTool, dict], ApprovalDecision]
 ChatOpenAI: Any | None = None
 LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
-MAX_TOOL_ITERATIONS = 48
+MAX_TOOL_ITERATIONS = 9999
 MAX_IDENTICAL_TOOL_ROUNDS = 3
 MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
 MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
@@ -88,22 +88,11 @@ def extract_text_content(content: str | list[str | dict]) -> str:
 
 
 def normalize_tool_args(tool_call: dict) -> dict:
-    """将模型返回的工具参数规范化为字典，兼容字符串形式的 JSON 参数。"""
-    raw_args = tool_call.get("args", {})
-    if isinstance(raw_args, dict):
-        return raw_args
-    if isinstance(raw_args, str):
-        stripped_args = raw_args.strip()
-        if not stripped_args:
-            return {}
-        try:
-            parsed_args = json.loads(stripped_args)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"工具参数不是合法 JSON：{exc}") from exc
-        if not isinstance(parsed_args, dict):
-            raise ValueError("工具参数必须是 JSON 对象。")
-        return parsed_args
-    raise ValueError("工具参数格式无效，必须为对象或 JSON 字符串。")
+    """将模型返回的工具参数规范化为字典，兼容字符串形式的 JSON 参数。
+    委托给 tools 模块的统一实现。"""
+    from ..tools import normalize_tool_args as _normalize
+
+    return _normalize(tool_call)
 
 
 def iter_stream_characters(content: str) -> list[str]:
@@ -252,6 +241,7 @@ class AgentRunner:
         configured_registry: dict[str, Path] | None = None,
         execution_controller: ExecutionController | None = None,
         capability_registry: CapabilityRegistry | None = None,
+        file_skills: list | None = None,
         service_name: str | None = None,
         model_name: str | None = None,
         api_key: str | None = None,
@@ -271,6 +261,7 @@ class AgentRunner:
         self.configured_registry = configured_registry or {}
         self.execution_controller = execution_controller or ExecutionController()
         self.capability_registry = capability_registry
+        self.file_skills = file_skills or []
         self.max_context_chars = max_context_chars or settings.max_context_chars
         self.context_keep_recent_messages = (
             context_keep_recent_messages or settings.context_keep_recent_messages
@@ -459,7 +450,15 @@ class AgentRunner:
         """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
         prompt_parts = [self.system_prompt]
         if self.capability_registry is not None:
-            skill_prompt = self.capability_registry.build_skill_prompt().strip()
+            skill_prompt = self.capability_registry.build_skill_prompt(
+                file_skills=self.file_skills
+            ).strip()
+            if skill_prompt:
+                prompt_parts.append(skill_prompt)
+        elif self.file_skills:
+            from ..skill_loader import build_skill_system_prompt
+
+            skill_prompt = build_skill_system_prompt(self.file_skills).strip()
             if skill_prompt:
                 prompt_parts.append(skill_prompt)
         return "\n\n".join(part for part in prompt_parts if part.strip())
@@ -477,7 +476,7 @@ class AgentRunner:
         previous_summary: str,
         messages_to_summarize: list[BaseMessage],
     ) -> str:
-        """将较早消息增量压缩为新的上下文摘要。"""
+        """将较早消息增量压缩为新的上下文摘要，模型调用失败时回退到本地压缩。"""
         serialized_messages = "\n".join(
             format_message_for_context_summary(message)
             for message in messages_to_summarize
@@ -491,18 +490,24 @@ class AgentRunner:
 4. 已创建的 capability、历史会话、路径、命令或关键标识。
 输出只要纯文本摘要，不要加标题，不要虚构内容。
 """.strip()
-        response = self._get_llm().invoke(
-            [
-                SystemMessage(content=summary_prompt),
-                HumanMessage(
-                    content=(
-                        f"已有摘要:\n{previous_summary or '无'}\n\n"
-                        f"新增消息:\n{serialized_messages}"
-                    )
-                ),
-            ]
-        )
-        summary_text = extract_text_content(response.content).strip()
+        try:
+            response = self._get_llm().invoke(
+                [
+                    SystemMessage(content=summary_prompt),
+                    HumanMessage(
+                        content=(
+                            f"已有摘要:\n{previous_summary or '无'}\n\n"
+                            f"新增消息:\n{serialized_messages}"
+                        )
+                    ),
+                ]
+            )
+            summary_text = extract_text_content(response.content).strip()
+        except Exception:
+            return self._summarize_messages_locally_for_context(
+                previous_summary,
+                messages_to_summarize,
+            )
         if len(summary_text) > self.context_summary_max_chars:
             return f"{summary_text[:self.context_summary_max_chars]}..."
         return summary_text
@@ -614,7 +619,12 @@ class AgentRunner:
         )
         shrunk_messages = list(messages)
 
+        max_iterations = min(len(shrunk_messages) * 2, 100)
+        iteration_count = 0
         while self._estimate_context_token_count(shrunk_messages) > target_budget:
+            iteration_count += 1
+            if iteration_count > max_iterations:
+                break
             candidates: list[tuple[int, int, str]] = []
             for index, message in enumerate(shrunk_messages):
                 if index == 0:
@@ -883,7 +893,8 @@ class AgentRunner:
 
                 final_response = extract_text_content(ai_message.content)
                 if not final_response.strip():
-                    self.history.pop()
+                    if self.history:
+                        self.history.pop()
                     if empty_final_response_retries < MAX_EMPTY_FINAL_RESPONSE_RETRIES:
                         empty_final_response_retries += 1
                         if event_handler is not None:
