@@ -2152,11 +2152,12 @@ def _build_feishu_allow_path_payload(
     )
 
 
-def _build_feishu_model_config_payload(
+def _build_hardcoded_feishu_model_config_payload(
     runner: "AgentRunner",
     builtin_output: str,
     *,
     title: str,
+    model_services: list[dict] | None = None,
 ) -> dict[str, object]:
     """构造飞书版模型与服务配置卡片。"""
     sections = []
@@ -2197,6 +2198,71 @@ def _build_feishu_model_config_payload(
         ],
     )
 
+def _build_feishu_model_config_payload(
+    runner: "AgentRunner",
+    builtin_output: str,
+    *,
+    title: str,
+    model_services: list[dict] | None = None,
+) -> dict[str, object]:
+    """构造飞书版模型与服务配置卡片（动态按钮版）"""
+    if not model_services:
+        # 回退到原来的硬编码逻辑
+        return _build_hardcoded_feishu_model_config_payload(runner, builtin_output, title=title)
+
+    sections = []
+    normalized_output = _normalize_cli_output_for_feishu(builtin_output)
+    if normalized_output and (_looks_like_builtin_error(normalized_output) or "已" in normalized_output):
+        sections.append(_build_feishu_markdown_section("执行结果", [normalized_output]))
+    sections.append(
+        _build_feishu_markdown_section(
+            "当前配置",
+            [
+                f"- 服务：`{runner.service}`",
+                f"- 模型：`{runner.model_name}`",
+                f"- 模型基址：`{runner.base_url or '默认'}`",
+            ],
+        )
+    )
+
+    # 动态生成服务切换按钮（每行2个）
+    service_buttons = [
+        (svc["name"], svc["command"])
+        for svc in model_services
+    ]
+    action_rows = [
+        *_build_feishu_command_action_rows(
+            service_buttons,
+            primary_commands=[svc["command"] for svc in model_services[:1]],
+            row_size=2,
+        ),
+    ]
+    # 追加每个服务下的模型按钮
+    for svc in model_services:
+        if not svc.get("models"):
+            continue
+        model_buttons = [(m["name"], m["command"]) for m in svc["models"]]
+        action_rows.extend(
+            _build_feishu_command_action_rows(
+                model_buttons,
+                primary_commands=[model_buttons[0][1]] if model_buttons else [],
+                row_size=3,
+            )
+        )
+    # 保持原有的 /service, /model, /status, /help
+    action_rows.extend(
+        _build_feishu_command_action_rows(
+            ("/service", "/model", "/status", "/help"),
+            primary_commands=("/service",),
+        )
+    )
+
+    return _build_feishu_interactive_card_payload(
+        title,
+        "\n\n".join(section for section in sections if section),
+        template="turquoise",
+        action_rows=action_rows,
+    )
 
 def _build_feishu_fallback_builtin_payload(
     command: str,
@@ -2225,6 +2291,7 @@ def _build_feishu_builtin_command_payload(
     builtin_output: str,
     *,
     base_dir: Path | None = None,
+    model_services: list[dict] | None = None,     # ← 增加这个参数
 ) -> dict[str, object]:
     """将常用 CLI 内建命令映射为更适合飞书阅读的卡片。"""
     normalized_command = command.strip().lower()
@@ -2302,12 +2369,14 @@ def _build_feishu_builtin_command_payload(
             runner,
             builtin_output,
             title="模型服务商",
+            model_services=model_services,      # ← 传进去
         )
     if normalized_command == "/model" or normalized_command.startswith("/model "):
         return _build_feishu_model_config_payload(
             runner,
             builtin_output,
             title="模型配置",
+            model_services=model_services,      # ← 传进去
         )
     if normalized_command in {"/clear", "/context clear"}:
         return _build_feishu_notice_payload(
@@ -3976,6 +4045,60 @@ class WebhookGateway:
         self._async_worker_thread: threading.Thread | None = None
         self._async_worker_start_lock = threading.Lock()
         self._routes_by_path = {route.path: route for route in routes}
+        self.model_services = self._load_model_services(routes)
+
+    @staticmethod
+    def _load_model_services(routes: list[WebhookRouteConfig]) -> list[dict]:
+        """从第一条 feishu 路由的 provider_options 中读取 model_services 配置。
+           如果 provider_options 提供了 model_list_yaml 路径，则从 YAML 文件加载。
+        """
+        for route in routes:
+            if route.provider == "feishu":
+                # 优先从 YAML 文件动态加载
+                yaml_path = route.provider_options.get("model_list_yaml")
+                if yaml_path:
+                    try:
+                        import yaml
+                    except ImportError:
+                        raise ImportError(
+                            "缺少 PyYAML 依赖，请执行 pip install pyyaml 后再使用 YAML 模型列表。"
+                        )
+                    with open(yaml_path, "r") as f:
+                        raw = yaml.safe_load(f)
+                    return WebhookGateway._parse_model_services_from_yaml(raw)
+
+                # 否则尝试读取内嵌的 JSON 列表（字符串或直接是 list）
+                raw_services = route.provider_options.get("model_services")
+                if raw_services is not None:
+                    if isinstance(raw_services, str):
+                        try:
+                            return json.loads(raw_services)
+                        except json.JSONDecodeError:
+                            pass  # 解析失败，回退到默认
+                    elif isinstance(raw_services, list):
+                        return raw_services  # 直接使用，要求每个元素符合约定的字典结构
+        return []  # 无配置则回退默认硬编码
+
+    @staticmethod
+    def _parse_model_services_from_yaml(config: dict) -> list[dict]:
+        """从 cli-proxy-api 风格的 config.yaml 中抽取 openai-compatibility 列表"""
+        services = []
+        openai_compat = config.get("openai-compatibility", [])
+        for entry in openai_compat:
+            svc_name = entry.get("name")
+            if not svc_name:
+                continue
+            models = []
+            for m in entry.get("models", []):
+                m_name = m.get("name")
+                if m_name:
+                    models.append({"name": m_name, "command": f"/model {m_name}"})
+            services.append({
+                "name": svc_name,
+                "command": f"/service {svc_name}",
+                "models": models,
+            })
+        return services
 
     def describe_routes(self) -> list[str]:
         """返回当前网关已注册路由的摘要。"""
@@ -4786,10 +4909,12 @@ class WebhookGateway:
                 self.runtime_context,
                 normalized_output,
                 base_dir=self.base_dir,
+                model_services=self.model_services,
             )
             if event.provider == "feishu"
             else None
         )
+
         if builtin_result is False:
             return WebhookAgentReply(
                 session_id=session_id,

@@ -6,7 +6,10 @@ src/cyber_agent/capability_registry.py
 src/cyber_agent/config.py
 src/cyber_agent/execution_control.py
 src/cyber_agent/local_config.py
+src/cyber_agent/mcp_client.py
+src/cyber_agent/openai_compat.py
 src/cyber_agent/session_store.py
+src/cyber_agent/skill_loader.py
 src/cyber_agent/agent/__init__.py
 src/cyber_agent/agent/approval.py
 src/cyber_agent/agent/core.py
@@ -48,6 +51,7 @@ tests/test_cli_commands.py
 tests/test_cli_interactive.py
 tests/test_config.py
 tests/test_feishu_long_connection.py
+tests/test_openai_compat.py
 tests/test_search_tool.py
 tests/test_session_store.py
 tests/test_webhook_gateway.py
