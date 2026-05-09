@@ -8,3 +8,5 @@ __pycache__/
 .cyber-agent-cli-sessions/
 .cyber-agent-cli-capabilities/
 webhook-routes.json
+.idea/
+*.egg-info
