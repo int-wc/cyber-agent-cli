@@ -71,8 +71,8 @@ class OpenAICompatTestCase(unittest.TestCase):
             "",
         )
 
-    def test_prepare_messages_strips_reasoning_content_when_deepseek_thinking_disabled(self) -> None:
-        """测试：DeepSeek thinking 关闭时不回传 reasoning_content，避免工具链触发 400。"""
+    def test_prepare_messages_preserves_reasoning_content_for_deepseek(self) -> None:
+        """测试：DeepSeek 始终透传 reasoning_content，因为 API 要求回传。"""
         message = AIMessage(
             content="",
             additional_kwargs={"reasoning_content": "需要先调用工具。"},
@@ -91,7 +91,7 @@ class OpenAICompatTestCase(unittest.TestCase):
             deepseek_thinking_enabled=False,
         )
 
-        self.assertNotIn("reasoning_content", prepared_messages[0].additional_kwargs)
+        self.assertIn("reasoning_content", prepared_messages[0].additional_kwargs)
 
     def test_prepare_messages_strips_reasoning_content_for_openai(self) -> None:
         """测试：切回 OpenAI 时移除 DeepSeek 专属字段，避免非 DeepSeek 接口拒绝。"""

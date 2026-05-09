@@ -57,9 +57,13 @@ def prepare_messages_for_openai_compatible_service(
     *,
     deepseek_thinking_enabled: bool = False,
 ) -> list[BaseMessage]:
-    """按服务商整理消息，DeepSeek thinking 工具调用轮次需携带 reasoning_content。"""
-    if service_name == "deepseek" and deepseek_thinking_enabled:
-        return [_ensure_deepseek_reasoning_content(message) for message in messages]
+    """按服务商整理消息。DeepSeek 始终保留 reasoning_content（API 要求回传），
+    非 DeepSeek 服务剥除以避免上游拒绝。"""
+    if service_name == "deepseek":
+        if deepseek_thinking_enabled:
+            return [_ensure_deepseek_reasoning_content(message) for message in messages]
+        # thinking 关闭时仍需透传模型返回的 reasoning_content
+        return list(messages)
     return [_strip_reasoning_content(message) for message in messages]
 
 
