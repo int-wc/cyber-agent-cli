@@ -113,7 +113,6 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         #composer {{
             dock: bottom;
-            border: none;
             border-top: solid #334155;
             background: {SURFACE_BG};
             height: auto;
@@ -132,6 +131,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             background: {WINDOW_BG};
             color: #f8fafc;
             height: auto;
+            min-height: 3;
         }}
 
         #chat-input:focus {{
@@ -260,7 +260,6 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return
 
             self._set_busy(True)
-            self._active_assistant_message = self._add_message("assistant", "正在思考...")
             self._run_agent(user_input)
 
         @work(thread=True)
