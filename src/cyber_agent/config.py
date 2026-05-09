@@ -110,16 +110,20 @@ class Settings(BaseSettings):
         model_name: str | None = None,
         service_name: str | None = None,
     ) -> str:
-        """返回当前默认模型名称。"""
+        """返回当前默认模型名称。
+
+        优先级：显式传入 > GATEWAY_DEFAULT_MODEL > 服务商默认模型。
+        """
         if model_name is not None:
             normalized_model_name = model_name.strip()
         else:
-            normalized_service_name = self.normalize_service_name(service_name)
-            normalized_model_name = (
-                self.deepseek_model
-                if normalized_service_name == "deepseek"
-                else self.gateway_default_model
-            ).strip()
+            normalized_model_name = self.gateway_default_model.strip()
+            if not normalized_model_name:
+                normalized_service_name = self.normalize_service_name(service_name)
+                normalized_model_name = DEFAULT_MODELS.get(
+                    normalized_service_name,
+                    DEFAULT_MODELS["openai"],
+                )
         if not normalized_model_name:
             raise ValueError("模型名称不能为空。")
         return normalized_model_name

@@ -83,10 +83,11 @@ class SettingsTestCase(unittest.TestCase):
 
     def test_settings_can_build_deepseek_compatible_kwargs(self) -> None:
         """
-        测试：切换到 deepseek 时，应保留模型名并继续使用统一模型网关。
+        测试：切换到 deepseek 时，GATEWAY_DEFAULT_MODEL 优先于 DEEPSEEK_MODEL。
         """
         with temporary_config_env(
             GATEWAY_API_KEY="openai-key",
+            GATEWAY_DEFAULT_MODEL="deepseek-v4-pro",
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_MODEL="deepseek-v4-pro",
             GATEWAY_BASE_URL="http://127.0.0.1:8317/v1",
