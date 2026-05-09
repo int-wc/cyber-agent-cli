@@ -186,6 +186,46 @@ def should_retry_model_stream_start_error(error: Exception) -> bool:
     )
 
 
+def _extract_usage_from_chunk(accumulated_chunk: AIMessageChunk) -> dict[str, int] | None:
+    """从累积的消息块中提取 token 使用统计。"""
+    usage_metadata = getattr(accumulated_chunk, "usage_metadata", None)
+    if usage_metadata and isinstance(usage_metadata, dict):
+        return {
+            "input_tokens": int(usage_metadata.get("input_tokens", 0)),
+            "output_tokens": int(usage_metadata.get("output_tokens", 0)),
+            "total_tokens": int(usage_metadata.get("total_tokens", 0)),
+        }
+    # 回退：从 additional_kwargs 或 response_metadata 中提取
+    for source in (
+        accumulated_chunk.additional_kwargs,
+        accumulated_chunk.response_metadata,
+    ):
+        usage = source.get("usage") if isinstance(source, dict) else None
+        if usage and isinstance(usage, dict):
+            return {
+                "input_tokens": int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+                "output_tokens": int(usage.get("completion_tokens", usage.get("output_tokens", 0))),
+                "total_tokens": int(usage.get("total_tokens", 0)),
+            }
+    return None
+
+
+def _accumulate_usage(
+    current: dict[str, int] | None,
+    incoming: dict[str, int] | None,
+) -> dict[str, int] | None:
+    """累加多轮工具调用中的 token 使用量。"""
+    if incoming is None:
+        return current
+    if current is None:
+        return dict(incoming)
+    return {
+        "input_tokens": current["input_tokens"] + incoming["input_tokens"],
+        "output_tokens": current["output_tokens"] + incoming["output_tokens"],
+        "total_tokens": current["total_tokens"] + incoming["total_tokens"],
+    }
+
+
 def build_tool_round_signature(
     tool_calls: list[dict],
     tool_messages: list[ToolMessage],
@@ -730,10 +770,15 @@ class AgentRunner:
 
         accumulated_text = extract_text_content(accumulated_chunk.content)
         has_tool_calls = bool(accumulated_chunk.tool_calls)
+        usage = _extract_usage_from_chunk(accumulated_chunk)
         if event_handler is not None:
             event_handler(
                 "response_end",
-                {"content": accumulated_text, "has_tool_calls": has_tool_calls},
+                {
+                    "content": accumulated_text,
+                    "has_tool_calls": has_tool_calls,
+                    "usage": usage,
+                },
             )
 
         return AIMessage(
@@ -857,11 +902,14 @@ class AgentRunner:
             self.history.append(HumanMessage(content=user_input))
             tool_round_signatures: list[str] = []
             empty_final_response_retries = 0
+            turn_usage: dict[str, int] | None = None
 
             for _ in range(MAX_TOOL_ITERATIONS):
                 self.execution_controller.ensure_not_cancelled()
                 ai_message = self._stream_model_response(event_handler)
                 self.history.append(ai_message)
+                round_usage = _extract_usage_from_chunk(ai_message)
+                turn_usage = _accumulate_usage(turn_usage, round_usage)
 
                 if ai_message.tool_calls:
                     if event_handler is not None:
@@ -907,6 +955,8 @@ class AgentRunner:
                             )
                         continue
                     raise RuntimeError(EMPTY_FINAL_RESPONSE_ERROR)
+                if event_handler is not None and turn_usage:
+                    event_handler("turn_end", turn_usage)
                 if event_handler is None and verbose:
                     print(f"最终回复: {final_response}")
                 return final_response

@@ -305,6 +305,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                         build_approval_result_panel(payload),
                     )
                     return
+                if event_type == "turn_end" and isinstance(payload, dict):
+                    self.call_from_thread(self._show_token_usage, payload)
+                    return
 
             try:
                 final_response = self.runner.run(
@@ -417,6 +420,16 @@ if TEXTUAL_IMPORT_ERROR is None:
             chat_view.mount(message)
             chat_view.scroll_end(animate=False)
             return message
+
+        def _show_token_usage(self, usage: dict[str, int]) -> None:
+            """在聊天区显示本轮 token 消耗。"""
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+            self._add_message(
+                "system",
+                f"↑ {input_tokens} tokens  ↓ {output_tokens} tokens  ∑ {total_tokens} tokens",
+            )
 
         def _add_renderable(self, renderable: RenderableType) -> RenderableBlock:
             block = RenderableBlock(renderable)

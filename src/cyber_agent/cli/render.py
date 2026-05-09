@@ -298,6 +298,15 @@ class CliRenderer:
         self.ensure_response_stream_closed()
         self.console.print(Rule(style="grey50"))
 
+    def print_token_usage(self, usage: dict[str, int]) -> None:
+        """打印本轮 token 消耗统计。"""
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        self.console.print(
+            f"  [dim]↑ {input_tokens} tokens  ↓ {output_tokens} tokens  ∑ {total_tokens} tokens[/dim]"
+        )
+
     def begin_response_stream(self) -> None:
         """开始一轮模型 token 流。"""
         self.ensure_response_stream_closed()

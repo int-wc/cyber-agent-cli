@@ -1121,6 +1121,10 @@ def render_agent_event(event_type: str, payload: object) -> None:
         if isinstance(payload, dict):
             renderer.print_approval_result(payload)
         return
+    if event_type == "turn_end":
+        if isinstance(payload, dict):
+            renderer.print_token_usage(payload)
+        return
     if event_type == "tool_result":
         if isinstance(payload, dict):
             renderer.print_tool_result(str(payload.get("content", "")))
