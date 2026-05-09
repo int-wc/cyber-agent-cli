@@ -610,7 +610,7 @@ def print_status(
                 f"模型可见 {context_diagnostics['model_message_count']}",
             ),
             ("已压缩历史消息数", str(context_diagnostics["compressed_message_count"])),
-            ("OPENAI_API_KEY", api_key_configured),
+            ("GATEWAY_API_KEY", api_key_configured),
             ("本地配置文件", str(runtime_context["local_config_path"])),
             ("历史会话目录", str(runtime_context["session_storage_dir"])),
             ("已保存允许目录", saved_allowed_path_lines),
@@ -767,12 +767,12 @@ def switch_runtime_service(
     *,
     base_url: str | None = None,
 ) -> None:
-    """在当前会话中切换服务商，模型网关入口固定读取 OPENAI_BASE_URL。"""
+    """在当前会话中切换服务商，模型网关入口固定读取 GATEWAY_BASE_URL。"""
     settings = _get_settings()
     normalized_service_name = settings.normalize_service_name(raw_service_name)
     if base_url is not None and base_url.strip():
         cli_renderer.print_info(
-            "模型基址固定使用 OPENAI_BASE_URL，已忽略 /service 中的基址参数。"
+            "模型基址固定使用 GATEWAY_BASE_URL，已忽略 /service 中的基址参数。"
         )
     runner.update_llm_config(
         service_name=normalized_service_name,

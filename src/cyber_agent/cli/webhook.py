@@ -1865,7 +1865,7 @@ def _build_feishu_doctor_payload(
             ("模型", str(payload["runtime"]["model"])),
             ("模型基址", str(payload["runtime"]["base_url"])),
             (
-                "OPENAI_API_KEY",
+                "GATEWAY_API_KEY",
                 "已配置" if payload["runtime"]["api_key_configured"] else "未配置",
             ),
         )

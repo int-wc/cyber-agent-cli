@@ -85,7 +85,7 @@ python -m playwright install chromium
 
 ### OpenAI 兼容层（`openai_compat.py`）
 
-项目通过统一的模型网关 `OPENAI_BASE_URL`（默认 `http://127.0.0.1:8317/v1`）访问模型。切换服务商（`/service openai|deepseek|claude|mimo`）只改变 `extra_body` 中的 `provider` 字段，基址始终指向网关入口。
+项目通过统一的模型网关 `GATEWAY_BASE_URL`（默认 `http://127.0.0.1:8317/v1`）访问模型。切换服务商（`/service openai|deepseek|claude|mimo`）只改变 `extra_body` 中的 `provider` 字段，基址始终指向网关入口。
 
 `ensure_deepseek_reasoning_content_compat()` 对 langchain-openai 内部做 monkey-patch，在消息转换过程中透传 `reasoning_content`，因为上游 LangChain 未处理此字段。
 

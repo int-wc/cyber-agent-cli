@@ -122,7 +122,7 @@ def _build_doctor_reminders(
     """整理值得用户关注的诊断提醒。"""
     reminders: list[str] = []
     if not api_key_configured:
-        reminders.append("OPENAI_API_KEY 未配置或仍为默认占位值，真实模型调用会失败。")
+        reminders.append("GATEWAY_API_KEY 未配置或仍为默认占位值，真实模型调用会失败。")
     if not langgraph_available:
         reminders.append("langgraph 未安装，create_agent_graph 将使用内置降级执行器。")
     if not prompt_toolkit_available:
@@ -168,7 +168,7 @@ def build_doctor_rows(
         ("模型", str(payload["runtime"]["model"])),
         ("模型基址", str(payload["runtime"]["base_url"])),
         (
-            "OPENAI_API_KEY",
+            "GATEWAY_API_KEY",
             (
                 "已配置"
                 if payload["runtime"]["api_key_configured"]

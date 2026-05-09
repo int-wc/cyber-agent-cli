@@ -1,46 +1,38 @@
-﻿import importlib
+import importlib
 import os
 import sys
 import unittest
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Optional
 
-# 定义环境变量键名的类型别名
 EnvKeys = tuple[str, ...]
 
 CONFIG_ENV_KEYS: EnvKeys = (
-    "OPENAI_API_KEY",
-    "OPENAI_MODEL",
-    "OPENAI_BASE_URL",
+    "GATEWAY_API_KEY",
+    "GATEWAY_DEFAULT_MODEL",
+    "GATEWAY_BASE_URL",
+    "GATEWAY_DEFAULT_SERVICE",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_MODEL",
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_THINKING_MODE",
-    "SERVICE_NAME",
 )
 
 
 @contextmanager
 def temporary_config_env(**updates: Optional[str]) -> Generator[None, None, None]:
-    """
-    临时修改环境变量，上下文结束后自动恢复。
-    :param updates: 要设置的环境变量键值对，值为 None 时表示删除该变量。
-    """
-    # 保存原始值
+    """临时修改环境变量，上下文结束后自动恢复。"""
     original_values: Dict[str, Optional[str]] = {
         key: os.environ.get(key) for key in CONFIG_ENV_KEYS
     }
     try:
-        # 删除所有相关环境变量
         for key in CONFIG_ENV_KEYS:
             os.environ.pop(key, None)
-        # 设置传入的新值
         for key, value in updates.items():
             if value is not None:
                 os.environ[key] = value
         yield
     finally:
-        # 恢复原始环境变量
         for key in CONFIG_ENV_KEYS:
             os.environ.pop(key, None)
         for key, value in original_values.items():
@@ -49,10 +41,7 @@ def temporary_config_env(**updates: Optional[str]) -> Generator[None, None, None
 
 
 def import_config_module() -> Any:
-    """
-    重新导入 cyber_agent.config 模块，确保每次都是全新加载。
-    :return: 重新加载后的 config 模块对象
-    """
+    """重新导入 cyber_agent.config 模块，确保每次都是全新加载。"""
     sys.modules.pop("cyber_agent.config", None)
     return importlib.import_module("cyber_agent.config")
 
@@ -60,16 +49,15 @@ def import_config_module() -> Any:
 class SettingsTestCase(unittest.TestCase):
     def test_settings_can_load_required_env_and_code_defaults(self) -> None:
         """
-        测试：仅提供 OPENAI_API_KEY 时，其他字段应使用代码中的默认值。
+        测试：仅提供 GATEWAY_API_KEY 时，其他字段应使用代码中的默认值。
         """
-        with temporary_config_env(OPENAI_API_KEY="test-key"):
+        with temporary_config_env(GATEWAY_API_KEY="test-key"):
             config_module = import_config_module()
-            # 关闭 .env 文件读取，确保只依赖环境变量和代码默认值
             settings = config_module.Settings(_env_file=None)
 
-        self.assertEqual(settings.openai_api_key, "test-key")
-        self.assertEqual(settings.openai_model, "gpt-5.4")
-        self.assertIsNone(settings.openai_base_url)
+        self.assertEqual(settings.gateway_api_key, "test-key")
+        self.assertEqual(settings.gateway_default_model, "gpt-5.4")
+        self.assertIsNone(settings.gateway_base_url)
         self.assertEqual(settings.resolve_base_url(), "http://127.0.0.1:8317/v1")
         self.assertEqual(settings.max_context_tokens, 1_000_000)
         self.assertEqual(settings.get_service(), "deepseek")
@@ -79,17 +67,17 @@ class SettingsTestCase(unittest.TestCase):
         测试：模块级 settings 单例能正确加载所有环境变量。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="runtime-key",
-            OPENAI_MODEL="gpt-5.4-mini",
-            OPENAI_BASE_URL="https://example.test/v1",
+            GATEWAY_API_KEY="runtime-key",
+            GATEWAY_DEFAULT_MODEL="gpt-5.4-mini",
+            GATEWAY_BASE_URL="https://example.test/v1",
         ):
             config_module = import_config_module()
 
         self.assertIsInstance(config_module.settings, config_module.Settings)
-        self.assertEqual(config_module.settings.openai_api_key, "runtime-key")
-        self.assertEqual(config_module.settings.openai_model, "gpt-5.4-mini")
+        self.assertEqual(config_module.settings.gateway_api_key, "runtime-key")
+        self.assertEqual(config_module.settings.gateway_default_model, "gpt-5.4-mini")
         self.assertEqual(
-            config_module.settings.openai_base_url,
+            config_module.settings.gateway_base_url,
             "https://example.test/v1",
         )
 
@@ -98,11 +86,11 @@ class SettingsTestCase(unittest.TestCase):
         测试：切换到 deepseek 时，应保留模型名并继续使用统一模型网关。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="openai-key",
+            GATEWAY_API_KEY="openai-key",
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_MODEL="deepseek-v4-pro",
-            OPENAI_BASE_URL="http://127.0.0.1:8317/v1",
-            SERVICE_NAME="deepseek",
+            GATEWAY_BASE_URL="http://127.0.0.1:8317/v1",
+            GATEWAY_DEFAULT_SERVICE="deepseek",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -116,16 +104,16 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["extra_body"]["provider"], "deepseek")
         self.assertNotIn("thinking", kwargs["extra_body"])
 
-    def test_service_base_url_always_uses_openai_base_url(self) -> None:
+    def test_service_base_url_always_uses_gateway_base_url(self) -> None:
         """
-        测试：切换服务商时不使用服务商专属基址，只走 OPENAI_BASE_URL。
+        测试：切换服务商时不使用服务商专属基址，只走 GATEWAY_BASE_URL。
         """
         with temporary_config_env(
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_MODEL="deepseek-v4-pro",
-            OPENAI_BASE_URL="https://example.test/v1",
+            GATEWAY_BASE_URL="https://example.test/v1",
             DEEPSEEK_BASE_URL="https://deepseek.example/v1",
-            SERVICE_NAME="deepseek",
+            GATEWAY_DEFAULT_SERVICE="deepseek",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -141,7 +129,7 @@ class SettingsTestCase(unittest.TestCase):
         with temporary_config_env(
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_THINKING_MODE="enabled",
-            SERVICE_NAME="deepseek",
+            GATEWAY_DEFAULT_SERVICE="deepseek",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -161,7 +149,7 @@ class SettingsTestCase(unittest.TestCase):
         with temporary_config_env(
             DEEPSEEK_API_KEY="deepseek-key",
             DEEPSEEK_THINKING_MODE="maybe",
-            SERVICE_NAME="deepseek",
+            GATEWAY_DEFAULT_SERVICE="deepseek",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -169,13 +157,13 @@ class SettingsTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DEEPSEEK_THINKING_MODE"):
             settings.get_chat_openai_kwargs(settings.get_service())
 
-    def test_deepseek_api_key_can_fallback_to_legacy_openai_key(self) -> None:
+    def test_deepseek_api_key_can_fallback_to_gateway_key(self) -> None:
         """
-        测试：未配置 DEEPSEEK_API_KEY 时，仍兼容旧版只写 OPENAI_API_KEY 的配置。
+        测试：未配置 DEEPSEEK_API_KEY 时，回退到 GATEWAY_API_KEY。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="legacy-deepseek-key",
-            SERVICE_NAME="deepseek",
+            GATEWAY_API_KEY="legacy-deepseek-key",
+            GATEWAY_DEFAULT_SERVICE="deepseek",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -189,10 +177,10 @@ class SettingsTestCase(unittest.TestCase):
         测试：OpenAI 服务也会向本地网关传递 provider 字段。
         """
         with temporary_config_env(
-            OPENAI_API_KEY="openai-key",
-            OPENAI_MODEL="gpt-5.4-mini",
-            OPENAI_BASE_URL="http://127.0.0.1:8317/v1",
-            SERVICE_NAME="openai",
+            GATEWAY_API_KEY="openai-key",
+            GATEWAY_DEFAULT_MODEL="gpt-5.4-mini",
+            GATEWAY_BASE_URL="http://127.0.0.1:8317/v1",
+            GATEWAY_DEFAULT_SERVICE="openai",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -221,7 +209,7 @@ class SettingsTestCase(unittest.TestCase):
         }
 
         try:
-            with temporary_config_env(OPENAI_API_KEY="lazy-import-key"):
+            with temporary_config_env(GATEWAY_API_KEY="lazy-import-key"):
                 for module_name in module_names:
                     sys.modules.pop(module_name, None)
 

@@ -610,7 +610,7 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         with (
             patch(
-                "cyber_agent.agent.runner.settings.openai_base_url",
+                "cyber_agent.agent.runner.settings.gateway_base_url",
                 "http://127.0.0.1:8317/v1",
             ),
             patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
