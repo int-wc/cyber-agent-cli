@@ -266,6 +266,8 @@ class CliRenderer:
         self._streaming_response_started = False
         self._streaming_prefix_printed = False
         self._streamed_response_chunks: list[str] = []
+        self._reasoning_parts: list[str] = []
+        self._reasoning_printed = False
 
     def print_startup_splash(self) -> None:
         """打印启动页；真实终端播放动画，其余场景回退为静态区块。"""
@@ -313,11 +315,38 @@ class CliRenderer:
         self._streaming_response_started = True
         self._streaming_prefix_printed = False
         self._streamed_response_chunks = []
+        self._reasoning_parts = []
+        self._reasoning_printed = False
+
+    def append_reasoning_token(self, token_text: str) -> None:
+        """追加思考过程文本，在首次响应正文前展示为折叠思考块。"""
+        self._reasoning_parts.append(token_text)
+        if not self._reasoning_printed:
+            self.console.print(
+                f"[dim italic {ASSISTANT_BORDER_COLOR}]思考过程[/dim italic {ASSISTANT_BORDER_COLOR}]"
+                " › ",
+                end="",
+            )
+            self._reasoning_printed = True
+        self.console.print(
+            Text(token_text, style=f"dim italic {ASSISTANT_TEXT_COLOR}"),
+            end="",
+            soft_wrap=True,
+            highlight=False,
+        )
+
+    def _flush_reasoning_if_needed(self) -> None:
+        """思考过程结束后换行，与正文分隔。"""
+        if self._reasoning_printed:
+            self.console.print("")
+            self._reasoning_printed = False
+            self._reasoning_parts = []
 
     def append_response_token(self, token_text: str) -> None:
         """将 token 追加到终端。"""
         if not self._streaming_response_started:
             self.begin_response_stream()
+        self._flush_reasoning_if_needed()
         if not self._streaming_prefix_printed:
             self.console.print(
                 f"[bold {ASSISTANT_BORDER_COLOR}]智能体输出[/bold {ASSISTANT_BORDER_COLOR}]"

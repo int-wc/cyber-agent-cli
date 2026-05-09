@@ -184,6 +184,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.show_banner = show_banner
             self._is_busy = False
             self._active_assistant_message: ChatMessage | None = None
+            self._reasoning_parts: list[str] = []
+            self._reasoning_message: ChatMessage | None = None
             self._startup_frame_index = 0
             self._startup_timer = None
 
@@ -266,7 +268,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             from .app import create_approval_handler, persist_runtime_session
 
             def event_handler(event_type: str, payload: object) -> None:
+                if event_type == "reasoning_token":
+                    self.call_from_thread(self._append_reasoning, str(payload))
+                    return
                 if event_type == "response_begin":
+                    self.call_from_thread(self._flush_reasoning)
                     self.call_from_thread(self._set_assistant_content, "")
                     return
                 if event_type == "response_token":
@@ -425,6 +431,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             chat_view.mount(message)
             chat_view.scroll_end(animate=False)
             return message
+
+        def _append_reasoning(self, content: str) -> None:
+            """追加思考过程文本。"""
+            self._reasoning_parts.append(content)
+            if self._reasoning_message is None:
+                self._reasoning_message = self._add_message("system", "")
+                self._reasoning_message.role = "reasoning"
+            self._reasoning_message.set_content("".join(self._reasoning_parts))
+
+        def _flush_reasoning(self) -> None:
+            """思考阶段结束，重置累积状态。"""
+            self._reasoning_parts = []
+            self._reasoning_message = None
 
         def _show_token_usage(self, usage: dict[str, int]) -> None:
             """在聊天区显示本轮 token 消耗。"""

@@ -1100,6 +1100,9 @@ def render_agent_event(event_type: str, payload: object) -> None:
     if event_type == "response_begin":
         renderer.begin_response_stream()
         return
+    if event_type == "reasoning_token":
+        renderer.append_reasoning_token(str(payload))
+        return
     if event_type == "response_token":
         renderer.append_response_token(str(payload))
         return

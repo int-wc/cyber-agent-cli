@@ -50,6 +50,11 @@ ROLE_STYLES: dict[str, dict[str, str]] = {
         "border_style": ERROR_BORDER_COLOR,
         "text_style": f"bold {ERROR_TEXT_COLOR}",
     },
+    "reasoning": {
+        "title": "思考过程",
+        "border_style": "dim #6366f1",
+        "text_style": "dim italic #a5b4fc",
+    },
 }
 
 SYSTEM_LABEL_STYLE = TEXT_MUTED

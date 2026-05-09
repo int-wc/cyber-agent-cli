@@ -743,6 +743,9 @@ class AgentRunner:
                     self.execution_controller.ensure_not_cancelled()
                     accumulated_chunk = chunk if accumulated_chunk is None else accumulated_chunk + chunk
                     token_text = extract_text_content(chunk.content)
+                    reasoning = chunk.additional_kwargs.get("reasoning_content", "")
+                    if reasoning and event_handler is not None:
+                        event_handler("reasoning_token", str(reasoning))
                     if token_text and event_handler is not None:
                         for character in iter_stream_characters(token_text):
                             event_handler("response_token", character)

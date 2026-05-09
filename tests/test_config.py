@@ -102,7 +102,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["api_key"], "deepseek-key")
         self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
         self.assertEqual(kwargs["extra_body"]["provider"], "deepseek")
-        self.assertNotIn("thinking", kwargs["extra_body"])
+        self.assertEqual(kwargs["extra_body"]["thinking"], {"type": "enabled"})
 
     def test_service_base_url_always_uses_gateway_base_url(self) -> None:
         """

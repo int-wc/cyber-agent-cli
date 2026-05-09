@@ -45,7 +45,7 @@ class Settings(BaseSettings):
         validation_alias="DEEPSEEK_BASE_URL",
     )
     deepseek_thinking_mode: str = Field(
-        default="disabled",
+        default="enabled",
         validation_alias="DEEPSEEK_THINKING_MODE",
     )
 
@@ -205,8 +205,8 @@ class Settings(BaseSettings):
         extra_body: dict[str, object] = {
             "provider": resolved_service_name,
         }
-        if resolved_service_name == "deepseek" and self.is_deepseek_thinking_enabled():
-            extra_body["thinking"] = {"type": "enabled"}
+        if resolved_service_name == "deepseek":
+            extra_body["thinking"] = {"type": self.get_deepseek_thinking_mode()}
 
         kwargs = {
             "model": resolved_model_name,
