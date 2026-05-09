@@ -71,27 +71,27 @@ if TEXTUAL_IMPORT_ERROR is None:
         def __init__(self, role: str, content: str | Text) -> None:
             super().__init__()
             self.role = role
-            self.content = content
+            self._text: str | Text = content
             self._refresh_renderable()
 
         def set_content(self, content: str | Text) -> None:
-            self.content = content
+            self._text = content
             self._refresh_renderable()
 
         def append_content(self, content: str) -> None:
-            if isinstance(self.content, Text):
-                self.content.append(content, style=ROLE_STYLES[self.role]["text_style"])
+            if isinstance(self._text, Text):
+                self._text.append(content, style=ROLE_STYLES[self.role]["text_style"])
             else:
-                self.content += content
+                self._text += content
             self._refresh_renderable()
 
         def has_content(self) -> bool:
-            if isinstance(self.content, Text):
-                return bool(self.content.plain.strip())
-            return bool(self.content.strip())
+            if isinstance(self._text, Text):
+                return bool(self._text.plain.strip())
+            return bool(self._text.strip())
 
         def _refresh_renderable(self) -> None:
-            self.update(build_chat_message_panel(self.role, self.content))
+            self.update(build_chat_message_panel(self.role, self._text))
 
 
     class CyberAgentTUI(App):
@@ -105,29 +105,33 @@ if TEXTUAL_IMPORT_ERROR is None:
         }}
 
         #chat-view {{
-            border: round #334155;
+            border: none;
             background: {SURFACE_BG};
             height: 1fr;
-            margin: 1 1 0 1;
-            padding: 1;
+            margin: 0;
+            padding: 1 2;
         }}
 
         #composer {{
-            border: round {PANEL_BORDER};
+            border: none;
             background: {SURFACE_BG};
-            margin: 0 1 1 1;
-            padding: 0 1 1 1;
+            height: auto;
+            margin: 0;
+            padding: 1 2;
+            border-top: solid #334155;
         }}
 
         #composer-title {{
             color: {TEXT_MUTED};
-            padding: 0 0 1 0;
+            height: auto;
+            margin: 0 0 1 0;
         }}
 
         #chat-input {{
             border: round #f59e0b;
             background: {WINDOW_BG};
             color: #f8fafc;
+            height: auto;
         }}
 
         #chat-input:focus {{
@@ -136,7 +140,8 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         #command-hint {{
             color: {TEXT_MUTED};
-            padding: 1 0 0 0;
+            height: auto;
+            margin: 1 0 0 0;
         }}
 
         ChatMessage {{
