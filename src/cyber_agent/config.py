@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
-    "deepseek": "deepseek-v4-flash",
+    "deepseek": "deepseek-v4-pro[1m]",
     "mimo": "mimo-v2.5-pro",
     "claude": "claude-opus-4-6"
 }
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         validation_alias="DEEPSEEK_THINKING_MODE",
     )
     service_name: str = Field(
-        default="openai",
+        default="deepseek",
         validation_alias="SERVICE_NAME",
     )
     search_endpoint: str = Field(

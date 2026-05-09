@@ -72,7 +72,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertIsNone(settings.openai_base_url)
         self.assertEqual(settings.resolve_base_url(), "http://127.0.0.1:8317/v1")
         self.assertEqual(settings.max_context_tokens, 1_000_000)
-        self.assertEqual(settings.get_service(), "openai")
+        self.assertEqual(settings.get_service(), "deepseek")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:
         """
