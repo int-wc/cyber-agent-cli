@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -14,9 +15,10 @@ if sys.stdout.isatty():
     try:
         from rich.console import Console
         from rich.panel import Panel
-        from rich.table import Table
+        from rich.live import Live
         from rich.text import Text
         from rich import box
+        from rich.layout import Layout
         _RICH = True
         _console = Console()
     except ImportError:
@@ -33,11 +35,12 @@ CHECK_MARK = "✓"
 CROSS_MARK = "✗"
 GEAR_MARK = "⚙"
 ROCKET_MARK = "🚀"
+ARROW_MARK = "▶"
 
 
 def _status(step: str, symbol: str, detail: str, ok: bool = True):
     if _RICH and _console:
-        color = "green" if ok else "red"
+        color = "green" if ok else "red" if symbol == CROSS_MARK else "yellow"
         text = Text()
         text.append(f"  {symbol}  ", style=f"bold {color}")
         text.append(f"{step:<24} ", style="bold")
@@ -70,6 +73,138 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  可折叠构建面板
+# ═══════════════════════════════════════════════════════════════
+
+
+def _build_with_live_output(
+    step_name: str,
+    cmd: list[str],
+    cwd: str,
+    expand_label: str = "展开编译输出",
+    collapse_label: str = "收起编译输出",
+    max_lines: int = 8,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """运行命令，在 Rich Live 面板中实时显示输出行。
+    返回 (returncode, full_output_text)。
+    """
+    if not _RICH or not _console:
+        # 无 Rich 回退
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env or os.environ,
+        )
+        output_lines: list[str] = []
+        if proc.stdout:
+            for line in proc.stdout:
+                output_lines.append(line)
+        proc.wait()
+        return proc.returncode, "".join(output_lines)
+
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, env=env or os.environ,
+    )
+    output_lines: list[str] = []
+    _expanded = False
+    _build_done = False
+    _exit_code = -1
+
+    def _make_panel() -> Panel:
+        if not _expanded and not _build_done:
+            # 折叠态：只显示最后几行 + 展开提示
+            recent = output_lines[-max_lines:] if output_lines else ["等待输出..."]
+            body = "".join(recent).rstrip()
+            hint = f"\n\n  ── 按 {ARROW_MARK} 切换展开/折叠，共 {len(output_lines)} 行 ──" if output_lines else ""
+            return Panel(
+                body + hint,
+                title=f"[bold yellow]{GEAR_MARK}  {step_name}[/]",
+                border_style="yellow",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        elif _build_done:
+            symbol = CHECK_MARK if _exit_code == 0 else CROSS_MARK
+            color = "green" if _exit_code == 0 else "red"
+            detail = "完成" if _exit_code == 0 else f"退出码 {_exit_code}"
+            collapsed_hint = f"\n\n  ── 已折叠 ({len(output_lines)} 行) ──"
+            body_raw = "".join(output_lines[-max_lines:]).rstrip() if output_lines else ""
+            body = body_raw + collapsed_hint
+            return Panel(
+                body,
+                title=f"[bold {color}]{symbol}  {step_name} — {detail}[/]",
+                border_style=color,
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        else:
+            # 展开态：显示全部输出
+            body = "".join(output_lines).rstrip() if output_lines else "等待输出..."
+            hint = f"\n\n  ── 按 {ARROW_MARK} 切换展开/折叠，共 {len(output_lines)} 行 ──"
+            return Panel(
+                body + hint,
+                title=f"[bold yellow]{GEAR_MARK}  {step_name} (展开)[/]",
+                border_style="yellow",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+
+    initial_panel = _make_panel()
+    live = Live(initial_panel, console=_console, refresh_per_second=8, transient=False)
+    live.start()
+
+    def _reader():
+        nonlocal _exit_code
+        try:
+            assert proc.stdout
+            for line in proc.stdout:
+                output_lines.append(line)
+        except Exception:
+            pass
+        finally:
+            proc.wait()
+            _exit_code = proc.returncode
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    # 轮询更新面板
+    try:
+        while reader_thread.is_alive():
+            live.update(_make_panel())
+            # 检查键盘输入（非阻塞）
+            if sys.stdin.isatty():
+                try:
+                    import select
+                    r, _, _ = select.select([sys.stdin], [], [], 0.15)
+                    if r:
+                        ch = sys.stdin.read(1)
+                        if ch == ARROW_MARK:
+                            _expanded = not _expanded
+                            live.update(_make_panel())
+                except (OSError, ValueError):
+                    pass
+            else:
+                time.sleep(0.15)
+    except KeyboardInterrupt:
+        proc.terminate()
+        reader_thread.join(timeout=3)
+        live.stop()
+        raise
+
+    reader_thread.join(timeout=5)
+    _build_done = True
+    live.update(_make_panel())
+    # 短暂停留让用户看到完成状态
+    time.sleep(0.8)
+    live.stop()
+
+    full_output = "".join(output_lines)
+    return _exit_code, full_output
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Step 1: 检查 Python 依赖
 # ═══════════════════════════════════════════════════════════════
 
@@ -92,7 +227,6 @@ def check_python_deps() -> bool:
     pip_cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages", *missing]
     result = _run(pip_cmd)
     if result.returncode != 0:
-        # 尝试不用 break-system-packages
         result = _run([sys.executable, "-m", "pip", "install", *missing])
 
     if result.returncode == 0:
@@ -154,12 +288,14 @@ def check_frontend_deps() -> bool:
     _status("前端依赖 (node_modules)", CROSS_MARK, "未安装", ok=False)
     _hint("正在运行 npm install (首次安装可能需要几分钟)...")
 
-    result = _run(["npm", "install"], cwd=str(DESKTOP_DIR))
-    if result.returncode == 0:
+    exit_code, output = _build_with_live_output(
+        "npm install", ["npm", "install"], str(DESKTOP_DIR),
+    )
+    if exit_code == 0:
         _status("前端依赖", CHECK_MARK, "安装完成")
         return True
     else:
-        _status("前端依赖", CROSS_MARK, f"安装失败: {result.stderr.strip()[-100:]}", ok=False)
+        _status("前端依赖", CROSS_MARK, f"安装失败", ok=False)
         _hint(f"请手动运行: cd {DESKTOP_DIR} && npm install")
         return False
 
@@ -199,19 +335,21 @@ def check_tauri_cli() -> bool:
         _status("Tauri CLI", CHECK_MARK, result.stdout.strip())
         return True
 
-    # Check if it's in node_modules
     tauri_cli = DESKTOP_DIR / "node_modules" / ".bin" / "tauri"
     if tauri_cli.exists():
         _status("Tauri CLI", CHECK_MARK, f"已安装 ({tauri_cli})")
         return True
 
     _status("Tauri CLI", GEAR_MARK, "正在安装 @tauri-apps/cli...")
-    result = _run(["npm", "install", "-D", "@tauri-apps/cli@^2"], cwd=str(DESKTOP_DIR))
-    if result.returncode == 0:
+    exit_code, _ = _build_with_live_output(
+        "安装 Tauri CLI", ["npm", "install", "-D", "@tauri-apps/cli@^2"], str(DESKTOP_DIR),
+        max_lines=4,
+    )
+    if exit_code == 0:
         _status("Tauri CLI", CHECK_MARK, "安装完成")
         return True
     else:
-        _status("Tauri CLI", CROSS_MARK, f"安装失败", ok=False)
+        _status("Tauri CLI", CROSS_MARK, "安装失败", ok=False)
         _hint(f"请手动运行: cd {DESKTOP_DIR} && npm install -D @tauri-apps/cli")
         return False
 
@@ -259,23 +397,23 @@ def build_desktop_app() -> Path | None:
     tauri_target = DESKTOP_DIR / "src-tauri" / "target"
 
     # 1) 构建 Vite 前端
-    _status("前端构建 (Vite)", GEAR_MARK, "正在构建...")
-    result = _run(["npm", "run", "build"], cwd=str(DESKTOP_DIR))
-    if result.returncode != 0:
+    exit_code, vite_output = _build_with_live_output(
+        "前端构建 (Vite)", ["npm", "run", "build"], str(DESKTOP_DIR),
+        max_lines=6,
+    )
+    if exit_code != 0:
         _status("前端构建 (Vite)", CROSS_MARK, "构建失败", ok=False)
-        _hint(f"错误: {result.stderr.strip()[-200:]}")
+        _hint(f"错误: {vite_output.strip()[-300:]}")
         return None
     _status("前端构建 (Vite)", CHECK_MARK, "完成")
 
     # 2) 构建 Tauri
-    _status("Tauri 构建", GEAR_MARK, "正在编译 Rust 桌面应用（首次编译需要几分钟）...")
-    result = _run(
-        ["npx", "tauri", "build", "--ci"],
-        cwd=str(DESKTOP_DIR),
+    exit_code, cargo_output = _build_with_live_output(
+        "Tauri 编译 (Rust)", ["npx", "tauri", "build", "--ci"], str(DESKTOP_DIR),
+        max_lines=10,
         env={**os.environ, "TAURI_PRIVATE_KEY": "", "TAURI_KEY_PASSWORD": ""},
     )
-    if result.returncode != 0:
-        # Check if binary already exists from a previous build
+    if exit_code != 0:
         _status("Tauri 构建", CROSS_MARK, "构建失败，尝试使用已有二进制...", ok=False)
     else:
         _status("Tauri 构建", CHECK_MARK, "完成")
@@ -346,7 +484,6 @@ def launch_ide(
     # ── 初始化后端 ──
     from .app import ensure_runtime_capabilities, create_runner
 
-    _RUNTIME_CTX_REF = runtime_context  # noqa: F841 (referenced via import)
     ensure_runtime_capabilities(runtime_context)
     runner = create_runner(runtime_context)
 
@@ -371,7 +508,6 @@ def launch_ide(
 
     if require_rust:
         # 在后台启动 Python API 服务器，然后启动 Tauri 应用
-        import threading
         import uvicorn
 
         app = create_app()
