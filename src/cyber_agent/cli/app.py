@@ -2132,12 +2132,25 @@ def ide(
         "--skill-dir",
         help="额外 skill 目录。",
     ),
+    skip_build: bool = typer.Option(
+        False,
+        "--skip-build",
+        help="跳过桌面应用构建，仅启动 API 服务器。",
+    ),
+    server_only: bool = typer.Option(
+        False,
+        "--server-only",
+        help="仅启动 API 服务器（不检查 Rust/Node.js，不构建桌面应用）。",
+    ),
 ) -> None:
     """
     启动桌面 IDE，提供代码编辑、AI 对话、终端和 Git 集成。
+
+    自动检查并安装缺失依赖，从 Python 包到 Node.js/Rust 工具链，
+    再到系统库和 Tauri 桌面应用构建。每步都有明确的进度显示。
     """
     try:
-        from .ide_server import run_ide_server
+        from .ide_launcher import launch_ide
     except ImportError as exc:
         renderer.print_error(
             f"IDE 模式需要额外依赖：fastapi、uvicorn。"
@@ -2157,8 +2170,11 @@ def ide(
         skill_dirs=skill_dir,
     )
 
-    renderer.print_info("正在初始化 IDE 后端服务...")
-    run_ide_server(runtime_context)
+    launch_ide(
+        runtime_context,
+        skip_build=skip_build,
+        require_rust=not server_only,
+    )
 
 
 @app.command(name="ide-server")

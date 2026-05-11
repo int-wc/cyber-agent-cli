@@ -26,18 +26,34 @@ python -m playwright install chromium
 Tauri v2 + React + TypeScript + Tailwind CSS 实现的跨平台桌面 IDE。
 
 ```bash
+# 启动完整桌面 IDE — 自动检查依赖、安装、构建并启动
+cyber-agent ide
+
+# 跳过构建，仅启动 API 服务器 + 已有桌面应用
+cyber-agent ide --skip-build
+
+# 仅启动 API 服务器（不检查 Rust/Node，不构建前端）
+cyber-agent ide --server-only
+
 # 前端开发（Vite HMR，端口 1420）
 cd desktop && npm install && npm run dev
 
 # 仅启动后端 API 服务器（不启动桌面应用）
 cyber-agent ide-server --port 9876
 
-# 启动完整桌面 IDE（需要 Rust 工具链）
-cyber-agent ide
-
 # 构建桌面应用（AppImage / MSI）
 cd desktop && ./scripts/build.sh
 ```
+
+启动流程（`cyber-agent ide`）：
+1. Python 包检查（fastapi/uvicorn）→ 缺失则自动 pip install
+2. Rust 工具链检查（rustc/cargo）
+3. Node.js / npm 检查
+4. 系统库检查（Linux: webkit2gtk, gtk3）
+5. 前端依赖检查（node_modules）→ 缺失则自动 npm install
+6. Tauri CLI 检查 → 缺失则自动安装
+7. Vite 前端构建 + Tauri Rust 编译
+8. 启动 API 后端 → 启动桌面应用
 
 架构：`cyber-agent ide` 启动 FastAPI 后端（`cli/ide_server.py`），然后 Tauri 应用通过 WebSocket 连接 `ws://127.0.0.1:<port>/ws/chat`。
 前端状态管理使用 Zustand，与后端通信通过 WebSocket（AI 对话流式传输）和 REST API（文件操作、Git、终端命令）。
