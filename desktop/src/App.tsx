@@ -22,7 +22,7 @@ function App() {
         if (savedPort) {
           setBackendPort(savedPort);
         }
-        return () => { unlisten.then((fn: unknown) => (fn as () => void)()); };
+        return unlisten;
       } catch {
         // Not running in Tauri — probe for backend server
         setBackendStatus("connecting");

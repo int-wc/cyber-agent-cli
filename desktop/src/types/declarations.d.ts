@@ -1,30 +1,40 @@
 declare module "lucide-react" {
-  import type { FC, SVGProps } from "react";
-  export const Files: FC<SVGProps<SVGSVGElement>>;
-  export const Search: FC<SVGProps<SVGSVGElement>>;
-  export const GitBranch: FC<SVGProps<SVGSVGElement>>;
-  export const Puzzle: FC<SVGProps<SVGSVGElement>>;
-  export const Settings: FC<SVGProps<SVGSVGElement>>;
-  export const Circle: FC<SVGProps<SVGSVGElement>>;
-  export const X: FC<SVGProps<SVGSVGElement>>;
-  export const Send: FC<SVGProps<SVGSVGElement>>;
-  export const Square: FC<SVGProps<SVGSVGElement>>;
-  export const Wrench: FC<SVGProps<SVGSVGElement>>;
-  export const User: FC<SVGProps<SVGSVGElement>>;
-  export const Bot: FC<SVGProps<SVGSVGElement>>;
-  export const Brain: FC<SVGProps<SVGSVGElement>>;
-  export const AlertCircle: FC<SVGProps<SVGSVGElement>>;
-  export const AlertTriangle: FC<SVGProps<SVGSVGElement>>;
-  export const MessageSquare: FC<SVGProps<SVGSVGElement>>;
-  export const FolderOpen: FC<SVGProps<SVGSVGElement>>;
-  export const Folder: FC<SVGProps<SVGSVGElement>>;
-  export const File: FC<SVGProps<SVGSVGElement>>;
-  export const FileCode: FC<SVGProps<SVGSVGElement>>;
-  export const ChevronRight: FC<SVGProps<SVGSVGElement>>;
-  export const RefreshCw: FC<SVGProps<SVGSVGElement>>;
-  export const Plus: FC<SVGProps<SVGSVGElement>>;
-  export const Minus: FC<SVGProps<SVGSVGElement>>;
-  export const Terminal: FC<SVGProps<SVGSVGElement>>;
+  import type { FC } from "react";
+
+  interface LucideProps {
+    size?: number | string;
+    className?: string;
+    color?: string;
+    fill?: string;
+    strokeWidth?: number;
+    absoluteStrokeWidth?: boolean;
+  }
+
+  export const Files: FC<LucideProps>;
+  export const Search: FC<LucideProps>;
+  export const GitBranch: FC<LucideProps>;
+  export const Puzzle: FC<LucideProps>;
+  export const Settings: FC<LucideProps>;
+  export const Circle: FC<LucideProps>;
+  export const X: FC<LucideProps>;
+  export const Send: FC<LucideProps>;
+  export const Square: FC<LucideProps>;
+  export const Wrench: FC<LucideProps>;
+  export const User: FC<LucideProps>;
+  export const Bot: FC<LucideProps>;
+  export const Brain: FC<LucideProps>;
+  export const AlertCircle: FC<LucideProps>;
+  export const AlertTriangle: FC<LucideProps>;
+  export const MessageSquare: FC<LucideProps>;
+  export const FolderOpen: FC<LucideProps>;
+  export const Folder: FC<LucideProps>;
+  export const File: FC<LucideProps>;
+  export const FileCode: FC<LucideProps>;
+  export const ChevronRight: FC<LucideProps>;
+  export const RefreshCw: FC<LucideProps>;
+  export const Plus: FC<LucideProps>;
+  export const Minus: FC<LucideProps>;
+  export const Terminal: FC<LucideProps>;
 }
 
 declare module "xterm" {
