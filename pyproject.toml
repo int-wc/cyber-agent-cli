@@ -20,6 +20,8 @@ dependencies = [
     "aiofiles>=23.2.0",
     "lark-oapi>=1.5.3",
     "mcp>=1.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
     # 根据你的网络安全工具需求添加更多依赖
 ]
 

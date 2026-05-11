@@ -2109,6 +2109,77 @@ def version() -> None:
     typer.echo(f"cyber-agent-cli {__version__}")
 
 
+@app.command()
+def ide(
+    ctx: typer.Context,
+    mode: str = typer.Option(
+        AgentMode.STANDARD.value,
+        "--mode",
+        help="运行模式，可选 standard 或 authorized。",
+    ),
+    allow_paths: list[str] | None = typer.Option(
+        None,
+        "--allow-path",
+        help="授权模式下额外允许读取的路径根目录。",
+    ),
+    approval_policy: str = typer.Option(
+        ApprovalPolicy.PROMPT.value,
+        "--approval-policy",
+        help="高风险工具调用的审批策略，可选 prompt、auto、never。",
+    ),
+    skill_dir: list[str] | None = typer.Option(
+        None,
+        "--skill-dir",
+        help="额外 skill 目录。",
+    ),
+) -> None:
+    """
+    启动桌面 IDE，提供代码编辑、AI 对话、终端和 Git 集成。
+    """
+    try:
+        from .ide_server import run_ide_server
+    except ImportError as exc:
+        renderer.print_error(
+            f"IDE 模式需要额外依赖：fastapi、uvicorn。"
+            f"请运行 pip install 'cyber-agent-cli[ide]' 安装。"
+        )
+        raise typer.Exit(code=1) from exc
+
+    parsed_mode = parse_agent_mode(mode)
+    parsed_approval_policy = parse_approval_policy(approval_policy)
+
+    runtime_context = build_runtime_context(
+        parsed_mode,
+        allow_paths,
+        None,
+        parsed_approval_policy,
+        InteractionUiMode.CLI,
+        skill_dirs=skill_dir,
+    )
+
+    renderer.print_info("正在初始化 IDE 后端服务...")
+    run_ide_server(runtime_context)
+
+
+@app.command(name="ide-server")
+def ide_server_cmd(
+    ctx: typer.Context,
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址。"),
+    port: int = typer.Option(0, "--port", help="监听端口，0 表示随机。"),
+) -> None:
+    """
+    仅启动 IDE API 服务器（不启动桌面应用），方便前端开发调试。
+    """
+    try:
+        from .ide_server import run_ide_server
+    except ImportError as exc:
+        renderer.print_error("IDE 模式需要额外依赖。")
+        raise typer.Exit(code=1) from exc
+
+    runtime_context = get_or_build_runtime_context(ctx)
+    run_ide_server(runtime_context, host=host, port=port)
+
+
 def main() -> None:
     """提供给 python -m cyber_agent 的统一入口。"""
     app()
