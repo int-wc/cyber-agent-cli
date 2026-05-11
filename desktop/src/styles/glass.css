@@ -1,0 +1,168 @@
+/* ── Liquid Glass CSS System ── */
+
+.glass-panel {
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+
+.glass-panel-heavy {
+  background: rgba(17, 24, 39, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+.glass-button {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+.glass-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.glass-button:active {
+  background: rgba(255, 255, 255, 0.15);
+  transform: scale(0.98);
+}
+
+.glass-button-accent {
+  background: rgba(20, 184, 166, 0.15);
+  border-color: rgba(20, 184, 166, 0.3);
+}
+
+.glass-button-accent:hover {
+  background: rgba(20, 184, 166, 0.25);
+  border-color: rgba(20, 184, 166, 0.5);
+}
+
+.glass-input {
+  background: rgba(30, 41, 59, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.glass-input:focus {
+  border-color: rgba(20, 184, 166, 0.5);
+}
+
+.glass-input::placeholder {
+  color: #64748b;
+}
+
+.glass-card {
+  background: rgba(17, 24, 39, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+}
+
+/* Glass icon button (sidebar) */
+.glass-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: transparent;
+  border: none;
+}
+
+.glass-icon-btn:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.glass-icon-btn.active {
+  color: #14b8a6;
+  background: rgba(20, 184, 166, 0.12);
+  border: 1px solid rgba(20, 184, 166, 0.2);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.4);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.7);
+}
+
+/* Resize handle */
+.resize-handle {
+  position: relative;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.resize-handle-h {
+  cursor: col-resize;
+  width: 4px;
+}
+
+.resize-handle-v {
+  cursor: row-resize;
+  height: 4px;
+}
+
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  transition: background 0.2s;
+}
+
+.resize-handle:hover::after {
+  background: rgba(20, 184, 166, 0.15);
+}
+
+/* Selection */
+::selection {
+  background: rgba(20, 184, 166, 0.3);
+  color: #e2e8f0;
+}
+
+/* Focus visible */
+*:focus-visible {
+  outline: 1px solid rgba(20, 184, 166, 0.5);
+  outline-offset: -1px;
+}
