@@ -21,7 +21,28 @@ python -m unittest discover tests -v
 python -m playwright install chromium
 ```
 
-源码目录：`src/cyber_agent/`，测试目录：`tests/`。pyproject.toml 中已配置 `pythonpath = ["src"]` 和 `asyncio_default_fixture_loop_scope = "function"`。
+## 桌面 IDE（`desktop/`)
+
+Tauri v2 + React + TypeScript + Tailwind CSS 实现的跨平台桌面 IDE。
+
+```bash
+# 前端开发（Vite HMR，端口 1420）
+cd desktop && npm install && npm run dev
+
+# 仅启动后端 API 服务器（不启动桌面应用）
+cyber-agent ide-server --port 9876
+
+# 启动完整桌面 IDE（需要 Rust 工具链）
+cyber-agent ide
+
+# 构建桌面应用（AppImage / MSI）
+cd desktop && ./scripts/build.sh
+```
+
+架构：`cyber-agent ide` 启动 FastAPI 后端（`cli/ide_server.py`），然后 Tauri 应用通过 WebSocket 连接 `ws://127.0.0.1:<port>/ws/chat`。
+前端状态管理使用 Zustand，与后端通信通过 WebSocket（AI 对话流式传输）和 REST API（文件操作、Git、终端命令）。
+
+源码目录：`src/cyber_agent/`，测试目录：`tests/`，桌面应用目录：`desktop/`。pyproject.toml 中已配置 `pythonpath = ["src"]` 和 `asyncio_default_fixture_loop_scope = "function"`。
 
 ## 架构
 
