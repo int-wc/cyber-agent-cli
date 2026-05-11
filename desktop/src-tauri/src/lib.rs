@@ -1,9 +1,9 @@
-use tauri::Manager;
+use tauri::Emitter;
 
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, ServerState>) -> Result<u16, String> {
     state
-        .port
+        .0
         .load(std::sync::atomic::Ordering::SeqCst)
         .try_into()
         .map_err(|e| format!("端口读取失败: {}", e))
