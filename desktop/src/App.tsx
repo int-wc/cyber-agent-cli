@@ -10,51 +10,50 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
-      // Try Tauri event first
+      // 1) 尝试 Tauri invoke 读取端口（从 Rust state）
+      let port: number | null = null;
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const unlisten = await listen<number>("backend-ready", (event) => {
-          const port = event.payload;
+        const { invoke } = await import("@tauri-apps/api/core");
+        port = await invoke<number>("get_server_port");
+        if (port && port > 0) {
           setBackendPort(port);
-        });
-        // Also check if backend already started (stored port)
-        const savedPort = backendPort;
-        if (savedPort) {
-          setBackendPort(savedPort);
+          setReady(true);
+          // 监听后续事件
+          const { listen } = await import("@tauri-apps/api/event");
+          return await listen<number>("backend-ready", (event) => {
+            if (event.payload > 0) setBackendPort(event.payload);
+          });
         }
-        return unlisten;
       } catch {
-        // Not running in Tauri — probe for backend server
-        setBackendStatus("connecting");
-        for (const port of [9876, 9877, 9878, 9879, 9880]) {
-          try {
-            const resp = await fetch(`http://127.0.0.1:${port}/api/health`);
-            if (resp.ok) {
-              setBackendPort(port);
-              setReady(true);
-              return;
-            }
-          } catch {
-            continue;
+        // 不在 Tauri 环境
+      }
+
+      // 2) 回退：从 localStorage 读取
+      try {
+        const saved = localStorage.getItem("cyber-agent-ide-backend-port");
+        if (saved) {
+          port = parseInt(saved, 10);
+        }
+      } catch {}
+
+      // 3) 回退：探测常见端口
+      setBackendStatus("connecting");
+      const probePorts = port ? [port] : [9876, 9877, 9878, 9879, 9880];
+      for (const p of probePorts) {
+        try {
+          const resp = await fetch(`http://127.0.0.1:${p}/api/health`);
+          if (resp.ok) {
+            setBackendPort(p);
+            setReady(true);
+            return;
           }
+        } catch {
+          continue;
         }
       }
     };
 
     init();
-
-    // Listen for backend port changes
-    const check = setInterval(() => {
-      const port = useWorkspaceStore.getState().backendPort;
-      if (port && !ready) {
-        fetch(`http://127.0.0.1:${port}/api/health`)
-          .then((r) => r.json())
-          .then(() => setReady(true))
-          .catch(() => {});
-      }
-    }, 1000);
-
-    return () => clearInterval(check);
   }, []);
 
   if (ready || backendPort) {
