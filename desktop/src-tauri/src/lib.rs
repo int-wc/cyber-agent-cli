@@ -22,51 +22,68 @@ pub fn run() {
         .manage(server_port.clone())
         .invoke_handler(tauri::generate_handler![get_server_port])
         .setup(move |app| {
-            use std::process::{Command, Stdio};
-            use std::io::BufRead;
-
             let handle = app.handle().clone();
             let port_atomic = server_port.clone();
 
-            // Spawn Python backend server
+            // 优先使用环境变量传入的端口（由 cyber-agent ide 设置）
+            if let Ok(port_str) = std::env::var("CYBER_IDE_PORT") {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    port_atomic.0.store(port, std::sync::atomic::Ordering::SeqCst);
+                    let _ = handle.emit("backend-ready", port);
+                    return Ok(());
+                }
+            }
+
+            // 回退：自行启动后端服务器
             std::thread::spawn(move || {
-                let mut child = Command::new("cyber-agent")
-                    .args(["ide-server", "--port", "0"])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("无法启动 IDE 后端服务。请确认 cyber-agent 已安装。");
+                use std::process::{Command, Stdio};
+                use std::io::BufRead;
 
-                let stdout = child.stdout.take().expect("无法捕获后端输出");
-                let reader = std::io::BufReader::new(stdout);
+                // 尝试多种方式定位 cyber-agent
+                let cmds = vec![
+                    vec!["cyber-agent".to_string(), "ide-server".to_string(), "--port".to_string(), "0".to_string()],
+                ];
+                for args in &cmds {
+                    let mut cmd = Command::new(&args[0]);
+                    cmd.args(&args[1..]);
+                    cmd.stdout(Stdio::piped());
+                    cmd.stderr(Stdio::piped());
 
-                for line in reader.lines() {
-                    if let Ok(line) = line {
-                        if line.starts_with("IDE_SERVER_PORT=") {
-                            if let Ok(port) = line
-                                .trim_start_matches("IDE_SERVER_PORT=")
-                                .parse::<u16>()
-                            {
-                                port_atomic.0.store(port, std::sync::atomic::Ordering::SeqCst);
-                                // Emit event to frontend
-                                let _ = handle.emit("backend-ready", port);
+                    if let Ok(mut child) = cmd.spawn() {
+                        let stdout = child.stdout.take().expect("无法捕获后端输出");
+                        let reader = std::io::BufReader::new(stdout);
+
+                        for line in reader.lines() {
+                            if let Ok(line) = line {
+                                if line.starts_with("IDE_SERVER_PORT=") {
+                                    if let Ok(port) = line
+                                        .trim_start_matches("IDE_SERVER_PORT=")
+                                        .parse::<u16>()
+                                    {
+                                        port_atomic.0.store(port, std::sync::atomic::Ordering::SeqCst);
+                                        let _ = handle.emit("backend-ready", port);
+                                    }
+                                    break;
+                                }
                             }
-                            break;
                         }
+
+                        // Drain stderr
+                        if let Some(stderr) = child.stderr.take() {
+                            let r = std::io::BufReader::new(stderr);
+                            for line in r.lines() {
+                                if let Ok(l) = line {
+                                    eprintln!("[backend] {}", l);
+                                }
+                            }
+                        }
+
+                        let _ = child.wait();
+                        return;
                     }
                 }
 
-                // Keep stderr draining
-                if let Some(stderr) = child.stderr.take() {
-                    let stderr_reader = std::io::BufReader::new(stderr);
-                    for line in stderr_reader.lines() {
-                        if let Ok(line) = line {
-                            eprintln!("[backend] {}", line);
-                        }
-                    }
-                }
-
-                let _ = child.wait();
+                eprintln!("无法启动 IDE 后端服务。请确认 cyber-agent 已安装。");
             });
 
             Ok(())

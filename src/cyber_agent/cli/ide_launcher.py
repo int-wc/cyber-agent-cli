@@ -396,7 +396,7 @@ def build_desktop_app() -> Path | None:
     """构建 Tauri 桌面应用。返回二进制路径或 None。"""
     tauri_target = DESKTOP_DIR / "src-tauri" / "target"
 
-    # 1) 构建 Vite 前端
+    # 1) 构建 Vite 前端 (生成 dist/ 供 Tauri 嵌入)
     exit_code, vite_output = _build_with_live_output(
         "前端构建 (Vite)", ["npm", "run", "build"], str(DESKTOP_DIR),
         max_lines=6,
@@ -407,23 +407,21 @@ def build_desktop_app() -> Path | None:
         return None
     _status("前端构建 (Vite)", CHECK_MARK, "完成")
 
-    # 2) 构建 Tauri
+    # 2) 编译 Tauri Rust 二进制 (仅编译，不打包 deb/rpm/AppImage)
     exit_code, cargo_output = _build_with_live_output(
-        "Tauri 编译 (Rust)", ["npx", "tauri", "build", "--ci"], str(DESKTOP_DIR),
+        "Tauri 编译 (Rust)", ["cargo", "build", "--release"], str(DESKTOP_DIR / "src-tauri"),
         max_lines=10,
-        env={**os.environ, "TAURI_PRIVATE_KEY": "", "TAURI_KEY_PASSWORD": ""},
     )
     if exit_code != 0:
-        _status("Tauri 构建", CROSS_MARK, "构建失败，尝试使用已有二进制...", ok=False)
-    else:
-        _status("Tauri 构建", CHECK_MARK, "完成")
+        _status("Tauri 编译", CROSS_MARK, "编译失败", ok=False)
+        _hint(f"请检查 Rust 编译错误: cd {DESKTOP_DIR}/src-tauri && cargo build --release")
+        return None
+    _status("Tauri 编译", CHECK_MARK, "完成")
 
-    # Find the binary
+    # 查找编译产物
     candidates = [
         tauri_target / "release" / "cyber-agent-ide",
-        tauri_target / "debug" / "cyber-agent-ide",
         tauri_target / "release" / "cyber-agent-ide.exe",
-        tauri_target / "debug" / "cyber-agent-ide.exe",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -431,7 +429,6 @@ def build_desktop_app() -> Path | None:
             return candidate
 
     _status("桌面应用二进制", CROSS_MARK, "未找到", ok=False)
-    _hint("请手动运行: cd desktop && npx tauri build")
     return None
 
 
@@ -519,13 +516,19 @@ def launch_ide(
         backend_thread.start()
         time.sleep(1.5)
 
-        _status("桌面应用", ROCKET_MARK, "正在启动...")
-        result = _run(
-            [str(app_binary)] if isinstance(app_binary, Path) else ["cargo", "run", "--release"],
-            cwd=str(DESKTOP_DIR / "src-tauri"),
-        )
-        if result.returncode != 0:
-            _status("桌面应用", CROSS_MARK, f"退出码: {result.returncode}", ok=False)
+        if app_binary:
+            _status("桌面应用", ROCKET_MARK, "正在启动...")
+            try:
+                subprocess.Popen(
+                    [str(app_binary)],
+                    env={**os.environ, "CYBER_IDE_PORT": str(port)},
+                    start_new_session=True,
+                )
+                _status("桌面应用", CHECK_MARK, "已启动")
+            except Exception as e:
+                _status("桌面应用", CROSS_MARK, f"启动失败: {e}", ok=False)
+        else:
+            _status("桌面应用", CROSS_MARK, "未找到二进制", ok=False)
     else:
         # 仅启动 API 服务器
         _status("启动方式", GEAR_MARK, "仅 API 服务器模式")
