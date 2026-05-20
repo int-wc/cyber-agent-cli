@@ -468,10 +468,6 @@ def launch_ide(
     try:
         from .ide_server import (
             run_ide_server,
-            create_app,
-            _RUNNER,
-            _RUNTIME_CTX,
-            _AGENT_EXECUTOR,
             _find_free_port,
         )
     except ImportError as e:
@@ -504,13 +500,9 @@ def launch_ide(
     _status("WebSocket", GEAR_MARK, f"ws://127.0.0.1:{port}/ws/chat")
 
     if require_rust:
-        # 用非 daemon 线程启动 API 后端（daemon 线程会随主进程退出而终止）
-        import uvicorn
-
-        app = create_app()
-
+        # 后端已在上面初始化完毕，直接复用 run_ide_server
         def run_backend():
-            uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+            run_ide_server(runtime_context, host="127.0.0.1", port=port)
 
         backend_thread = threading.Thread(target=run_backend, daemon=False)
         backend_thread.start()
@@ -518,13 +510,16 @@ def launch_ide(
         # 等待后端就绪
         _status("API 后端", GEAR_MARK, "等待后端就绪...")
         import urllib.request
-        for _ in range(60):
+        for i in range(60):
             try:
                 resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
                 if resp.status == 200:
                     break
             except Exception:
                 pass
+            if backend_thread.is_alive() is False:
+                _status("API 后端", CROSS_MARK, "后端线程意外退出", ok=False)
+                sys.exit(1)
             time.sleep(0.3)
         else:
             _status("API 后端", CROSS_MARK, "超时未就绪", ok=False)
