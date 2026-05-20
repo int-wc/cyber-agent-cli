@@ -23,42 +23,38 @@ python -m playwright install chromium
 
 ## 桌面 IDE（`desktop/`)
 
-Tauri v2 + React + TypeScript + Tailwind CSS 实现的跨平台桌面 IDE。
+React + TypeScript + Tailwind CSS 实现的浏览器端 IDE。
 
 ```bash
-# 启动完整桌面 IDE — 自动检查依赖、安装、构建并启动
+# 启动完整桌面 IDE — 自动检查依赖、构建前端、启动后端并打开浏览器
 cyber-agent ide
 
-# 跳过构建，仅启动 API 服务器 + 已有桌面应用
+# 跳过前端构建，直接启动
 cyber-agent ide --skip-build
 
-# 仅启动 API 服务器（不检查 Rust/Node，不构建前端）
-cyber-agent ide --server-only
+# 不自动打开浏览器
+cyber-agent ide --no-browser
 
 # 前端开发（Vite HMR，端口 1420）
 cd desktop && npm install && npm run dev
 
-# 仅启动后端 API 服务器（不启动桌面应用）
+# 仅启动后端 API 服务器
 cyber-agent ide-server --port 9876
-
-# 构建桌面应用（AppImage / MSI）
-cd desktop && ./scripts/build.sh
 ```
 
 启动流程（`cyber-agent ide`）：
 1. Python 包检查（fastapi/uvicorn）→ 缺失则自动 pip install
-2. Rust 工具链检查（rustc/cargo）
-3. Node.js / npm 检查
-4. 系统库检查（Linux: webkit2gtk, gtk3）
-5. 前端依赖检查（node_modules）→ 缺失则自动 npm install
-6. Tauri CLI 检查 → 缺失则自动安装
-7. Vite 前端构建 + Tauri Rust 编译
-8. 启动 API 后端 → 启动桌面应用
+2. Node.js / npm 检查
+3. 前端依赖检查（node_modules）→ 缺失则自动 npm install
+4. Vite 构建前端 dist/
+5. 启动 FastAPI 后端（托管 API + 前端静态文件）
+6. 自动打开浏览器访问
 
-架构：`cyber-agent ide` 启动 FastAPI 后端（`cli/ide_server.py`），然后 Tauri 应用通过 WebSocket 连接 `ws://127.0.0.1:<port>/ws/chat`。
+架构：FastAPI 后端（`cli/ide_server.py`）同时托管 REST API、WebSocket 和前端 dist/。
+前端通过 WebSocket 连接同源 `/ws/chat`，无需跨域配置。
 前端状态管理使用 Zustand，与后端通信通过 WebSocket（AI 对话流式传输）和 REST API（文件操作、Git、终端命令）。
 
-源码目录：`src/cyber_agent/`，测试目录：`tests/`，桌面应用目录：`desktop/`。pyproject.toml 中已配置 `pythonpath = ["src"]` 和 `asyncio_default_fixture_loop_scope = "function"`。
+源码目录：`src/cyber_agent/`，测试目录：`tests/`，桌面 IDE 目录：`desktop/`。pyproject.toml 中已配置 `pythonpath = ["src"]` 和 `asyncio_default_fixture_loop_scope = "function"`。
 
 ## 架构
 
