@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@/types/agent";
 import { useChatStore } from "@/stores/useChatStore";
 import { useWorkspaceStore } from "@/stores/useWorkspaceStore";
+import { logger } from "@/services/logger";
 
 export class AgentWebSocket {
   private ws: WebSocket | null = null;
@@ -24,11 +25,13 @@ export class AgentWebSocket {
 
   private _doConnect() {
     const url = `ws://127.0.0.1:${this.port}/ws/chat`;
+    logger.info("WebSocket 连接中", { url });
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
       this.reconnectDelay = 1000;
       useChatStore.getState().setWsConnected(true);
+      logger.info("WebSocket 已连接", { port: this.port });
     };
 
     this.ws.onmessage = (event) => {
@@ -38,17 +41,20 @@ export class AgentWebSocket {
       } catch {}
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev) => {
+      logger.info("WebSocket 关闭", { code: ev.code, reason: ev.reason, port: this.port });
       useChatStore.getState().setWsConnected(false);
       if (this.shouldReconnect) {
         this.reconnectTimer = setTimeout(() => {
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
+          logger.info("WebSocket 重连", { delay: this.reconnectDelay, port: this.port });
           this._doConnect();
         }, this.reconnectDelay);
       }
     };
 
-    this.ws.onerror = () => {
+    this.ws.onerror = (ev) => {
+      logger.error("WebSocket 错误", { port: this.port, readyState: this.ws?.readyState });
       this.ws?.close();
     };
   }

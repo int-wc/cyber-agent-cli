@@ -4,6 +4,7 @@ import { ChatInput } from "./ChatInput";
 import { useChatStore } from "@/stores/useChatStore";
 import { AgentWebSocket } from "@/services/websocket";
 import { MessageSquare, AlertTriangle } from "lucide-react";
+import { logger } from "@/services/logger";
 
 let wsInstance: AgentWebSocket | null = null;
 
@@ -18,12 +19,13 @@ export function ChatPanel({ backendPort }: { backendPort: number | null }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // connect WebSocket when port is available
     if (backendPort && !wsInstance) {
+      logger.info("ChatPanel 创建 WebSocket", { port: backendPort });
       wsInstance = new AgentWebSocket(backendPort);
       wsInstance.connect();
     }
     return () => {
+      logger.info("ChatPanel 清理 WebSocket");
       wsInstance?.disconnect();
       wsInstance = null;
     };
