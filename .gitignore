@@ -12,8 +12,6 @@ webhook-routes.json
 *.egg-info
 
 # IDE 桌面应用构建产物
-desktop/src-tauri/target/
 desktop/dist/
 desktop/node_modules/
 desktop/.vite/
-desktop/src-tauri/gen/

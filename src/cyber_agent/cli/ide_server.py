@@ -27,6 +27,8 @@ from .app import (
 _AGENT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent")
 _GIT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="git")
 
+DESKTOP_DIR = Path(__file__).resolve().parent.parent.parent.parent / "desktop"
+
 _RUNNER: AgentRunner | None = None
 _RUNTIME_CTX: dict[str, object] = {}
 
@@ -131,6 +133,9 @@ def _run_agent_sync(bridge: AgentEventBridge, user_input: str) -> str:
 
 def create_app() -> Any:
     fastapi, CORSMiddleware = _load_fastapi()
+    from fastapi.staticfiles import StaticFiles
+    _StaticFiles = StaticFiles
+
     app = fastapi.FastAPI(title="Cyber Agent IDE Server", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -139,6 +144,26 @@ def create_app() -> Any:
         allow_headers=["*"],
     )
     _register_routes(app)
+
+    # 托管前端构建产物 + SPA 回退
+    frontend_dist = DESKTOP_DIR / "dist"
+    if frontend_dist.exists():
+        app.mount("/assets", _StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_frontend(full_path: str):
+            if full_path.startswith("api/") or full_path.startswith("ws/"):
+                raise fastapi.HTTPException(status_code=404)
+            index_path = frontend_dist / full_path
+            if index_path.is_file() and index_path.exists():
+                from fastapi.responses import FileResponse
+                return FileResponse(str(index_path))
+            from fastapi.responses import FileResponse
+            index_html = frontend_dist / "index.html"
+            if index_html.exists():
+                return FileResponse(str(index_html))
+            return {"message": "前端未构建。请运行 cd desktop && npm run build"}
+
     return app
 
 

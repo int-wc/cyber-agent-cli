@@ -2135,26 +2135,25 @@ def ide(
     skip_build: bool = typer.Option(
         False,
         "--skip-build",
-        help="跳过桌面应用构建，仅启动 API 服务器。",
+        help="跳过前端构建，直接使用已有 dist/。",
     ),
-    server_only: bool = typer.Option(
+    no_browser: bool = typer.Option(
         False,
-        "--server-only",
-        help="仅启动 API 服务器（不检查 Rust/Node.js，不构建桌面应用）。",
+        "--no-browser",
+        help="不自动打开浏览器。",
     ),
 ) -> None:
     """
     启动桌面 IDE，提供代码编辑、AI 对话、终端和 Git 集成。
 
-    自动检查并安装缺失依赖，从 Python 包到 Node.js/Rust 工具链，
-    再到系统库和 Tauri 桌面应用构建。每步都有明确的进度显示。
+    自动检查 Python/Node.js 依赖，构建前端，启动后端，
+    然后在浏览器中打开 IDE 页面。
     """
     try:
         from .ide_launcher import launch_ide
     except ImportError as exc:
         renderer.print_error(
             f"IDE 模式需要额外依赖：fastapi、uvicorn。"
-            f"请运行 pip install 'cyber-agent-cli[ide]' 安装。"
         )
         raise typer.Exit(code=1) from exc
 
@@ -2173,7 +2172,7 @@ def ide(
     launch_ide(
         runtime_context,
         skip_build=skip_build,
-        require_rust=not server_only,
+        open_browser=not no_browser,
     )
 
 

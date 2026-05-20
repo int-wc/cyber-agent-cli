@@ -6,13 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-shell": "^2.0.0",
     "lucide-react": "^0.460.0",
     "monaco-editor": "^0.52.0",
     "react": "^19.0.0",
@@ -22,7 +19,6 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

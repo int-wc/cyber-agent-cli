@@ -10,48 +10,19 @@ function App() {
   const setBackendPort = useWorkspaceStore((s) => s.setBackendPort);
   const setBackendStatus = useWorkspaceStore((s) => s.setBackendStatus);
 
-  logger.info("App 加载", { userAgent: navigator.userAgent, url: location.href });
+  logger.info("App 加载", { url: location.href });
 
   useEffect(() => {
     const init = async () => {
-      // 1) 尝试 Tauri invoke 读取端口
+      // 1) 从 localStorage 读取上次使用的端口
       let port: number | null = null;
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        port = await invoke<number>("get_server_port");
-        logger.info("Tauri invoke get_server_port 返回", { port });
-        if (port && port > 0) {
-          setBackendPort(port);
-          setReady(true);
-          const { listen } = await import("@tauri-apps/api/event");
-          const unlisten = await listen<number>("backend-ready", (event) => {
-            logger.info("收到 backend-ready 事件", { port: event.payload });
-            if (event.payload > 0) setBackendPort(event.payload);
-          });
-          return unlisten;
-        } else {
-          logger.info("端口为 0，等待 backend-ready 事件...");
-          const { listen } = await import("@tauri-apps/api/event");
-          const unlisten = await listen<number>("backend-ready", (event) => {
-            logger.info("收到 backend-ready 事件", { port: event.payload });
-            if (event.payload > 0) setBackendPort(event.payload);
-          });
-          return unlisten;
-        }
-      } catch (e) {
-        logger.info("不在 Tauri 环境，回退探测", { error: String(e) });
-      }
-
-      // 2) 回退：localStorage
       try {
         const saved = localStorage.getItem("cyber-agent-ide-backend-port");
         logger.info("localStorage 端口", { saved });
         if (saved) port = parseInt(saved, 10);
-      } catch (e) {
-        logger.error("localStorage 读取失败", { error: String(e) });
-      }
+      } catch {}
 
-      // 3) 回退：探测端口
+      // 2) 探测后端
       setBackendStatus("connecting");
       const probePorts = port ? [port] : [9876, 9877, 9878, 9879, 9880];
       for (const p of probePorts) {
@@ -65,8 +36,7 @@ function App() {
             setReady(true);
             return;
           }
-        } catch (e) {
-          logger.info("探测失败", { port: p, error: String(e) });
+        } catch {
           continue;
         }
       }
@@ -85,12 +55,14 @@ function App() {
     <div className="h-full w-full flex items-center justify-center bg-window">
       <div className="glass-card p-8 text-center max-w-lg">
         <div className="text-5xl mb-4">🔷</div>
-        <h1 className="text-xl font-bold text-primary mb-3">
-          Cyber Agent IDE
-        </h1>
+        <h1 className="text-xl font-bold text-primary mb-3">Cyber Agent IDE</h1>
+        <p className="text-muted mb-4 text-sm">现代桌面 AI 编程助手</p>
         <div className="flex flex-col items-center gap-2 mb-4">
           <div className="animate-spin w-5 h-5 border-2 border-accent-teal border-t-transparent rounded-full" />
           <p className="text-xs text-muted">正在连接后端服务...</p>
+          <p className="text-[10px] text-muted opacity-60">
+            请运行 cyber-agent ide 或 cyber-agent ide-server --port 9876
+          </p>
         </div>
         <button
           onClick={() => setShowLogs(!showLogs)}
