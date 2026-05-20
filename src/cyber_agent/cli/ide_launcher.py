@@ -504,7 +504,7 @@ def launch_ide(
     _status("WebSocket", GEAR_MARK, f"ws://127.0.0.1:{port}/ws/chat")
 
     if require_rust:
-        # 在后台启动 Python API 服务器，然后启动 Tauri 应用
+        # 用非 daemon 线程启动 API 后端（daemon 线程会随主进程退出而终止）
         import uvicorn
 
         app = create_app()
@@ -512,9 +512,24 @@ def launch_ide(
         def run_backend():
             uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
-        backend_thread = threading.Thread(target=run_backend, daemon=True)
+        backend_thread = threading.Thread(target=run_backend, daemon=False)
         backend_thread.start()
-        time.sleep(1.5)
+
+        # 等待后端就绪
+        _status("API 后端", GEAR_MARK, "等待后端就绪...")
+        import urllib.request
+        for _ in range(60):
+            try:
+                resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1)
+                if resp.status == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+        else:
+            _status("API 后端", CROSS_MARK, "超时未就绪", ok=False)
+            sys.exit(1)
+        _status("API 后端", CHECK_MARK, "已就绪")
 
         if app_binary:
             _status("桌面应用", ROCKET_MARK, "正在启动...")
@@ -527,8 +542,6 @@ def launch_ide(
                 _status("桌面应用", CHECK_MARK, "已启动")
             except Exception as e:
                 _status("桌面应用", CROSS_MARK, f"启动失败: {e}", ok=False)
-        else:
-            _status("桌面应用", CROSS_MARK, "未找到二进制", ok=False)
     else:
         # 仅启动 API 服务器
         _status("启动方式", GEAR_MARK, "仅 API 服务器模式")
