@@ -12,6 +12,19 @@ export default defineConfig(async () => ({
     },
   },
   clearScreen: false,
+  build: {
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          monaco: ["@monaco-editor/react"],
+        },
+      },
+    },
+  },
+  optimizeDeps: {
+    exclude: ["lucide-react"],
+  },
   server: {
     port: 1420,
     strictPort: true,
