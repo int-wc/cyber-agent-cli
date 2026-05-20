@@ -15,4 +15,5 @@ webhook-routes.json
 desktop/src-tauri/target/
 desktop/dist/
 desktop/node_modules/
-desktop/.vite/desktop/src-tauri/gen/
+desktop/.vite/
+desktop/src-tauri/gen/
