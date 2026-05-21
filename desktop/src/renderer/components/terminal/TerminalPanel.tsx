@@ -155,7 +155,7 @@ export default function TerminalPanel() {
   };
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-base)" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
       {/* Tab bar */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center", flexShrink: 0,

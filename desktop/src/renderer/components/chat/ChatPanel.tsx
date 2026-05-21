@@ -64,7 +64,7 @@ export default function ChatPanel() {
   }, [clearApproval]);
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-elevated)" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
       {/* Header */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",

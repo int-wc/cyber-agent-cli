@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useSessionStore } from "./stores/sessionStore";
 import { wsClient } from "./services/ws";
 import AppShell from "./components/layout/AppShell";
+import LiquidBackground from "./components/glass/LiquidBackground";
 
 export default function App() {
   const { setBackendPort, setConnected, setConfig, backendPort } = useSessionStore();
@@ -10,7 +11,6 @@ export default function App() {
     const electronAPI = window.electronAPI;
 
     if (electronAPI) {
-      // Electron environment
       electronAPI.onBackendStatus((status) => {
         if (status.ready) {
           setBackendPort(status.port);
@@ -18,7 +18,6 @@ export default function App() {
         }
       });
     } else {
-      // Browser dev mode: read port from URL param or default
       const params = new URLSearchParams(window.location.search);
       const port = parseInt(params.get("port") || "8765", 10);
       setBackendPort(port);
@@ -53,5 +52,12 @@ export default function App() {
     };
   }, []);
 
-  return <AppShell />;
+  return (
+    <div style={{ position: "relative", height: "100vh" }}>
+      <LiquidBackground />
+      <div style={{ position: "relative", zIndex: 1, height: "100%" }}>
+        <AppShell />
+      </div>
+    </div>
+  );
 }

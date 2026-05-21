@@ -57,7 +57,7 @@ function FallbackEditor({ content, onChange }: { content: string; onChange: (v: 
       onChange={(e) => onChange(e.target.value)}
       spellCheck={false}
       style={{
-        flex: 1, width: "100%", resize: "none", background: "var(--bg-base)",
+        flex: 1, width: "100%", resize: "none", background: "transparent",
         color: "var(--text-primary)", border: "none", outline: "none",
         padding: 16, fontFamily: "monospace", fontSize: 13, lineHeight: 1.7,
       }}

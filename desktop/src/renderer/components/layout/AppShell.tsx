@@ -100,7 +100,7 @@ export default function AppShell() {
   }, [terminalHeight, setTerminalHeight]);
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "var(--bg-base)" }}>
+    <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "transparent" }}>
       <TitleBar />
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Sidebar */}

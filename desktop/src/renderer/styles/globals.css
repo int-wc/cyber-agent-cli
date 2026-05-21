@@ -105,3 +105,31 @@ body {
   0%, 100% { box-shadow: 0 0 8px -2px var(--accent-glow); }
   50% { box-shadow: 0 0 20px -2px var(--accent-glow); }
 }
+
+/* ── Liquid Glass orb animations ── */
+@keyframes orbFloat1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25%  { transform: translate(60px, -40px) scale(1.08); }
+  50%  { transform: translate(30px, 50px) scale(0.95); }
+  75%  { transform: translate(-30px, 20px) scale(1.04); }
+}
+
+@keyframes orbFloat2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25%  { transform: translate(-50px, -30px) scale(1.10); }
+  50%  { transform: translate(-20px, -60px) scale(0.93); }
+  75%  { transform: translate(40px, -20px) scale(1.06); }
+}
+
+@keyframes orbFloat3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  30%  { transform: translate(-35px, 25px) scale(1.12); }
+  60%  { transform: translate(25px, -35px) scale(0.96); }
+  85%  { transform: translate(10px, 15px) scale(1.05); }
+}
+
+@keyframes orbFloat4 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(40px, 30px) scale(1.07); }
+  66%  { transform: translate(-20px, -25px) scale(0.92); }
+}
