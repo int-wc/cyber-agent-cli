@@ -26,6 +26,7 @@ export async function apiFetch<T = unknown>(
 
 // File system APIs
 export const fsApi = {
+  roots: () => apiFetch<{ roots: { path: string; name: string }[] }>("/api/fs/roots"),
   list: (path = ".") => apiFetch<{ path: string; entries: import("../types/agent").FileEntry[] }>(`/api/fs/list?path=${encodeURIComponent(path)}`),
   read: (path: string) => apiFetch<{ path: string; content: string; size: number; truncated: boolean }>(`/api/fs/read?path=${encodeURIComponent(path)}`),
   write: (path: string, content: string) => apiFetch<{ path: string; written: boolean }>("/api/fs/write", { method: "POST", body: JSON.stringify({ path, content }) }),

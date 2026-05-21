@@ -1,17 +1,8 @@
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import type { FileEntry } from "../../types/agent";
 import { ChevronRight, Folder, File, FolderOpen, RefreshCw, Search } from "lucide-react";
-
-/** Detect OS root path for the file tree. */
-function getOSRoots(): string[] {
-  // Electron / Node exposes navigator.platform
-  const p = navigator.platform?.toLowerCase() || "";
-  if (p.startsWith("win")) return ["C:\\", "D:\\"];
-  if (p.startsWith("mac")) return ["/"];
-  return ["/"]; // Linux default
-}
 
 function FileTreeNode({ entry, depth, onSelect }: {
   entry: FileEntry;
@@ -97,23 +88,27 @@ function FileTreeNode({ entry, depth, onSelect }: {
 }
 
 export default function Sidebar() {
-  const roots = useMemo(() => getOSRoots(), []);
+  const [roots, setRoots] = useState<{ path: string; name: string }[]>([]);
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const openFile = useEditorStore((s) => s.openFile);
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const all: FileEntry[] = [];
-    for (const root of roots) {
-      try {
-        const res = await fsApi.list(root);
-        all.push(...res.entries.filter((e) => !e.name.startsWith(".")));
-      } catch { /* backend may not be ready or root not accessible */ }
-    }
-    setRootEntries(all);
+    try {
+      const r = await fsApi.roots();
+      setRoots(r.roots);
+      const all: FileEntry[] = [];
+      for (const root of r.roots) {
+        try {
+          const res = await fsApi.list(root.path);
+          all.push(...res.entries.filter((e) => !e.name.startsWith(".")));
+        } catch { /* permission issues */ }
+      }
+      setRootEntries(all);
+    } catch { /* backend not ready */ }
     setLoading(false);
-  }, [roots]);
+  }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 

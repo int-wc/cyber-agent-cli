@@ -159,6 +159,17 @@ def create_app() -> FastAPI:
 
     # ── 文件系统 ──
 
+    @app.get("/api/fs/roots")
+    async def fs_roots():
+        """返回允许访问的根路径列表（供文件树初始化）。"""
+        runner = _get_runner()
+        return {
+            "roots": [
+                {"path": str(r), "name": str(r).rstrip("/\\") or str(r)}
+                for r in runner.allowed_roots
+            ]
+        }
+
     @app.get("/api/fs/list")
     async def fs_list(path: str = Query(default=".")):
         runner = _get_runner()
@@ -601,10 +612,13 @@ def build_ide_runtime_context(
     # IDE 模式下将 OS 根目录加入 allowed_roots，确保文件树可浏览整个磁盘
     allowed_roots = [Path.cwd().resolve()]
     if sys.platform == "win32":
-        for drive in ("C:\\", "D:\\", "E:\\"):
-            p = Path(drive)
-            if p.exists():
-                allowed_roots.append(p)
+        import string
+        for letter in string.ascii_uppercase:
+            drive = Path(f"{letter}:\\")
+            if drive.exists():
+                allowed_roots.append(drive)
+        if not allowed_roots[1:]:  # 保险：至少包含 C:
+            allowed_roots.append(Path("C:\\"))
     else:
         allowed_roots.append(Path("/"))
     allowed_roots = normalize_allowed_roots(allowed_roots)
