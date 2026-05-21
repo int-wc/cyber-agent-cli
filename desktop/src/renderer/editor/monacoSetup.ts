@@ -1,4 +1,3 @@
-import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker.js?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker.js?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker.js?worker";
@@ -26,5 +25,3 @@ self.MonacoEnvironment = {
     }
   },
 };
-
-export default monaco;

@@ -3,9 +3,6 @@ import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import { X } from "lucide-react";
 import { loader } from "@monaco-editor/react";
-import monaco from "../../editor/monacoSetup";
-
-loader.config({ monaco });
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 
@@ -66,16 +63,42 @@ function FallbackEditor({ content, onChange, height }: { content: string; onChan
   );
 }
 
+let monacoReady = false;
+let monacoPromise: Promise<void> | null = null;
+
+function ensureMonacoLoaded(): Promise<void> {
+  if (monacoReady) return Promise.resolve();
+  if (!monacoPromise) {
+    monacoPromise = import("monaco-editor").then((m) => {
+      loader.config({ monaco: m });
+      monacoReady = true;
+    });
+  }
+  return monacoPromise;
+}
+
 export default function CodeEditor() {
   const { tabs, activeTabPath, closeTab, setActiveTab, updateContent, markClean } = useEditorStore();
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const editorRef = useRef<{ getValue: () => string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerHeight, setContainerHeight] = useState<number | null>(null);
+  const [monacoLoaded, setMonacoLoaded] = useState(false);
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
-  // ResizeObserver — measure container pixel height, re-bind when editor view appears
+  // Dynamically load monaco-editor when editor view first appears.
+  // Static import would execute monaco-editor at app startup and break window.prompt().
+  useEffect(() => {
+    if (!activeTab) return;
+    let cancelled = false;
+    ensureMonacoLoaded().then(() => {
+      if (!cancelled) setMonacoLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [!!activeTab]);
+
+  // ResizeObserver — measure container pixel height
   useEffect(() => {
     if (!activeTab) return;
     const el = containerRef.current;
@@ -139,6 +162,8 @@ export default function CodeEditor() {
     : activeTab.language === "shell" ? "bash"
     : activeTab.language;
 
+  const editorHeight = containerHeight ?? 300;
+
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
@@ -173,27 +198,31 @@ export default function CodeEditor() {
         ))}
       </div>
 
-      {/* Editor container — ResizeObserver measures pixel height for Monaco */}
+      {/* Editor container */}
       <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
-        <Suspense fallback={
-          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight ?? 300} />
-        }>
-          <MonacoEditor
-            key={activeTab.path}
-            height={containerHeight ?? 300}
-            language={language}
-            value={activeTab.content}
-            theme="cyber-dark"
-            options={MONACO_OPTIONS}
-            onChange={handleContentChange}
-            onMount={(editor, monaco) => {
-              editorRef.current = editor;
-              monaco.editor.defineTheme("cyber-dark", MONACO_THEME);
-              monaco.editor.setTheme("cyber-dark");
-            }}
-            loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight ?? 300} />}
-          />
-        </Suspense>
+        {monacoLoaded ? (
+          <Suspense fallback={
+            <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={editorHeight} />
+          }>
+            <MonacoEditor
+              key={activeTab.path}
+              height={editorHeight}
+              language={language}
+              value={activeTab.content}
+              theme="cyber-dark"
+              options={MONACO_OPTIONS}
+              onChange={handleContentChange}
+              onMount={(editor, monaco) => {
+                editorRef.current = editor;
+                monaco.editor.defineTheme("cyber-dark", MONACO_THEME);
+                monaco.editor.setTheme("cyber-dark");
+              }}
+              loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={editorHeight} />}
+            />
+          </Suspense>
+        ) : (
+          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={editorHeight} />
+        )}
       </div>
     </div>
   );
