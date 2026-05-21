@@ -51,13 +51,7 @@ body {
   outline-offset: -1px;
 }
 
-/* ── Titlebar drag region ── */
-.titlebar-drag {
-  -webkit-app-region: drag;
-}
-.titlebar-no-drag {
-  -webkit-app-region: no-drag;
-}
+/* ── Titlebar drag region (Tauri v2 via data-tauri-drag-region attribute) ── */
 
 /* ── Resize handles ── */
 .resize-handle {

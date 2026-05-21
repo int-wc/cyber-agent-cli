@@ -8,7 +8,7 @@ export default defineConfig({
   root: ".",
   build: {
     outDir: "dist/renderer",
-    target: "chrome120",
+    target: "esnext",
     emptyOutDir: true,
   },
   resolve: {

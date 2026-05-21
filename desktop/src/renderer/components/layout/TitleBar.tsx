@@ -1,6 +1,7 @@
 import { Minus, Square, X } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export default function TitleBar() {
   const { config, connected } = useSessionStore();
@@ -8,7 +9,8 @@ export default function TitleBar() {
 
   return (
     <div
-      className="titlebar-drag glass-surface"
+      data-tauri-drag-region
+      className="glass-surface"
       style={{
         height: 38,
         display: "flex",
@@ -57,18 +59,18 @@ export default function TitleBar() {
       </div>
 
       {/* Right: Window controls */}
-      <div className="titlebar-no-drag" style={{ display: "flex", gap: 4 }}>
+      <div style={{ display: "flex", gap: 4 }}>
         <button
           className="glass-btn"
           style={{ padding: "4px 8px", borderRadius: 4 }}
-          onClick={() => window.electronAPI?.minimizeWindow()}
+          onClick={() => getCurrentWindow().minimize()}
         >
           <Minus size={12} />
         </button>
         <button
           className="glass-btn"
           style={{ padding: "4px 8px", borderRadius: 4 }}
-          onClick={() => window.electronAPI?.maximizeWindow()}
+          onClick={() => getCurrentWindow().toggleMaximize()}
         >
           <Square size={10} />
         </button>
@@ -78,7 +80,7 @@ export default function TitleBar() {
             padding: "4px 8px", borderRadius: 4,
             background: "rgba(255,82,82,0.15)", borderColor: "rgba(255,82,82,0.3)",
           }}
-          onClick={() => window.electronAPI?.closeWindow()}
+          onClick={() => getCurrentWindow().close()}
         >
           <X size={12} color="var(--red)" />
         </button>

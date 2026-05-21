@@ -1,21 +1,30 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 interface Props {
-  standalone?: boolean;   // single terminal, no tab bar
-  sessionKey?: string;    // unique key for re-init when switching tabs
+  standalone?: boolean;
+  sessionKey?: string;
+}
+
+interface TerminalOutputPayload {
+  session_id: string;
+  data: string;
 }
 
 export default function TerminalPanel({ standalone, sessionKey }: Props) {
   const [xtermReady, setXtermReady] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<{
-    term: { dispose: () => void; write: (d: string) => void; resize: (c: number, r: number) => void };
+    term: { dispose: () => void; write: (d: string) => void };
     fitAddon: { fit: () => void };
     sessionId: string | null;
   } | null>(null);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
     let disposed = false;
+    let currentUnlisten: UnlistenFn | null = null;
 
     async function init() {
       try {
@@ -56,26 +65,36 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
 
         xtermRef.current = { term, fitAddon, sessionId: null };
 
-        // Electron PTY bridge
-        const electronAPI = window.electronAPI;
-        if (electronAPI) {
-          electronAPI.terminalCreate().then((sess) => {
-            if (xtermRef.current && sess) {
-              xtermRef.current.sessionId = sess.sessionId;
-            }
+        // Tauri PTY bridge: create session via Rust command
+        try {
+          const sess = await invoke<{ sessionId: string; pid: number }>("terminal_create", {
+            options: { shell: null },
           });
-          electronAPI.onTerminalOutput((sessId, data) => {
-            const ref = xtermRef.current;
-            if (ref && sessId === ref.sessionId) {
-              ref.term.write(data);
-            }
-          });
+          if (xtermRef.current && sess) {
+            xtermRef.current.sessionId = sess.sessionId;
+          }
+
+          // Listen for PTY output events from Rust
+          currentUnlisten = await listen<TerminalOutputPayload>(
+            "terminal:output",
+            (event) => {
+              const ref = xtermRef.current;
+              if (ref && event.payload.session_id === ref.sessionId) {
+                ref.term.write(event.payload.data);
+              }
+            },
+          );
+          unlistenRef.current = currentUnlisten;
+        } catch (err) {
+          console.error("Terminal PTY init failed:", err);
         }
 
         term.onData((data) => {
           const ref = xtermRef.current;
-          if (ref?.sessionId && window.electronAPI) {
-            window.electronAPI.terminalWrite(ref.sessionId, data);
+          if (ref?.sessionId) {
+            invoke("terminal_write", {
+              data: { sessionId: ref.sessionId, data },
+            }).catch(() => {});
           } else {
             if (data === "\r") term.write("\r\n$ ");
             else term.write(data);
@@ -86,8 +105,10 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
         const resizeObserver = new ResizeObserver(() => {
           try { fitAddon.fit(); } catch {}
           const ref = xtermRef.current;
-          if (ref?.sessionId && window.electronAPI) {
-            window.electronAPI.terminalResize(ref.sessionId, term.cols, term.rows);
+          if (ref?.sessionId) {
+            invoke("terminal_resize", {
+              data: { sessionId: ref.sessionId, cols: term.cols, rows: term.rows },
+            }).catch(() => {});
           }
         });
         if (terminalRef.current) {
@@ -97,9 +118,6 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
         setXtermReady(true);
 
         term.writeln("Cyber Agent IDE Terminal");
-        if (!window.electronAPI) {
-          term.writeln("(Electron 环境未检测到)");
-        }
         term.writeln("");
         term.write("$ ");
 
@@ -113,6 +131,12 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
 
     return () => {
       disposed = true;
+      if (currentUnlisten) currentUnlisten();
+      if (xtermRef.current?.sessionId) {
+        invoke("terminal_kill", {
+          data: { sessionId: xtermRef.current.sessionId },
+        }).catch(() => {});
+      }
       xtermRef.current?.term.dispose();
       xtermRef.current = null;
     };
@@ -120,7 +144,6 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
-      {/* Only show internal tab bar when NOT standalone */}
       {!standalone && (
         <div className="glass-surface" style={{
           display: "flex", alignItems: "center", flexShrink: 0, padding: "2px 8px", gap: 4,

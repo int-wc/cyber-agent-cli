@@ -1,53 +1,91 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 interface TerminalSession {
   sessionId: string;
   pid: number;
 }
 
+interface TerminalOutputPayload {
+  session_id: string;
+  data: string;
+}
+
 export function useTerminal() {
   const [session, setSession] = useState<TerminalSession | null>(null);
   const outputCallbacks = useRef<Set<(data: string) => void>>(new Set());
+  const unlistenRef = useRef<UnlistenFn | null>(null);
 
   const create = useCallback(async (shell?: string) => {
-    if (!window.electronAPI) return;
-    const sess = await window.electronAPI.terminalCreate(shell);
+    // Clean up previous listener
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+
+    const sess = await invoke<TerminalSession>("terminal_create", {
+      options: { shell: shell || null },
+    });
     setSession(sess);
 
-    window.electronAPI.onTerminalOutput((sessId, data) => {
-      if (sessId === sess.sessionId) {
-        outputCallbacks.current.forEach((cb) => cb(data));
-      }
-    });
+    // Listen for output events for this session
+    unlistenRef.current = await listen<TerminalOutputPayload>(
+      "terminal:output",
+      (event) => {
+        if (event.payload.session_id === sess.sessionId) {
+          outputCallbacks.current.forEach((cb) => cb(event.payload.data));
+        }
+      },
+    );
 
     return sess;
   }, []);
 
-  const write = useCallback((data: string) => {
-    if (!session || !window.electronAPI) return;
-    window.electronAPI.terminalWrite(session.sessionId, data);
-  }, [session]);
+  const write = useCallback(
+    (data: string) => {
+      if (!session) return;
+      invoke("terminal_write", {
+        data: { sessionId: session.sessionId, data },
+      }).catch(console.error);
+    },
+    [session],
+  );
 
-  const resize = useCallback((cols: number, rows: number) => {
-    if (!session || !window.electronAPI) return;
-    window.electronAPI.terminalResize(session.sessionId, cols, rows);
-  }, [session]);
+  const resize = useCallback(
+    (cols: number, rows: number) => {
+      if (!session) return;
+      invoke("terminal_resize", {
+        data: { sessionId: session.sessionId, cols, rows },
+      }).catch(console.error);
+    },
+    [session],
+  );
 
   const kill = useCallback(async () => {
-    if (!session || !window.electronAPI) return;
-    await window.electronAPI.terminalKill(session.sessionId);
+    if (!session) return;
+    await invoke("terminal_kill", {
+      data: { sessionId: session.sessionId },
+    });
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
     setSession(null);
   }, [session]);
 
   const onOutput = useCallback((cb: (data: string) => void) => {
     outputCallbacks.current.add(cb);
-    return () => { outputCallbacks.current.delete(cb); };
+    return () => {
+      outputCallbacks.current.delete(cb);
+    };
   }, []);
 
   useEffect(() => {
-    // Auto-create terminal session
     create();
-    return () => { kill(); };
+    return () => {
+      kill();
+    };
   }, []);
 
   return { session, create, write, resize, kill, onOutput };

@@ -10,6 +10,7 @@ import { getFileIcon } from "./fileIcons";
 import FileContextMenu, {
   ContextMenuAction, fileMenuItems, folderMenuItems,
 } from "./FileContextMenu";
+import { open } from "@tauri-apps/plugin-dialog";
 
 // ── FileTreeNode ──
 
@@ -296,16 +297,16 @@ export default function Sidebar() {
   }, []);
 
   const pickAndLoad = useCallback(async (currentRoot?: string) => {
-    const api = window.electronAPI;
-    if (!api) return;
-    const folderPath = await api.openFileDialog({
-      properties: ["openDirectory"],
-      ...(currentRoot ? { defaultPath: currentRoot } : {}),
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: currentRoot,
+      title: "选择工作目录",
     });
-    if (folderPath) {
-      setWorkspaceRoot(folderPath);
+    if (selected && typeof selected === "string") {
+      setWorkspaceRoot(selected);
       setSelectedPath(null);
-      loadRoot(folderPath);
+      loadRoot(selected);
     }
   }, [loadRoot]);
 

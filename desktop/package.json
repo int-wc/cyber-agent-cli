@@ -2,26 +2,23 @@
   "name": "cyber-agent-ide",
   "version": "0.1.0",
   "description": "Cyber Agent IDE - Liquid Glass Desktop Frontend",
-  "main": "dist/main/index.js",
   "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
     "dev:renderer": "vite",
-    "dev:electron": "wait-on http://localhost:5173 && electron .",
-    "dev": "concurrently \"npm:dev:renderer\" \"npm:dev:electron\"",
-    "build:renderer": "tsc && vite build",
-    "build:electron": "tsc -p tsconfig.node.json",
-    "build": "npm run build:electron && npm run build:renderer",
-    "start": "electron .",
-    "pack:linux": "electron-builder --linux",
-    "pack:win": "electron-builder --win",
-    "pack": "electron-builder --linux --win"
+    "build:renderer": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@tanstack/react-virtual": "^3.0.0",
-    "monaco-editor": "^0.55.1",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "framer-motion": "^12.0.0",
     "lucide-react": "^0.460.0",
-    "node-pty": "^1.0.0",
+    "monaco-editor": "^0.55.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.0",
@@ -32,15 +29,12 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
-    "concurrently": "^9.0.0",
-    "electron": "^35.7.5",
-    "electron-builder": "^25.0.0",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0",
-    "wait-on": "^8.0.0"
+    "vite": "^6.0.0"
   }
 }

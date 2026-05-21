@@ -3,23 +3,26 @@ import { useSessionStore } from "./stores/sessionStore";
 import { wsClient } from "./services/ws";
 import AppShell from "./components/layout/AppShell";
 import LiquidBackground from "./components/glass/LiquidBackground";
+import { listen } from "@tauri-apps/api/event";
 
 export default function App() {
   const { setBackendPort, setConnected, setConfig, backendPort } = useSessionStore();
 
   useEffect(() => {
-    const electronAPI = window.electronAPI;
+    let unlistenFn: (() => void) | null = null;
 
-    if (electronAPI) {
-      electronAPI.onBackendStatus((status) => {
-        if (status.ready) {
-          setBackendPort(status.port);
-          wsClient.connect(status.port);
-        }
-      });
-    } else {
-      const params = new URLSearchParams(window.location.search);
-      const port = parseInt(params.get("port") || "8765", 10);
+    // Tauri: listen for backend:status event from Rust backend manager
+    listen<{ ready: boolean; port: number }>("backend:status", (event) => {
+      if (event.payload.ready) {
+        setBackendPort(event.payload.port);
+        wsClient.connect(event.payload.port);
+      }
+    }).then((fn) => { unlistenFn = fn; });
+
+    // Fallback: URL query param for browser dev mode
+    const params = new URLSearchParams(window.location.search);
+    const port = parseInt(params.get("port") || "0", 10);
+    if (port) {
       setBackendPort(port);
       wsClient.connect(port);
     }
@@ -47,6 +50,7 @@ export default function App() {
     });
 
     return () => {
+      if (unlistenFn) unlistenFn();
       unsub();
       wsClient.disconnect();
     };
