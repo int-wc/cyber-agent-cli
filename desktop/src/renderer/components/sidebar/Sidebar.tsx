@@ -3,32 +3,45 @@ import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import type { FileEntry } from "../../types/agent";
 import {
-  ChevronRight, Folder, File, FolderOpen, RefreshCw,
-  FolderOpen as FolderOpenIcon, FolderPlus, Ellipsis,
+  ChevronRight, RefreshCw, FolderOpen as FolderOpenIcon,
+  FolderPlus, Ellipsis, Folder, FilePlus,
 } from "lucide-react";
+import { getFileIcon } from "./fileIcons";
+import FileContextMenu, {
+  ContextMenuAction, fileMenuItems, folderMenuItems,
+} from "./FileContextMenu";
 
 // ── FileTreeNode ──
 
-function FileTreeNode({ entry, depth, onSelect }: {
+function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolder, onRename, onDelete }: {
   entry: FileEntry;
   depth: number;
   onSelect: (path: string) => void;
+  onRefresh: () => void;
+  onNewFile: (parentDir: string) => void;
+  onNewFolder: (parentDir: string) => void;
+  onRename: (path: string) => void;
+  onDelete: (path: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const activeTabPath = useEditorStore((s) => s.activeTabPath);
+
+  const loadChildren = useCallback(async () => {
+    if (children !== null) return;
+    setLoading(true);
+    try {
+      const res = await fsApi.list(entry.path);
+      setChildren(res.entries.filter((e) => !e.name.startsWith(".")));
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, [entry.path, children]);
 
   const handleClick = useCallback(async () => {
     if (entry.is_dir) {
-      if (!expanded && children === null) {
-        setLoading(true);
-        try {
-          const res = await fsApi.list(entry.path);
-          setChildren(res.entries.filter((e) => !e.name.startsWith(".")));
-        } catch { /* ignore */ }
-        setLoading(false);
-      }
+      if (!expanded) await loadChildren();
       setExpanded(!expanded);
     } else {
       try {
@@ -36,14 +49,28 @@ function FileTreeNode({ entry, depth, onSelect }: {
         onSelect(entry.path);
       } catch { /* ignore */ }
     }
-  }, [entry, expanded, children, onSelect]);
+  }, [entry, expanded, loadChildren, onSelect]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const isActive = activeTabPath === entry.path;
+  const meta = getFileIcon(entry.name, entry.is_dir, expanded);
+
+  const items: ContextMenuAction[] = entry.is_dir
+    ? folderMenuItems(entry.name, entry.path, onNewFile, onNewFolder, onRename, onDelete)
+    : fileMenuItems(entry.name, entry.path, onNewFile, onNewFolder, onRename, onDelete);
+
+  const IconComp = meta.icon;
 
   return (
     <div>
       <div
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         style={{
           display: "flex", alignItems: "center", gap: 4,
           padding: "3px 8px", paddingLeft: 8 + depth * 16,
@@ -51,31 +78,47 @@ function FileTreeNode({ entry, depth, onSelect }: {
           color: isActive ? "var(--accent)" : "var(--text-secondary)",
           background: isActive ? "rgba(124,111,247,0.08)" : "transparent",
           borderRadius: 4, margin: "1px 4px",
+          userSelect: "none",
         }}
       >
         {entry.is_dir ? (
-          <>
-            <ChevronRight size={14} style={{
-              transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-              transition: "transform 150ms ease",
-            }} />
-            {expanded ? <FolderOpen size={14} /> : <Folder size={14} />}
-          </>
+          <ChevronRight size={14} style={{
+            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 150ms ease", flexShrink: 0,
+          }} />
         ) : (
-          <>
-            <span style={{ width: 14 }} />
-            <File size={14} />
-          </>
+          <span style={{ width: 14, flexShrink: 0 }} />
         )}
-        <span className="truncate" style={{ flex: 1 }}>{entry.name}</span>
+        <IconComp size={15} color={meta.color} style={{ flexShrink: 0 }} />
+        <span className="truncate" style={{ flex: 1, marginLeft: 2 }}>{entry.name}</span>
         {loading && <RefreshCw size={10} style={{ animation: "spin 1s linear infinite" }} />}
       </div>
+
       {expanded && children && (
         <div>
           {children.map((child) => (
-            <FileTreeNode key={child.path} entry={child} depth={depth + 1} onSelect={onSelect} />
+            <FileTreeNode
+              key={child.path}
+              entry={child}
+              depth={depth + 1}
+              onSelect={onSelect}
+              onRefresh={onRefresh}
+              onNewFile={onNewFile}
+              onNewFolder={onNewFolder}
+              onRename={onRename}
+              onDelete={onDelete}
+            />
           ))}
         </div>
+      )}
+
+      {contextMenu && (
+        <FileContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={items}
+          onClose={() => setContextMenu(null)}
+        />
       )}
     </div>
   );
@@ -105,11 +148,7 @@ function EmptyState({ onOpen }: { onOpen: () => void }) {
           打开一个文件夹以开始浏览文件
         </div>
       </div>
-      <button
-        className="glass-btn glass-btn-primary"
-        style={{ fontSize: 12 }}
-        onClick={onOpen}
-      >
+      <button className="glass-btn glass-btn-primary" style={{ fontSize: 12 }} onClick={onOpen}>
         <FolderPlus size={14} />
         打开文件夹
       </button>
@@ -117,29 +156,16 @@ function EmptyState({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-// ── Recent folders (persisted in localStorage) ──
-
-const RECENT_KEY = "cyber-ide-recent-folders";
-const MAX_RECENT = 8;
-
-function getRecentFolders(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
-  } catch { return []; }
-}
-
-function addRecentFolder(p: string) {
-  const list = [p, ...getRecentFolders().filter((x) => x !== p)].slice(0, MAX_RECENT);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
-}
-
 // ── Workspace header ──
 
 function WorkspaceHeader({
-  root, name, onSwitch, onRefresh, recent,
+  root, name, onSwitch, onRefresh, onNewFile, onNewFolder, recent,
 }: {
   root: string; name: string; onSwitch: (p: string) => void;
-  onRefresh: () => void; recent: string[];
+  onRefresh: () => void;
+  onNewFile: (parentDir: string) => void;
+  onNewFolder: (parentDir: string) => void;
+  recent: string[];
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -149,107 +175,83 @@ function WorkspaceHeader({
         display: "flex", alignItems: "center", justifyContent: "space-between",
         padding: "6px 8px",
       }}>
-        {/* Path area — click to switch */}
         <div
           onClick={() => onSwitch(root)}
           style={{
             flex: 1, minWidth: 0, cursor: "pointer",
             borderRadius: 6, padding: "4px 8px",
-            background: "transparent",
             transition: "background 120ms ease",
           }}
           onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(124,111,247,0.06)")}
           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
         >
-          <div style={{
-            fontSize: 12, fontWeight: 600, color: "var(--text-primary)",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {name}
           </div>
-          <div style={{
-            fontSize: 10, color: "var(--text-tertiary)",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            marginTop: 1,
-          }}>
+          <div style={{ fontSize: 10, color: "var(--text-tertiary)",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 }}>
             {root}
           </div>
         </div>
 
-        {/* Actions */}
         <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+          <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={() => onNewFile(root)} title="新建文件">
+            <FilePlus size={12} />
+          </button>
+          <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={() => onNewFolder(root)} title="新建文件夹">
+            <FolderPlus size={12} />
+          </button>
           <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={onRefresh} title="刷新">
             <RefreshCw size={12} />
           </button>
-          <button
-            className="glass-btn"
-            style={{ padding: "2px 6px" }}
-            onClick={() => setMenuOpen(!menuOpen)}
-            title="更多"
-          >
+          <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={() => setMenuOpen(!menuOpen)}>
             <Ellipsis size={12} />
           </button>
         </div>
       </div>
 
-      {/* Dropdown menu */}
       {menuOpen && (
         <>
-          <div
-            style={{ position: "fixed", inset: 0, zIndex: 49 }}
-            onClick={() => setMenuOpen(false)}
-          />
-          <div className="glass-panel" style={{
-            position: "absolute", top: "100%", right: 8, zIndex: 50,
-            minWidth: 200, padding: "4px 0", marginTop: 4,
-          }}>
-            <button
-              style={{
-                display: "flex", alignItems: "center", gap: 8,
-                width: "100%", padding: "7px 12px", border: "none",
-                background: "transparent", cursor: "pointer",
-                fontSize: 12, color: "var(--text-primary)",
-              }}
-              onClick={() => { setMenuOpen(false); onSwitch(root); }}
-            >
-              <FolderPlus size={14} />
-              切换工作目录...
+          <div style={{ position: "fixed", inset: 0, zIndex: 49 }} onClick={() => setMenuOpen(false)} />
+          <div className="glass-panel" style={{ position: "absolute", top: "100%", right: 8, zIndex: 50,
+                                                  minWidth: 200, padding: "4px 0", marginTop: 4 }}>
+            <button style={{ display: "flex", alignItems: "center", gap: 8, width: "100%",
+                              padding: "7px 12px", border: "none", background: "transparent",
+                              cursor: "pointer", fontSize: 12, color: "var(--text-primary)" }}
+                    onClick={() => { setMenuOpen(false); onSwitch(root); }}>
+              <FolderPlus size={14} /> 切换工作目录...
             </button>
-
-            {recent.length > 0 && (
-              <>
-                <div style={{
-                  padding: "4px 12px", fontSize: 10, color: "var(--text-tertiary)",
-                  textTransform: "uppercase", letterSpacing: "0.05em",
-                }}>
-                  最近打开
-                </div>
-                {recent.filter((x) => x !== root).slice(0, 5).map((p) => (
-                  <button
-                    key={p}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 8,
-                      width: "100%", padding: "6px 12px", border: "none",
-                      background: "transparent", cursor: "pointer",
-                      fontSize: 12, color: "var(--text-secondary)",
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    }}
-                    onClick={() => { setMenuOpen(false); onSwitch(p); }}
-                  >
-                    <Folder size={13} style={{ flexShrink: 0, color: "var(--text-tertiary)" }} />
-                    {p.split("/").pop() || p.split("\\").pop() || p}
-                    <span style={{ fontSize: 10, color: "var(--text-tertiary)", marginLeft: "auto" }}>
-                      {p}
-                    </span>
-                  </button>
-                ))}
-              </>
-            )}
+            {recent.filter((x) => x !== root).slice(0, 5).map((p) => (
+              <button key={p}
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "6px 12px", border: "none", background: "transparent",
+                          cursor: "pointer", fontSize: 12, color: "var(--text-secondary)",
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                onClick={() => { setMenuOpen(false); onSwitch(p); }}>
+                <Folder size={13} style={{ flexShrink: 0, color: "var(--text-tertiary)" }} />
+                {p.split("/").pop() || p.split("\\").pop() || p}
+              </button>
+            ))}
           </div>
         </>
       )}
     </div>
   );
+}
+
+// ── Recent folders (localStorage) ──
+
+const RECENT_KEY = "cyber-ide-recent-folders";
+const MAX_RECENT = 8;
+
+function getRecentFolders(): string[] {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); }
+  catch { return []; }
+}
+function addRecentFolder(p: string) {
+  const list = [p, ...getRecentFolders().filter((x) => x !== p)].slice(0, MAX_RECENT);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
 }
 
 // ── Sidebar ──
@@ -296,31 +298,68 @@ export default function Sidebar() {
     } catch { /* ignore */ }
   }, [openFile]);
 
+  // ── File operations ──
+
+  const handleNewFile = useCallback(async (parentDir: string) => {
+    const name = prompt("文件名:");
+    if (!name) return;
+    const filePath = parentDir.replace(/\/?$/, "/") + name;
+    try {
+      await fsApi.write(filePath, "");
+      loadRoot(workspaceRoot!);
+    } catch { /* ignore */ }
+  }, [loadRoot, workspaceRoot]);
+
+  const handleNewFolder = useCallback(async (parentDir: string) => {
+    const name = prompt("文件夹名:");
+    if (!name) return;
+    const dirPath = parentDir.replace(/\/?$/, "/") + name;
+    try {
+      await fsApi.createDir(dirPath);
+      loadRoot(workspaceRoot!);
+    } catch { /* ignore */ }
+  }, [loadRoot, workspaceRoot]);
+
+  const handleRename = useCallback(async (path: string) => {
+    const oldName = path.split("/").pop() || path;
+    const newName = prompt("重命名为:", oldName);
+    if (!newName || newName === oldName) return;
+    const newPath = path.replace(/[^/]+$/, newName);
+    try {
+      await fsApi.rename(path, newPath);
+      loadRoot(workspaceRoot!);
+    } catch { /* ignore */ }
+  }, [loadRoot, workspaceRoot]);
+
+  const handleDelete = useCallback(async (path: string) => {
+    const name = path.split("/").pop() || path;
+    if (!confirm(`确认删除 "${name}"？`)) return;
+    try {
+      await fsApi.delete(path);
+      loadRoot(workspaceRoot!);
+    } catch { /* ignore */ }
+  }, [loadRoot, workspaceRoot]);
+
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
-      {/* Header */}
       {workspaceRoot ? (
         <WorkspaceHeader
           root={workspaceRoot}
           name={workspaceName}
           onSwitch={pickAndLoad}
           onRefresh={() => loadRoot(workspaceRoot)}
+          onNewFile={handleNewFile}
+          onNewFolder={handleNewFolder}
           recent={recentFolders}
         />
       ) : (
-        <div className="glass-surface" style={{
-          display: "flex", alignItems: "center", padding: "10px 12px",
-        }}>
-          <span style={{
-            fontSize: 12, fontWeight: 600, letterSpacing: "0.03em",
-            color: "var(--text-secondary)",
-          }}>
+        <div className="glass-surface" style={{ display: "flex", alignItems: "center", padding: "10px 12px" }}>
+          <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.03em", color: "var(--text-secondary)" }}>
             资源管理器
           </span>
         </div>
       )}
 
-      {/* Content */}
       {!workspaceRoot ? (
         <EmptyState onOpen={() => pickAndLoad()} />
       ) : loading ? (
@@ -330,7 +369,17 @@ export default function Sidebar() {
       ) : (
         <div style={{ flex: 1, overflow: "auto", padding: "4px 0" }}>
           {rootEntries.map((entry) => (
-            <FileTreeNode key={entry.path} entry={entry} depth={0} onSelect={handleSelect} />
+            <FileTreeNode
+              key={entry.path}
+              entry={entry}
+              depth={0}
+              onSelect={handleSelect}
+              onRefresh={() => loadRoot(workspaceRoot!)}
+              onNewFile={handleNewFile}
+              onNewFolder={handleNewFolder}
+              onRename={handleRename}
+              onDelete={handleDelete}
+            />
           ))}
         </div>
       )}
