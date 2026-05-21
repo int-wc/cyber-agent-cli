@@ -38,6 +38,11 @@ _BRIGHT_CYAN = "\033[96m"
 _BRIGHT_WHITE = "\033[97m"
 
 
+_ANSI_RE = __import__("re").compile(r"\033\[[0-9;]*m")
+
+_BOX_INNER = 36  # 框内宽度（╔══⋯══╗ 之间的字符数）
+
+
 def _c(color: str, text: str) -> str:
     """用 ANSI 颜色包裹文本。"""
     return f"{color}{text}{_RESET}"
@@ -65,6 +70,26 @@ def _label(text: str) -> str:
 
 def _ide() -> str:
     return _c(_BRIGHT_MAGENTA, "[IDE]")
+
+
+def _display_width(text: str) -> int:
+    """计算终端显示宽度（去掉 ANSI 转义码，CJK 字符计 2 列）。"""
+    import unicodedata
+    clean = _ANSI_RE.sub("", text)
+    w = 0
+    for ch in clean:
+        ea = unicodedata.east_asian_width(ch)
+        w += 2 if ea in ("W", "F") else 1
+    return w
+
+
+def _box_line(text: str) -> str:
+    """渲染框内一行：文字居中，不足用空格填充。"""
+    dw = _display_width(text)
+    left = max(0, (_BOX_INNER - dw) // 2)
+    right = max(0, _BOX_INNER - dw - left)
+    b = _c(_BRIGHT_CYAN, "║")
+    return f"{b}{' ' * left}{text}{' ' * right}{b}"
 
 
 # ── 常量 ──
@@ -203,14 +228,12 @@ def detect_environment() -> EnvReport:
 
 def print_env_report(env: EnvReport) -> None:
     """打印环境检测报告。"""
-    box_top = _c(_BRIGHT_CYAN, "╔══════════════════════════════════════╗")
-    box_mid = _c(_BRIGHT_CYAN, "║")
-    box_bot = _c(_BRIGHT_CYAN, "╚══════════════════════════════════════╝")
-    title = _c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE — 环境检测")
+    width = _BOX_INNER
+    border_c = _BRIGHT_CYAN
 
-    print(box_top)
-    print(f"{box_mid}   {title}{' ' * (23 - len('Cyber Agent IDE — 环境检测'))} {box_mid}")
-    print(box_bot)
+    print(_c(border_c, "╔" + "═" * width + "╗"))
+    print(_box_line(_c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE — 环境检测")))
+    print(_c(border_c, "╚" + "═" * width + "╝"))
 
     def _row(key: str, value: str) -> None:
         print(f"  {_label(key + ':').ljust(16)} {value}")
@@ -465,17 +488,11 @@ def launch_ide(
         进程退出码 (0 = 正常退出)
     """
     # ── 启动横幅 ──
-    box_line = _c(_BRIGHT_CYAN, "╔══════════════════════════════════════╗")
-    box_mid  = _c(_BRIGHT_CYAN, "║")
-    box_line2 = _c(_BRIGHT_CYAN, "╚══════════════════════════════════════╝")
-    name = _c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE")
-    glass = _c(_BRIGHT_CYAN, "Liquid Glass · 一键启动")
-
     print()
-    print(box_line)
-    print(f"{box_mid}   {name}{' ' * (24 - len('Cyber Agent IDE'))} {box_mid}")
-    print(f"{box_mid}   {glass}{' ' * (22 - len('Liquid Glass · 一键启动'))} {box_mid}")
-    print(box_line2)
+    print(_c(_BRIGHT_CYAN, "╔" + "═" * _BOX_INNER + "╗"))
+    print(_box_line(_c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE")))
+    print(_box_line(_c(_BRIGHT_CYAN, "Liquid Glass · 一键启动")))
+    print(_c(_BRIGHT_CYAN, "╚" + "═" * _BOX_INNER + "╝"))
     print()
 
     # ── Phase 1: 环境检测 ──
