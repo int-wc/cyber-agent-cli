@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { useUIStore } from "../../stores/uiStore";
 import TitleBar from "./TitleBar";
 import StatusBar from "./StatusBar";
@@ -6,6 +6,8 @@ import Sidebar from "../sidebar/Sidebar";
 import CodeEditor from "../editor/CodeEditor";
 import TerminalPanel from "../terminal/TerminalPanel";
 import ChatPanel from "../chat/ChatPanel";
+import FileSearch from "../sidebar/FileSearch";
+import SettingsPanel from "../chat/SettingsPanel";
 
 export default function AppShell() {
   const {
@@ -13,6 +15,28 @@ export default function AppShell() {
     sidebarVisible, chatPanelVisible, terminalVisible,
     setSidebarWidth, setChatPanelWidth, setTerminalHeight,
   } = useUIStore();
+
+  const [showFileSearch, setShowFileSearch] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === "p") {
+        e.preventDefault();
+        setShowFileSearch((v) => !v);
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        setShowSettings((v) => !v);
+      } else if (e.key === "Escape") {
+        if (showFileSearch) setShowFileSearch(false);
+        if (showSettings) setShowSettings(false);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [showFileSearch, showSettings]);
 
   const sidebarRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -115,6 +139,8 @@ export default function AppShell() {
         )}
       </div>
       <StatusBar />
+      {showFileSearch && <FileSearch onClose={() => setShowFileSearch(false)} />}
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
