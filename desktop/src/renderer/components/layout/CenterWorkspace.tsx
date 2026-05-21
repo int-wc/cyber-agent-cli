@@ -32,7 +32,7 @@ function YakitPanel() {
 
   if (status === "checking") {
     return (
-      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <span style={{ color: "var(--text-tertiary)", fontSize: 13 }}>检测 Yakit 引擎 ...</span>
       </div>
     );
@@ -42,7 +42,7 @@ function YakitPanel() {
     return (
       <iframe
         src={`http://127.0.0.1:${YAKIT_DEFAULT_PORT}`}
-        style={{ width: "100%", height: "100%", border: "none" }}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none" }}
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       />
     );
@@ -50,7 +50,7 @@ function YakitPanel() {
 
   return (
     <div style={{
-      height: "100%", display: "flex", flexDirection: "column",
+      position: "absolute", inset: 0, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", gap: 16,
       color: "var(--text-tertiary)",
     }}>
@@ -97,7 +97,7 @@ function YakitPanel() {
 function MitmPanel() {
   return (
     <div style={{
-      height: "100%", display: "flex", flexDirection: "column",
+      position: "absolute", inset: 0, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", gap: 16,
       color: "var(--text-tertiary)",
     }}>
@@ -151,7 +151,7 @@ export default function CenterWorkspace() {
       overflow: "hidden", minWidth: 0,
     }}>
       <NavTabs />
-      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
         {renderContent()}
       </div>
     </div>

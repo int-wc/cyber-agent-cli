@@ -134,7 +134,7 @@ export default function CodeEditor() {
     : activeTab.language;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center", flexShrink: 0,
