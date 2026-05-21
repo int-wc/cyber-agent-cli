@@ -6,59 +6,142 @@ interface TerminalTab {
   title: string;
 }
 
-// Terminal will be integrated with xterm.js in Phase 4. Placeholder for now.
 export default function TerminalPanel() {
   const [tabs, setTabs] = useState<TerminalTab[]>([{ id: "term-1", title: "bash" }]);
   const [activeTab, setActiveTab] = useState("term-1");
-  const outputRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [output, setOutput] = useState<string[]>(["$ Cyber Agent IDE Terminal\n"]);
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIdx, setHistoryIdx] = useState(-1);
+  const [xtermReady, setXtermReady] = useState(false);
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<{
+    term: { dispose: () => void; write: (d: string) => void; resize: (c: number, r: number) => void };
+    fitAddon: { fit: () => void };
+    sessionId: string | null;
+  } | null>(null);
 
-  const addOutput = useCallback((text: string) => {
-    setOutput((prev) => [...prev, text]);
-    setTimeout(() => {
-      outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: "smooth" });
-    }, 10);
-  }, []);
+  useEffect(() => {
+    let disposed = false;
 
-  const execute = useCallback((cmd: string) => {
-    const trimmed = cmd.trim();
-    if (!trimmed) return;
-    addOutput(`$ ${trimmed}\n`);
-    setHistory((prev) => [...prev, trimmed]);
-    setHistoryIdx(-1);
+    async function init() {
+      try {
+        const [{ Terminal }, { FitAddon }] = await Promise.all([
+          import("xterm"),
+          import("xterm-addon-fit"),
+        ]);
+        if (disposed || !terminalRef.current) return;
 
-    if (trimmed === "clear" || trimmed === "cls") {
-      setOutput(["$ Cyber Agent IDE Terminal\n"]);
-      return;
-    }
+        const term = new Terminal({
+          fontSize: 13,
+          fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+          theme: {
+            background: "#0a0a0f",
+            foreground: "#d4d4d4",
+            cursor: "#a29bfe",
+            selectionBackground: "#6c5ce740",
+            black: "#1a1a2e",
+            red: "#ff5252",
+            green: "#69f0ae",
+            yellow: "#ffd740",
+            blue: "#4fc3f7",
+            magenta: "#c586c0",
+            cyan: "#4ec9b0",
+            white: "#d4d4d4",
+            brightBlack: "#3a3a4e",
+            brightRed: "#ff6e6e",
+            brightGreen: "#8cffc4",
+            brightYellow: "#ffe57f",
+            brightBlue: "#79d7ff",
+            brightMagenta: "#dca0d8",
+            brightCyan: "#7ad9c8",
+            brightWhite: "#ffffff",
+          },
+          cursorBlink: true,
+          cursorStyle: "bar",
+          allowProposedApi: true,
+        });
 
-    // In Phase 4, this will use node-pty via Electron IPC
-    // For now, show placeholder
-    addOutput(`[终端将通过 node-pty 在 Electron 中集成]\n`);
-  }, [addOutput]);
+        const fitAddon = new FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(terminalRef.current);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      const value = inputRef.current?.value || "";
-      execute(value);
-      if (inputRef.current) inputRef.current.value = "";
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      if (history.length > 0) {
-        const idx = historyIdx === -1 ? history.length - 1 : Math.max(0, historyIdx - 1);
-        setHistoryIdx(idx);
-        if (inputRef.current) inputRef.current.value = history[idx];
+        // Delay fit to let DOM settle
+        setTimeout(() => {
+          try { fitAddon.fit(); } catch {}
+        }, 100);
+
+        xtermRef.current = {
+          term,
+          fitAddon,
+          sessionId: null,
+        };
+
+        // If Electron terminal is available, hook it up
+        const electronAPI = window.electronAPI;
+        if (electronAPI) {
+          electronAPI.terminalCreate().then((sess) => {
+            if (xtermRef.current && sess) {
+              xtermRef.current.sessionId = sess.sessionId;
+            }
+          });
+          electronAPI.onTerminalOutput((sessId, data) => {
+            const ref = xtermRef.current;
+            if (ref && sessId === ref.sessionId) {
+              ref.term.write(data);
+            }
+          });
+        }
+
+        term.onData((data) => {
+          const ref = xtermRef.current;
+          if (ref?.sessionId && window.electronAPI) {
+            window.electronAPI.terminalWrite(ref.sessionId, data);
+          } else {
+            // Fallback: handle locally
+            if (data === "\r") {
+              term.write("\r\n$ ");
+            } else if (data === "") {
+              // backspace handled by PTY in real mode
+            } else {
+              term.write(data);
+            }
+          }
+        });
+
+        // Resize observer
+        const resizeObserver = new ResizeObserver(() => {
+          try { fitAddon.fit(); } catch {}
+          const ref = xtermRef.current;
+          if (ref?.sessionId && window.electronAPI) {
+            window.electronAPI.terminalResize(ref.sessionId, term.cols, term.rows);
+          }
+        });
+        if (terminalRef.current) {
+          resizeObserver.observe(terminalRef.current);
+        }
+
+        setXtermReady(true);
+
+        term.writeln("Cyber Agent IDE Terminal");
+        term.writeln("终端已就绪。");
+        if (!window.electronAPI) {
+          term.writeln("(Electron 环境未检测到 — 使用本地回显模式)");
+        }
+        term.write("$ ");
+
+        return () => {
+          resizeObserver.disconnect();
+        };
+      } catch (err) {
+        console.error("xterm init failed:", err);
       }
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      const idx = historyIdx === -1 ? -1 : Math.min(history.length - 1, historyIdx + 1);
-      setHistoryIdx(idx);
-      if (inputRef.current) inputRef.current.value = idx === -1 ? "" : history[idx];
     }
-  }, [execute, history, historyIdx]);
+
+    init();
+
+    return () => {
+      disposed = true;
+      xtermRef.current?.term.dispose();
+      xtermRef.current = null;
+    };
+  }, []);
 
   const addTab = () => {
     const id = `term-${tabs.length + 1}`;
@@ -74,13 +157,10 @@ export default function TerminalPanel() {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-base)" }}>
       {/* Tab bar */}
-      <div
-        className="glass-surface"
-        style={{
-          display: "flex", alignItems: "center",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-        }}
-      >
+      <div className="glass-surface" style={{
+        display: "flex", alignItems: "center", flexShrink: 0,
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+      }}>
         {tabs.map((tab) => (
           <div
             key={tab.id}
@@ -91,38 +171,27 @@ export default function TerminalPanel() {
               color: tab.id === activeTab ? "var(--text-primary)" : "var(--text-tertiary)",
               background: tab.id === activeTab ? "var(--glass-fill-active)" : "transparent",
               borderRight: "1px solid rgba(255,255,255,0.05)",
+              transition: "background 150ms ease",
             }}
           >
             <TerminalIcon size={11} />
             <span>{tab.title}</span>
             {tabs.length > 1 && (
-              <X size={11} onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }} />
+              <X size={11} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }} />
             )}
           </div>
         ))}
         <button className="glass-btn" style={{ padding: "2px 8px", margin: "2px 4px" }} onClick={addTab}>
           <Plus size={12} />
         </button>
+        {!xtermReady && (
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 8 }}>
+            加载中...
+          </span>
+        )}
       </div>
-      {/* Output */}
-      <div ref={outputRef} style={{ flex: 1, overflow: "auto", padding: "8px 12px", fontFamily: "monospace", fontSize: 13, whiteSpace: "pre-wrap", color: "var(--text-secondary)" }}>
-        {output.join("")}
-      </div>
-      {/* Input */}
-      <div style={{ padding: "4px 8px", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "var(--accent-light)", fontFamily: "monospace", fontSize: 13 }}>$</span>
-        <input
-          ref={inputRef}
-          onKeyDown={handleKeyDown}
-          className="glass-input"
-          style={{
-            flex: 1, background: "transparent", border: "none",
-            fontFamily: "monospace", fontSize: 13, padding: "4px 0",
-          }}
-          placeholder="输入命令..."
-          autoFocus
-        />
-      </div>
+      {/* Terminal container */}
+      <div ref={terminalRef} style={{ flex: 1, padding: "4px" }} />
     </div>
   );
 }

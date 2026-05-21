@@ -2,6 +2,9 @@ import { useCallback, useRef, useEffect, useState } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { wsClient } from "../../services/ws";
 import { Send, Square, Zap, MessageSquare } from "lucide-react";
+import StreamingText from "./StreamingText";
+import ToolCallCard from "./ToolCallCard";
+import ApprovalRequest from "./ApprovalRequest";
 
 export default function ChatPanel() {
   const {
@@ -127,30 +130,12 @@ export default function ChatPanel() {
               </div>
             )}
             {/* Content */}
-            <div className="glass-panel" style={{
-              padding: "10px 14px", fontSize: 13, lineHeight: 1.7,
-              whiteSpace: "pre-wrap", wordBreak: "break-word",
-            }}>
-              {msg.content || "(空)"}
+            <div className="glass-panel" style={{ padding: "10px 14px" }}>
+              <StreamingText content={msg.content || "(空)"} />
             </div>
             {/* Tool calls */}
             {msg.toolCalls?.map((tc) => (
-              <div key={tc.id} className="glass-panel glass-card-accent" style={{
-                marginTop: 8, padding: "8px 12px", fontSize: 12,
-              }}>
-                <div style={{ color: "var(--blue)", fontWeight: 600 }}>
-                  🔧 {tc.name}
-                </div>
-                {tc.result && (
-                  <div style={{
-                    marginTop: 6, padding: "6px 8px", background: "rgba(0,0,0,0.3)",
-                    borderRadius: 6, maxHeight: 200, overflow: "auto",
-                    fontFamily: "monospace", fontSize: 11, color: "var(--text-secondary)",
-                  }}>
-                    {tc.result.slice(0, 2000)}
-                  </div>
-                )}
-              </div>
+              <ToolCallCard key={tc.id} toolCall={tc} />
             ))}
           </div>
         ))}
@@ -171,12 +156,8 @@ export default function ChatPanel() {
               </div>
             )}
             {currentStream && (
-              <div className="glass-panel" style={{
-                padding: "10px 14px", fontSize: 13, lineHeight: 1.7,
-                whiteSpace: "pre-wrap", wordBreak: "break-word",
-              }}>
-                {currentStream}
-                <span style={{ animation: "blink 1s step-end infinite", color: "var(--accent-light)" }}>▌</span>
+              <div className="glass-panel" style={{ padding: "10px 14px" }}>
+                <StreamingText content={currentStream} isStreaming />
               </div>
             )}
           </div>
@@ -184,27 +165,14 @@ export default function ChatPanel() {
 
         {/* Pending approvals */}
         {pendingApprovals.size > 0 && Array.from(pendingApprovals.entries()).map(([id, req]) => (
-          <div key={id} className="glass-panel" style={{
-            marginBottom: 12, padding: 12,
-            borderColor: "rgba(255,171,64,0.4)",
-            background: "rgba(255,171,64,0.05)",
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--orange)", marginBottom: 6 }}>
-              ⚠️ 需要审批: {req.toolName} ({req.risk || "unknown"} 风险)
-            </div>
-            <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 8,
-                          fontFamily: "monospace", maxHeight: 100, overflow: "auto" }}>
-              {JSON.stringify(req.toolCall, null, 2)}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="glass-btn glass-btn-primary" style={{ fontSize: 11 }} onClick={() => handleApprove(id)}>
-                批准
-              </button>
-              <button className="glass-btn" style={{ fontSize: 11, color: "var(--red)" }} onClick={() => handleReject(id, "用户拒绝")}>
-                拒绝
-              </button>
-            </div>
-          </div>
+          <ApprovalRequest
+            key={id}
+            toolName={req.toolName}
+            toolCall={req.toolCall}
+            risk={req.risk}
+            onApprove={() => handleApprove(id)}
+            onReject={(reason) => handleReject(id, reason)}
+          />
         ))}
 
         <div ref={messagesEndRef} />
