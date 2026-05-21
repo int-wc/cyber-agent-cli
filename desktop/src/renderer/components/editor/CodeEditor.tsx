@@ -1,11 +1,10 @@
-import { useCallback, useRef, useEffect, lazy, Suspense } from "react";
+import { useCallback, useRef, useEffect, lazy, Suspense, useState } from "react";
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import { X } from "lucide-react";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 
-// Apple Liquid Glass light editor theme
 const MONACO_THEME = {
   base: "vs" as const,
   inherit: true,
@@ -39,8 +38,6 @@ const MONACO_OPTIONS = {
   scrollBeyondLastLine: false,
   wordWrap: "off" as const,
   tabSize: 4,
-  automaticLayout: true,
-  padding: { top: 8 },
   smoothScrolling: true,
   cursorBlinking: "smooth" as const,
   cursorSmoothCaretAnimation: "on" as const,
@@ -49,17 +46,16 @@ const MONACO_OPTIONS = {
   renderLineHighlight: "line" as const,
 };
 
-// Inline textarea fallback when Monaco is not loaded
-function FallbackEditor({ content, onChange }: { content: string; onChange: (v: string) => void }) {
+function FallbackEditor({ content, onChange, height }: { content: string; onChange: (v: string) => void; height: number }) {
   return (
     <textarea
       value={content}
       onChange={(e) => onChange(e.target.value)}
       spellCheck={false}
       style={{
-        flex: 1, width: "100%", resize: "none", background: "transparent",
+        width: "100%", height, resize: "none", background: "transparent",
         color: "var(--text-primary)", border: "none", outline: "none",
-        padding: 16, fontFamily: "monospace", fontSize: 13, lineHeight: 1.7,
+        padding: "8px 16px", fontFamily: "monospace", fontSize: 13, lineHeight: 1.7,
       }}
     />
   );
@@ -69,6 +65,22 @@ export default function CodeEditor() {
   const { tabs, activeTabPath, closeTab, setActiveTab, updateContent, markClean } = useEditorStore();
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const editorRef = useRef<{ getValue: () => string } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerHeight, setContainerHeight] = useState(400);
+
+  // ResizeObserver to track actual container pixel height
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const h = entry.contentBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+        if (h > 0) setContainerHeight(h);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
@@ -84,7 +96,6 @@ export default function CodeEditor() {
     }, 2000);
   }, [activeTabPath, updateContent, markClean]);
 
-  // Ctrl+S save
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
@@ -99,7 +110,6 @@ export default function CodeEditor() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [activeTabPath, activeTab, markClean]);
 
-  // Empty state
   if (!activeTab) {
     return (
       <div style={{
@@ -108,7 +118,7 @@ export default function CodeEditor() {
       }}>
         <div style={{
           width: 80, height: 80, borderRadius: 20,
-          background: "linear-gradient(135deg, rgba(108,92,231,0.2), rgba(79,195,247,0.2))",
+          background: "linear-gradient(135deg, rgba(124,111,247,0.15), rgba(59,130,246,0.15))",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
           <span style={{ fontSize: 32 }}>⚡</span>
@@ -119,16 +129,16 @@ export default function CodeEditor() {
     );
   }
 
-  const language = activeTab.language === "plaintext" ? "text" :
-    activeTab.language === "shell" ? "bash" : activeTab.language;
+  const language = activeTab.language === "plaintext" ? "text"
+    : activeTab.language === "shell" ? "bash"
+    : activeTab.language;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
       <div className="glass-surface" style={{
-        display: "flex", alignItems: "center",
-        borderBottom: "1px solid rgba(0,0,0,0.05)",
-        overflow: "auto", flexShrink: 0, minHeight: 32,
+        display: "flex", alignItems: "center", flexShrink: 0,
+        borderBottom: "1px solid rgba(0,0,0,0.05)", overflow: "auto",
       }}>
         {tabs.map((tab) => (
           <div
@@ -156,14 +166,15 @@ export default function CodeEditor() {
           </div>
         ))}
       </div>
-      {/* Editor — fill all remaining space */}
-      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+
+      {/* Editor — ResizeObserver drives explicit pixel height */}
+      <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
         <Suspense fallback={
-          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} />
+          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight} />
         }>
           <MonacoEditor
             key={activeTab.path}
-            height="100%"
+            height={containerHeight}
             language={language}
             value={activeTab.content}
             theme="cyber-dark"
@@ -174,7 +185,7 @@ export default function CodeEditor() {
               monaco.editor.defineTheme("cyber-dark", MONACO_THEME);
               monaco.editor.setTheme("cyber-dark");
             }}
-            loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} />}
+            loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight} />}
           />
         </Suspense>
       </div>

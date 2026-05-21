@@ -2,7 +2,7 @@ import { Globe, Wrench, FileCode, Terminal, Plus, X } from "lucide-react";
 import { useUIStore, CenterTab } from "../../stores/uiStore";
 
 const FIXED_TABS: { id: CenterTab; label: string; icon: React.ReactNode; hint: string }[] = [
-  { id: "viewer", label: "阅览", icon: <FileCode size={14} />, hint: "文件 / 数据浏览" },
+  { id: "viewer", label: "编辑器", icon: <FileCode size={14} />, hint: "代码编辑 / 文件浏览" },
   { id: "yakit",  label: "Yakit", icon: <Wrench size={14} />, hint: "安全工具集" },
   { id: "mitm",   label: "MITM",  icon: <Globe size={14} />, hint: "代理浏览器" },
 ];
