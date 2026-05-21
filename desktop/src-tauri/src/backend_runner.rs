@@ -23,6 +23,21 @@ impl BackendManager {
 }
 
 pub fn spawn_and_monitor(app: AppHandle) {
+    // If the Python launcher already started a backend, just relay the port
+    if let Ok(port_str) = std::env::var("CYBER_AGENT_BACKEND_PORT") {
+        if let Ok(port) = port_str.parse::<u16>() {
+            println!("[backend] using pre-started backend on port {}", port);
+            let _ = app.emit(
+                "backend:status",
+                BackendStatusPayload {
+                    ready: true,
+                    port,
+                },
+            );
+            return;
+        }
+    }
+
     let python_cmd = if cfg!(target_os = "windows") {
         "python"
     } else {

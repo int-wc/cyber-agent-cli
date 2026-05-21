@@ -109,7 +109,6 @@ class EnvReport:
         self.os_name = sys.platform
         self.desktop_dir = _get_desktop_dir()
         self.node_modules_exists = False
-        self.electron_bin: str | None = None
         self.vite_dev_server_running = False
         self.errors: list[str] = []
         self.warnings: list[str] = []
@@ -164,11 +163,10 @@ def _detect_desktop(env: EnvReport) -> bool:
 def _detect_node_modules(env: EnvReport) -> bool:
     nm = env.desktop_dir / "node_modules"
     if nm.is_dir():
-        electron = env.desktop_dir / "node_modules" / ".bin" / "electron"
+        tauri_cli = env.desktop_dir / "node_modules" / ".bin" / "tauri"
         vite = env.desktop_dir / "node_modules" / ".bin" / "vite"
-        if electron.exists() or vite.exists():
+        if tauri_cli.exists() or vite.exists():
             env.node_modules_exists = True
-            env.electron_bin = str(electron) if electron.exists() else None
             return True
     env.warnings.append("前端依赖未安装。")
     return False
@@ -202,9 +200,9 @@ def detect_environment(env: EnvReport | None = None) -> EnvReport:
     _sub("路径", _c(_BCYAN, str(env.desktop_dir)))
     _check_single(env, "node_modules", _detect_node_modules)
     if env.node_modules_exists:
-        _row("Electron", _c(_BWHITE, str(env.electron_bin)))
+        _row("Tauri CLI", _ok("已安装"))
     else:
-        _row("Electron", _warn("○ 待安装"))
+        _row("Tauri CLI", _warn("○ 待安装"))
     _check_single(env, "Vite dev server", _detect_vite)
     if env.vite_dev_server_running:
         _sub("地址", _c(_BCYAN, "http://localhost:5173"))
@@ -232,7 +230,6 @@ def install_dependencies(env: EnvReport, force: bool = False) -> bool:
 
     _row("包管理器", _c(_BWHITE, f"npm {env.npm_version}"))
     _row("安装目录", _c(_BCYAN, str(env.desktop_dir)))
-    _row("Electron 镜像", _c(_CYAN, os.environ.get("ELECTRON_MIRROR", "https://npmmirror.com/mirrors/electron/")))
 
     print(f" {_ide()}  {_label('正在运行 npm install ...')}")
     print(f" {_ide()}  {_label('（首次约 180MB，请耐心等待）')}")
@@ -245,7 +242,7 @@ def install_dependencies(env: EnvReport, force: bool = False) -> bool:
             capture_output=False,
             text=True,
             timeout=NPM_INSTALL_TIMEOUT,
-            env={**os.environ, "ELECTRON_MIRROR": os.environ.get("ELECTRON_MIRROR", "https://npmmirror.com/mirrors/electron/")},
+            env={**os.environ},
         )
         elapsed = time.time() - t0
         if result.returncode != 0:
@@ -259,9 +256,6 @@ def install_dependencies(env: EnvReport, force: bool = False) -> bool:
     nm = env.desktop_dir / "node_modules"
     if nm.is_dir():
         env.node_modules_exists = True
-        electron = env.desktop_dir / "node_modules" / ".bin" / "electron"
-        if electron.exists():
-            env.electron_bin = str(electron)
 
     _row("安装耗时", _c(_BWHITE, f"{elapsed:.1f}s"))
     _row("依赖安装", _c(_BWHITE, "完成"), True)
@@ -478,35 +472,13 @@ def _wait_backend_ready(host: str, port: int) -> int:
     return 0
 
 
-# ── Phase 4: Electron 启动 ──
+# ── Phase 4: Tauri 启动 ──
 
-def _find_electron(env: EnvReport) -> str | None:
-    if env.electron_bin and Path(env.electron_bin).exists():
-        return env.electron_bin
-    candidate = env.desktop_dir / "node_modules" / ".bin" / "electron"
+def _find_tauri_cli(env: EnvReport) -> str | None:
+    candidate = env.desktop_dir / "node_modules" / ".bin" / "tauri"
     if candidate.exists():
-        env.electron_bin = str(candidate)
         return str(candidate)
-    se = _which("electron")
-    if se:
-        env.electron_bin = se
-        return se
-    if env.npm_bin:
-        npx = str(Path(env.npm_bin).parent / "npx")
-        if Path(npx).exists():
-            return npx
     return None
-
-def _get_electron_flags() -> list[str]:
-    flags = []
-    if sys.platform == "linux":
-        if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
-            flags.extend([
-                "--enable-features=UseOzonePlatform",
-                "--ozone-platform=wayland",
-                "--enable-gpu-rasterization",
-            ])
-    return flags
 
 
 # ── 主入口 ──
@@ -561,13 +533,12 @@ def launch_ide(
     _row("后端地址", backend_url)
 
     # ── Phase 4 ──
-    _section("[4/4]", "启动前端")
+    _section("[4/4]", "启动前端 (Tauri)")
 
-    # 确保前端已构建（dist/renderer/index.html 存在）
+    # Ensure frontend is built
     dist_index = env.desktop_dir / "dist" / "renderer" / "index.html"
-    is_dev = dev
 
-    if not is_dev and not dist_index.exists():
+    if not dist_index.exists():
         _row("前端构建", _label("未检测到 dist/，自动构建 …"))
         t0 = time.time()
         try:
@@ -590,46 +561,29 @@ def launch_ide(
         except subprocess.TimeoutExpired:
             _row("前端构建", _err("超时"), False)
             return 1
-
-    if is_dev and not env.vite_dev_server_running:
-        _row("模式", _warn("开发模式 (--dev)"))
-        _row("Vite", _label("未运行"))
-        _sub("启动命令", _c(_CYAN, f"cd {env.desktop_dir} && npx vite"))
-        _sub("后端已就绪", backend_url)
-        _sub("提示", "按 Ctrl+C 退出")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            return 0
-
-    electron_bin = _find_electron(env)
-    if not electron_bin or electron_bin == "npx":
-        _row("Electron", _warn("未找到，使用 npx"))
-        electron_bin = "npx"
-        electron_args = ["electron"]
     else:
-        _row("Electron", _c(_BWHITE, electron_bin))
-        electron_args = []
+        _row("前端构建", _c(_BWHITE, "已存在"), True)
 
-    electron_args.extend([str(env.desktop_dir), f"--backend-port={backend_port}"])
-    eflags = _get_electron_flags()
-    electron_args.extend(eflags)
+    tauri_cli = _find_tauri_cli(env)
+    if not tauri_cli:
+        _row("Tauri CLI", _err("未找到"), False)
+        _sub("修复", _c(_CYAN, f"cd {env.desktop_dir} && npm install"))
+        return 1
 
-    _row("窗口协议", _ok("Wayland") if eflags else _label("X11 / 默认"))
-    _row("启动 Electron", _label("正在启动 …"))
+    _row("Tauri CLI", _c(_BWHITE, tauri_cli))
+    _row("窗口协议", _ok("Wayland") if _detect_wayland(env) else _label("X11 / 默认"))
+    _row("启动 Tauri", _label("正在编译并启动 …"))
     print()
 
     try:
-        ep = subprocess.Popen(
-            [electron_bin] + electron_args,
+        tp = subprocess.Popen(
+            [tauri_cli, "dev"],
             cwd=str(env.desktop_dir),
-            env={**os.environ, "CYBER_AGENT_BACKEND_PORT": str(backend_port),
-                 "ELECTRON_OZONE_PLATFORM_HINT": os.environ.get("XDG_SESSION_TYPE", "")},
+            env={**os.environ, "CYBER_AGENT_BACKEND_PORT": str(backend_port)},
         )
-        return ep.wait()
+        return tp.wait()
     except FileNotFoundError:
-        _row("Electron", _err("未找到可执行文件"), False)
+        _row("Tauri", _err("未找到可执行文件"), False)
         print(f" {_ide()}  {_label('请运行: cd desktop && npm install')}")
         return 1
     except KeyboardInterrupt:
