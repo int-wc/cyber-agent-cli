@@ -11,9 +11,14 @@ webhook-routes.json
 .idea/
 *.egg-info
 
+# npm artifacts (accidentally created at root)
+package-lock.json
+
 # Desktop IDE frontend
 desktop/node_modules/
 desktop/dist/
 desktop/out/
 desktop/.vite/
+desktop/tsconfig.node.tsbuildinfo
+desktop/package-lock.json
 *.node
