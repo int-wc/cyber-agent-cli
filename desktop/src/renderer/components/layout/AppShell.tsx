@@ -76,12 +76,7 @@ export default function AppShell() {
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: "transparent" }}>
       <TitleBar />
-      <div ref={(el) => {
-        if (el) {
-          const r = el.getBoundingClientRect();
-          console.log("[AppShell main row]", "w:", r.width, "h:", r.height);
-        }
-      }} style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* ── Left: 磁盘 / 文件浏览 ── */}
         {sidebarVisible && (
           <>

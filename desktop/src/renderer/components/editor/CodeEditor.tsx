@@ -38,6 +38,7 @@ const MONACO_OPTIONS = {
   scrollBeyondLastLine: false,
   wordWrap: "off" as const,
   tabSize: 4,
+  automaticLayout: true,
   smoothScrolling: true,
   cursorBlinking: "smooth" as const,
   cursorSmoothCaretAnimation: "on" as const,
@@ -46,14 +47,14 @@ const MONACO_OPTIONS = {
   renderLineHighlight: "line" as const,
 };
 
-function FallbackEditor({ content, onChange, height }: { content: string; onChange: (v: string) => void; height: number }) {
+function FallbackEditor({ content, onChange }: { content: string; onChange: (v: string) => void }) {
   return (
     <textarea
       value={content}
       onChange={(e) => onChange(e.target.value)}
       spellCheck={false}
       style={{
-        width: "100%", height, resize: "none", background: "transparent",
+        width: "100%", height: "100%", resize: "none", background: "transparent",
         color: "var(--text-primary)", border: "none", outline: "none",
         padding: "8px 16px", fontFamily: "monospace", fontSize: 13, lineHeight: 1.7,
       }}
@@ -66,45 +67,23 @@ export default function CodeEditor() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const editorRef = useRef<{ getValue: () => string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [containerHeight, setContainerHeight] = useState(400);
 
-  // ResizeObserver to track actual container pixel height
+  const activeTab = tabs.find((t) => t.path === activeTabPath);
+
+  // ResizeObserver — re-bind when editor view appears (activeTab becomes truthy)
   useEffect(() => {
+    if (!activeTab) return;
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const h = entry.contentBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
-        if (h > 0) setContainerHeight(h);
+        if (h > 0) el.style.setProperty("--editor-height", `${h}px`);
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
-
-  // Debug: log all heights
-  useEffect(() => {
-    const log = () => {
-      const root = rootRef.current;
-      const cont = containerRef.current;
-      if (root) {
-        const r = root.getBoundingClientRect();
-        console.log("[CodeEditor root]", "w:", r.width, "h:", r.height, "top:", r.top, "bottom:", r.bottom);
-      }
-      if (cont) {
-        const c = cont.getBoundingClientRect();
-        console.log("[CodeEditor container]", "w:", c.width, "h:", c.height, "top:", c.top);
-      }
-      console.log("[CodeEditor containerHeight state]", containerHeight);
-    };
-    log();
-    const t = setTimeout(log, 500);
-    const t2 = setTimeout(log, 1500);
-    return () => { clearTimeout(t); clearTimeout(t2); };
-  }, [containerHeight]);
-
-  const activeTab = tabs.find((t) => t.path === activeTabPath);
+  }, [!!activeTab]);
 
   const handleContentChange = useCallback((value: string | undefined) => {
     if (!activeTabPath || value === undefined) return;
@@ -135,7 +114,7 @@ export default function CodeEditor() {
   if (!activeTab) {
     return (
       <div style={{
-        height: "100%", display: "flex", alignItems: "center", justifyContent: "center",
+        position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
         color: "var(--text-tertiary)", fontSize: 14, flexDirection: "column", gap: 12,
       }}>
         <div style={{
@@ -156,7 +135,7 @@ export default function CodeEditor() {
     : activeTab.language;
 
   return (
-    <div ref={rootRef} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center", flexShrink: 0,
@@ -189,14 +168,14 @@ export default function CodeEditor() {
         ))}
       </div>
 
-      {/* Editor — ResizeObserver drives explicit pixel height */}
+      {/* Editor container — fills remaining space via flex */}
       <div ref={containerRef} style={{ flex: 1, minHeight: 0 }}>
         <Suspense fallback={
-          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight} />
+          <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} />
         }>
           <MonacoEditor
             key={activeTab.path}
-            height={containerHeight}
+            height="100%"
             language={language}
             value={activeTab.content}
             theme="cyber-dark"
@@ -207,7 +186,7 @@ export default function CodeEditor() {
               monaco.editor.defineTheme("cyber-dark", MONACO_THEME);
               monaco.editor.setTheme("cyber-dark");
             }}
-            loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} height={containerHeight} />}
+            loading={<FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} />}
           />
         </Suspense>
       </div>
