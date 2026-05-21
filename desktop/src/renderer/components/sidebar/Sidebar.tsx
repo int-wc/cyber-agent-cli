@@ -322,7 +322,9 @@ export default function Sidebar() {
     try {
       await fsApi.write(filePath, "");
       loadRoot(workspaceRoot!);
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error("新建文件失败:", filePath, err);
+    }
   }, [loadRoot, workspaceRoot]);
 
   const handleNewFolder = useCallback(async (parentDir: string) => {
@@ -332,7 +334,9 @@ export default function Sidebar() {
     try {
       await fsApi.createDir(dirPath);
       loadRoot(workspaceRoot!);
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error("新建文件夹失败:", dirPath, err);
+    }
   }, [loadRoot, workspaceRoot]);
 
   const handleRename = useCallback(async (path: string) => {
@@ -343,7 +347,9 @@ export default function Sidebar() {
     try {
       await fsApi.rename(path, newPath);
       loadRoot(workspaceRoot!);
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error("重命名失败:", path, err);
+    }
   }, [loadRoot, workspaceRoot]);
 
   const handleDelete = useCallback(async (path: string) => {
@@ -352,7 +358,9 @@ export default function Sidebar() {
     try {
       await fsApi.delete(path);
       loadRoot(workspaceRoot!);
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error("删除失败:", path, err);
+    }
   }, [loadRoot, workspaceRoot]);
 
   return (
