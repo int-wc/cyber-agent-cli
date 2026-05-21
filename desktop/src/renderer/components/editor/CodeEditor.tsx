@@ -2,6 +2,10 @@ import { useCallback, useRef, useEffect, lazy, Suspense, useState } from "react"
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import { X } from "lucide-react";
+import { loader } from "@monaco-editor/react";
+import monaco from "../../editor/monacoSetup";
+
+loader.config({ monaco });
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 
