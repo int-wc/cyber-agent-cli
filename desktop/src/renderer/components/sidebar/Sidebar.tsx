@@ -13,10 +13,12 @@ import FileContextMenu, {
 
 // ── FileTreeNode ──
 
-function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolder, onRename, onDelete }: {
+function FileTreeNode({ entry, depth, onSelect, selectedPath, onSelectPath, onRefresh, onNewFile, onNewFolder, onRename, onDelete }: {
   entry: FileEntry;
   depth: number;
   onSelect: (path: string) => void;
+  selectedPath: string | null;
+  onSelectPath: (p: string) => void;
   onRefresh: () => void;
   onNewFile: (parentDir: string) => void;
   onNewFolder: (parentDir: string) => void;
@@ -39,7 +41,11 @@ function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolde
     setLoading(false);
   }, [entry.path, children]);
 
+  const isSelected = selectedPath === entry.path;
+  const isActive = activeTabPath === entry.path;
+
   const handleClick = useCallback(async () => {
+    onSelectPath(entry.path);
     if (entry.is_dir) {
       if (!expanded) await loadChildren();
       setExpanded(!expanded);
@@ -49,15 +55,15 @@ function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolde
         onSelect(entry.path);
       } catch { /* ignore */ }
     }
-  }, [entry, expanded, loadChildren, onSelect]);
+  }, [entry, expanded, loadChildren, onSelect, onSelectPath]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    onSelectPath(entry.path);
     setContextMenu({ x: e.clientX, y: e.clientY });
-  }, []);
+  }, [entry.path, onSelectPath]);
 
-  const isActive = activeTabPath === entry.path;
   const meta = getFileIcon(entry.name, entry.is_dir, expanded);
 
   const items: ContextMenuAction[] = entry.is_dir
@@ -76,9 +82,14 @@ function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolde
           padding: "3px 8px", paddingLeft: 8 + depth * 16,
           cursor: "pointer", fontSize: 13,
           color: isActive ? "var(--accent)" : "var(--text-secondary)",
-          background: isActive ? "rgba(124,111,247,0.08)" : "transparent",
+          background: isSelected
+            ? (isActive ? "rgba(124,111,247,0.12)" : "rgba(124,111,247,0.06)")
+            : "transparent",
+          outline: isSelected ? "1px solid rgba(124,111,247,0.18)" : "none",
+          outlineOffset: -1,
           borderRadius: 4, margin: "1px 4px",
           userSelect: "none",
+          fontWeight: isSelected ? 500 : 400,
         }}
       >
         {entry.is_dir ? (
@@ -102,6 +113,8 @@ function FileTreeNode({ entry, depth, onSelect, onRefresh, onNewFile, onNewFolde
               entry={child}
               depth={depth + 1}
               onSelect={onSelect}
+              selectedPath={selectedPath}
+              onSelectPath={onSelectPath}
               onRefresh={onRefresh}
               onNewFile={onNewFile}
               onNewFolder={onNewFolder}
@@ -261,11 +274,13 @@ export default function Sidebar() {
   const [workspaceName, setWorkspaceName] = useState("");
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [recentFolders, setRecentFolders] = useState<string[]>(getRecentFolders);
   const openFile = useEditorStore((s) => s.openFile);
 
   const loadRoot = useCallback(async (rootPath: string) => {
     setLoading(true);
+    setSelectedPath(null);
     try {
       const res = await fsApi.list(rootPath);
       setRootEntries(res.entries.filter((e) => !e.name.startsWith(".")));
@@ -287,6 +302,7 @@ export default function Sidebar() {
     });
     if (folderPath) {
       setWorkspaceRoot(folderPath);
+      setSelectedPath(null);
       loadRoot(folderPath);
     }
   }, [loadRoot]);
@@ -374,6 +390,8 @@ export default function Sidebar() {
               entry={entry}
               depth={0}
               onSelect={handleSelect}
+              selectedPath={selectedPath}
+              onSelectPath={setSelectedPath}
               onRefresh={() => loadRoot(workspaceRoot!)}
               onNewFile={handleNewFile}
               onNewFolder={handleNewFolder}
