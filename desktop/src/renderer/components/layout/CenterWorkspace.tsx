@@ -151,7 +151,7 @@ export default function CenterWorkspace() {
       overflow: "hidden", minWidth: 0,
     }}>
       <NavTabs />
-      <div style={{ flex: 1, overflow: "hidden" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         {renderContent()}
       </div>
     </div>

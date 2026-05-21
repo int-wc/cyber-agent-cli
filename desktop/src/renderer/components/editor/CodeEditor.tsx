@@ -123,12 +123,12 @@ export default function CodeEditor() {
     activeTab.language === "shell" ? "bash" : activeTab.language;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center",
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-        overflow: "auto", flexShrink: 0,
+        borderBottom: "1px solid rgba(0,0,0,0.05)",
+        overflow: "auto", flexShrink: 0, minHeight: 32,
       }}>
         {tabs.map((tab) => (
           <div
@@ -138,13 +138,13 @@ export default function CodeEditor() {
               display: "flex", alignItems: "center", gap: 6,
               padding: "6px 12px", fontSize: 12, cursor: "pointer",
               color: tab.path === activeTabPath ? "var(--text-primary)" : "var(--text-tertiary)",
-              background: tab.path === activeTabPath ? "var(--glass-fill-active)" : "transparent",
-              borderRight: "1px solid rgba(255,255,255,0.05)",
+              background: tab.path === activeTabPath ? "rgba(124,111,247,0.08)" : "transparent",
+              borderRight: "1px solid rgba(0,0,0,0.05)",
               whiteSpace: "nowrap", transition: "background 150ms ease",
             }}
           >
             {tab.dirty && (
-              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent-light)" }} />
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)" }} />
             )}
             <span>{tab.name}</span>
             <button
@@ -156,13 +156,14 @@ export default function CodeEditor() {
           </div>
         ))}
       </div>
-      {/* Editor */}
-      <div style={{ flex: 1 }}>
+      {/* Editor — fill all remaining space */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <Suspense fallback={
           <FallbackEditor content={activeTab.content} onChange={(v) => handleContentChange(v)} />
         }>
           <MonacoEditor
             key={activeTab.path}
+            height="100%"
             language={language}
             value={activeTab.content}
             theme="cyber-dark"
