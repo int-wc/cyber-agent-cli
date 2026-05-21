@@ -66,6 +66,7 @@ export default function CodeEditor() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const editorRef = useRef<{ getValue: () => string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [containerHeight, setContainerHeight] = useState(400);
 
   // ResizeObserver to track actual container pixel height
@@ -81,6 +82,27 @@ export default function CodeEditor() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Debug: log all heights
+  useEffect(() => {
+    const log = () => {
+      const root = rootRef.current;
+      const cont = containerRef.current;
+      if (root) {
+        const r = root.getBoundingClientRect();
+        console.log("[CodeEditor root]", "w:", r.width, "h:", r.height, "top:", r.top, "bottom:", r.bottom);
+      }
+      if (cont) {
+        const c = cont.getBoundingClientRect();
+        console.log("[CodeEditor container]", "w:", c.width, "h:", c.height, "top:", c.top);
+      }
+      console.log("[CodeEditor containerHeight state]", containerHeight);
+    };
+    log();
+    const t = setTimeout(log, 500);
+    const t2 = setTimeout(log, 1500);
+    return () => { clearTimeout(t); clearTimeout(t2); };
+  }, [containerHeight]);
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
@@ -134,7 +156,7 @@ export default function CodeEditor() {
     : activeTab.language;
 
   return (
-    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <div ref={rootRef} style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Tabs bar */}
       <div className="glass-surface" style={{
         display: "flex", alignItems: "center", flexShrink: 0,

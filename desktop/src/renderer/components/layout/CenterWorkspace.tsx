@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useUIStore } from "../../stores/uiStore";
 import NavTabs from "./NavTabs";
 import CodeEditor from "../editor/CodeEditor";
@@ -130,6 +130,20 @@ function MitmPanel() {
 
 export default function CenterWorkspace() {
   const { centerTab, terminalTabs } = useUIStore();
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const log = () => {
+      const r = el.getBoundingClientRect();
+      console.log("[CenterWorkspace content]", "w:", r.width, "h:", r.height, "top:", r.top, "bottom:", r.bottom);
+    };
+    log();
+    const t1 = setTimeout(log, 500);
+    const t2 = setTimeout(log, 1500);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, []);
 
   const isTerminalTab = terminalTabs.includes(centerTab);
 
@@ -151,7 +165,7 @@ export default function CenterWorkspace() {
       overflow: "hidden", minWidth: 0,
     }}>
       <NavTabs />
-      <div style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
+      <div ref={contentRef} style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
         {renderContent()}
       </div>
     </div>
