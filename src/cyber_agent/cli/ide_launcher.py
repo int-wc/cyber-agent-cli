@@ -535,43 +535,48 @@ def launch_ide(
     # ── Phase 4 ──
     _section("[4/4]", "启动前端 (Tauri)")
 
-    # Ensure frontend is built
-    dist_index = env.desktop_dir / "dist" / "renderer" / "index.html"
-
-    if not dist_index.exists():
-        _row("前端构建", _label("未检测到 dist/，自动构建 …"))
-        t0 = time.time()
-        try:
-            result = subprocess.run(
-                [str(env.desktop_dir / "node_modules" / ".bin" / "vite"), "build"],
-                cwd=str(env.desktop_dir),
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            elapsed = time.time() - t0
-            if result.returncode == 0 and dist_index.exists():
-                _row("前端构建", _ok("完成"), True)
-                _sub("耗时", _c(_BWHITE, f"{elapsed:.1f}s"))
-            else:
-                _row("前端构建", _err("失败"), False)
-                if result.stderr:
-                    _sub("错误", _err(result.stderr[:200]))
-                return 1
-        except subprocess.TimeoutExpired:
-            _row("前端构建", _err("超时"), False)
-            return 1
-    else:
-        _row("前端构建", _c(_BWHITE, "已存在"), True)
-
     tauri_cli = _find_tauri_cli(env)
-    if not tauri_cli:
-        _row("Tauri CLI", _err("未找到"), False)
+    vite_bin = str(env.desktop_dir / "node_modules" / ".bin" / "vite")
+    if not tauri_cli or not Path(vite_bin).exists():
+        _row("依赖", _err("缺失"), False)
         _sub("修复", _c(_CYAN, f"cd {env.desktop_dir} && npm install"))
         return 1
 
     _row("Tauri CLI", _c(_BWHITE, tauri_cli))
     _row("窗口协议", _ok("Wayland") if _detect_wayland(env) else _label("X11 / 默认"))
+
+    # Step 1: Start Vite dev server in background (tauri dev needs it)
+    _row("Vite dev server", _label("启动 localhost:5173 …"))
+    try:
+        vite_proc = subprocess.Popen(
+            [vite_bin],
+            cwd=str(env.desktop_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={**os.environ, "CYBER_AGENT_BACKEND_PORT": str(backend_port)},
+        )
+    except Exception as e:
+        _row("Vite", _err(f"启动失败: {e}"), False)
+        return 1
+
+    # Wait for Vite to be ready
+    vite_ready = False
+    for _ in range(30):
+        try:
+            resp = urllib.request.urlopen("http://localhost:5173", timeout=0.5)
+            if resp.status == 200:
+                vite_ready = True
+                break
+        except Exception:
+            time.sleep(0.3)
+    if vite_ready:
+        _row("Vite dev server", _ok("已就绪"), True)
+    else:
+        _row("Vite dev server", _err("超时"), False)
+        vite_proc.kill()
+        return 1
+
+    # Step 2: Launch Tauri
     _row("启动 Tauri", _label("正在编译并启动 …"))
     print()
 
@@ -581,12 +586,18 @@ def launch_ide(
             cwd=str(env.desktop_dir),
             env={**os.environ, "CYBER_AGENT_BACKEND_PORT": str(backend_port)},
         )
-        return tp.wait()
+        rc = tp.wait()
+        vite_proc.terminate()
+        vite_proc.wait()
+        return rc
     except FileNotFoundError:
         _row("Tauri", _err("未找到可执行文件"), False)
+        vite_proc.terminate()
         print(f" {_ide()}  {_label('请运行: cd desktop && npm install')}")
         return 1
     except KeyboardInterrupt:
+        vite_proc.terminate()
+        vite_proc.wait()
         print(f"\n {_ide()} {_label('已退出。')}")
         return 0
 
