@@ -2102,6 +2102,62 @@ def doctor(
 
 
 @app.command()
+def ide(
+    mode: str = typer.Option(
+        AgentMode.STANDARD.value,
+        "--mode",
+        help="运行模式，可选 standard 或 authorized。",
+    ),
+    allow_paths: list[str] | None = typer.Option(
+        None,
+        "--allow-path",
+        help="授权模式下额外允许读取的路径根目录，可重复传入。",
+    ),
+    approval_policy: str = typer.Option(
+        ApprovalPolicy.PROMPT.value,
+        "--approval-policy",
+        help="高风险工具调用的审批策略，可选 prompt、auto、never。",
+    ),
+    service: str | None = typer.Option(
+        None,
+        "--service",
+        help="模型服务商，可选 openai、deepseek、claude、mimo。",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="模型名称。",
+    ),
+    dev: bool = typer.Option(
+        False,
+        "--dev",
+        help="开发模式，跳过前端构建检查。",
+    ),
+) -> None:
+    """
+    启动桌面 IDE（Electron + FastAPI 后端）。
+    """
+    from .ide_launcher import launch_ide
+
+    try:
+        parse_agent_mode(mode)
+        parse_approval_policy(approval_policy)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    exit_code = launch_ide(
+        mode=mode,
+        allow_paths=allow_paths,
+        approval_policy=approval_policy,
+        service_name=service,
+        model_name=model,
+        dev=dev,
+    )
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+@app.command()
 def version() -> None:
     """
     输出当前 CLI 版本。

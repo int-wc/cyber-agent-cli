@@ -10,3 +10,10 @@ __pycache__/
 webhook-routes.json
 .idea/
 *.egg-info
+
+# Desktop IDE frontend
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+desktop/.vite/
+*.node
