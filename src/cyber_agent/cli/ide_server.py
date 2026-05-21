@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -597,7 +598,16 @@ def build_ide_runtime_context(
     resolved_service = service_name or settings.get_service()
     resolved_model = model_name or settings.get_model_name(service_name=resolved_service)
 
+    # IDE 模式下将 OS 根目录加入 allowed_roots，确保文件树可浏览整个磁盘
     allowed_roots = [Path.cwd().resolve()]
+    if sys.platform == "win32":
+        for drive in ("C:\\", "D:\\", "E:\\"):
+            p = Path(drive)
+            if p.exists():
+                allowed_roots.append(p)
+    else:
+        allowed_roots.append(Path("/"))
+    allowed_roots = normalize_allowed_roots(allowed_roots)
     extra_paths = [Path(p).expanduser() for p in (allow_paths or [])]
     if agent_mode is AgentMode.AUTHORIZED and extra_paths:
         allowed_roots = normalize_allowed_roots(allowed_roots + extra_paths)
