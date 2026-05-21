@@ -84,12 +84,13 @@ app.whenReady().then(async () => {
 
   // Parse backend port from CLI args or env
   const backendPortArg = process.argv.find((a) => a.startsWith("--backend-port="));
+  const envPort = parseInt(process.env.CYBER_AGENT_BACKEND_PORT || "0", 10);
   let backendPort = backendPortArg
     ? parseInt(backendPortArg.split("=")[1], 10)
-    : parseInt(process.env.CYBER_AGENT_BACKEND_PORT || "0", 10);
+    : (envPort || 0);
 
-  if (!backendPort || isDev) {
-    // Start backend as a child process
+  // Only spawn backend if NO port was provided via any channel
+  if (!backendPort) {
     const port = await spawnBackend();
     if (port) {
       backendPort = port;
