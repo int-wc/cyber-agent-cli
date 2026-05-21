@@ -562,11 +562,38 @@ def launch_ide(
 
     # ── Phase 4 ──
     _section("[4/4]", "启动前端")
-    is_dev = dev or not (env.desktop_dir / "dist" / "renderer" / "index.html").exists()
+
+    # 确保前端已构建（dist/renderer/index.html 存在）
+    dist_index = env.desktop_dir / "dist" / "renderer" / "index.html"
+    is_dev = dev
+
+    if not is_dev and not dist_index.exists():
+        _row("前端构建", _label("未检测到 dist/，自动构建 …"))
+        t0 = time.time()
+        try:
+            result = subprocess.run(
+                [str(env.desktop_dir / "node_modules" / ".bin" / "vite"), "build"],
+                cwd=str(env.desktop_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            elapsed = time.time() - t0
+            if result.returncode == 0 and dist_index.exists():
+                _row("前端构建", _ok("完成"), True)
+                _sub("耗时", _c(_BWHITE, f"{elapsed:.1f}s"))
+            else:
+                _row("前端构建", _err("失败"), False)
+                if result.stderr:
+                    _sub("错误", _err(result.stderr[:200]))
+                return 1
+        except subprocess.TimeoutExpired:
+            _row("前端构建", _err("超时"), False)
+            return 1
 
     if is_dev and not env.vite_dev_server_running:
-        _row("模式", _warn("开发模式 (Vite HMR)"))
-        _row("Vite 状态", _label("未运行"))
+        _row("模式", _warn("开发模式 (--dev)"))
+        _row("Vite", _label("未运行"))
         _sub("启动命令", _c(_CYAN, f"cd {env.desktop_dir} && npx vite"))
         _sub("后端已就绪", backend_url)
         _sub("提示", "按 Ctrl+C 退出")

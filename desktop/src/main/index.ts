@@ -1,5 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import path from "path";
+import fs from "fs";
+import http from "http";
 import { spawnBackend, shutdownBackend } from "./backend";
 import { TerminalManager } from "./terminal";
 
@@ -7,7 +9,17 @@ const isDev = !app.isPackaged;
 let mainWindow: BrowserWindow | null = null;
 let terminalManager: TerminalManager | null = null;
 
-function createWindow(backendPort: number) {
+function checkViteRunning(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get("http://localhost:5173", (res) => {
+      resolve(res.statusCode === 200);
+    });
+    req.on("error", () => resolve(false));
+    req.setTimeout(1500, () => { req.destroy(); resolve(false); });
+  });
+}
+
+async function createWindow(backendPort: number) {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -25,11 +37,27 @@ function createWindow(backendPort: number) {
     },
   });
 
-  if (isDev) {
+  const distIndex = path.join(__dirname, "../renderer/index.html");
+
+  if (isDev && await checkViteRunning()) {
     mainWindow.loadURL("http://localhost:5173");
     mainWindow.webContents.openDevTools({ mode: "detach" });
+  } else if (fs.existsSync(distIndex)) {
+    mainWindow.loadFile(distIndex);
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    // No Vite and no build — show a simple loading page
+    mainWindow.loadURL(`data:text/html,
+      <html>
+      <body style="background:#0a0a0f;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif">
+        <div style="text-align:center">
+          <h2>Cyber Agent IDE</h2>
+          <p>前端未构建。请运行:</p>
+          <pre>cd desktop && npm run build</pre>
+          <p>后端: http://127.0.0.1:${backendPort}</p>
+        </div>
+      </body>
+      </html>
+    `);
   }
 
   mainWindow.webContents.on("did-finish-load", () => {
