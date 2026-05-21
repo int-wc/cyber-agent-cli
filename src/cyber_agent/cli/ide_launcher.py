@@ -371,26 +371,25 @@ def _start_backend_in_thread(
             _backend_ready.set()
             return
 
-        # Step 5: 启动 uvicorn
-        class ReadyServer(uvicorn.Server):
-            def started(self):
-                _progress("uvicorn 启动", "socket 绑定完成", True)
-                _backend_ready.set()
-
+        # Step 5: 启动 uvicorn（不依赖 started() 回调，用健康检查轮询）
         try:
-            config = uvicorn.Config(app, host=host, port=port, log_level="info")
-            server = ReadyServer(config)
+            config = uvicorn.Config(app, host=host, port=port, log_level="error")
+            server = uvicorn.Server(config)
         except Exception as e:
             _boot_error_q.put(f"uvicorn.Config 失败: {e}")
-            _backend_ready.set()
             return
 
         _progress("启动 HTTP 服务器", f"uvicorn.run({host}:{port})", None)
-        try:
-            server.run()
-        except Exception as exc:
-            _boot_error_q.put(f"uvicorn.run 异常: {exc}")
-            _backend_ready.set()
+
+        # 延迟一小段时间再启动，让主线程先进入轮询状态
+        def _delayed_run():
+            time.sleep(0.3)
+            try:
+                server.run()
+            except Exception as exc:
+                _boot_error_q.put(f"uvicorn.run 异常: {exc}")
+
+        threading.Thread(target=_delayed_run, daemon=True).start()
 
     _backend_thread = threading.Thread(target=_run, daemon=True)
     _backend_thread.start()
@@ -400,7 +399,6 @@ def _start_backend_in_thread(
 
 def _drain_progress_q() -> None:
     """消费进度队列：主行用 _row，次级行用 _sub。"""
-    # 累加同一 label 的多次更新，取最后一个值
     pending_rows: dict[str, dict] = {}
     pending_subs: list[dict] = []
 
@@ -412,80 +410,42 @@ def _drain_progress_q() -> None:
         if p.get("sub"):
             pending_subs.append(p)
         else:
-            # 同名 label：后面的覆盖前面的值
             pending_rows[p["label"]] = p
 
     for p in pending_rows.values():
         _row(p["label"], _c(_BWHITE, str(p["value"])), p["ok"])
     for p in pending_subs:
-        _sub(p["label"], _c(_BWHITE, str(p["value"])) if p["label"] != "..." else _label(p["value"]))
+        if p["label"] == "...":
+            _sub(p["label"], _label(p["value"]))
+        else:
+            _sub(p["label"], _c(_BWHITE, str(p["value"])))
 
 
 def _wait_backend_ready(host: str, port: int) -> int:
+    """纯 HTTP 健康检查轮询（不依赖 uvicorn 内部回调）。"""
     start = time.time()
-    has_error = False
 
     _row("启动端口", _c(_BCYAN, f"{host}:{port}"))
     _drain_progress_q()
 
-    while True:
+    # 初始等待：给 uvicorn 启动时间
+    _row("等待 uvicorn", _label("启动中 …"))
+    time.sleep(1.5)
+
+    health_url = f"http://{host}:{port}/api/health"
+    attempts = 0
+
+    while time.time() - start < BACKEND_STARTUP_TIMEOUT:
+        _drain_progress_q()
+
         # 检查启动错误
         try:
             err = _boot_error_q.get_nowait()
-            if not has_error:
-                has_error = True
-                _row("启动错误", _err(str(err)[:80]), False)
+            _row("启动错误", _err(str(err)[:100]), False)
+            return 0
         except queue.Empty:
             pass
 
-        _drain_progress_q()
-        time.sleep(0.10)
-
-        if _backend_ready.is_set():
-            if not has_error:
-                _row("服务器就绪", _ok("socket 监听中"), True)
-            break
-
-        if time.time() - start > BACKEND_STARTUP_TIMEOUT:
-            _row("uvicorn 启动", _err("超时"), False)
-            # 最后一次 drain 确保看到所有消息
-            _drain_progress_q()
-            try:
-                err = _boot_error_q.get_nowait()
-                _row("错误详情", _err(str(err)[:120]), False)
-            except queue.Empty:
-                pass
-            return 0
-
-    # 如果有启动错误，提前返回
-    if has_error:
-        return 0
-
-    # HTTP 健康检查
-    _drain_progress_q()
-    health_url = f"http://{host}:{port}/api/health"
-
-    # 快速尝试
-    for _ in range(5):
-        try:
-            resp = urllib.request.urlopen(urllib.request.Request(health_url), timeout=1)
-            if resp.status == 200:
-                body = json.loads(resp.read())
-                svc = body.get("service", "?")
-                mdl = body.get("model", "?")
-                _row("健康检查", _ok("通过"), True)
-                _sub("Service", _c(_BWHITE, str(svc)))
-                _sub("Model", _c(_BWHITE, str(mdl)))
-                _sub("Session", _c(_BCYAN, str(body.get("session_id", ""))))
-                _backend_port = port
-                return port
-        except Exception:
-            time.sleep(0.2)
-
-    # 轮询
-    attempts = 5
-    while time.time() - start < BACKEND_STARTUP_TIMEOUT:
-        time.sleep(HEALTH_POLL_INTERVAL)
         attempts += 1
         try:
             resp = urllib.request.urlopen(urllib.request.Request(health_url), timeout=1)
@@ -493,6 +453,7 @@ def _wait_backend_ready(host: str, port: int) -> int:
                 body = json.loads(resp.read())
                 svc = body.get("service", "?")
                 mdl = body.get("model", "?")
+                _row("HTTP 服务器", _ok("已响应"), True)
                 _row("健康检查", _ok("通过"), True)
                 _sub("Service", _c(_BWHITE, str(svc)))
                 _sub("Model", _c(_BWHITE, str(mdl)))
@@ -501,10 +462,19 @@ def _wait_backend_ready(host: str, port: int) -> int:
                 return port
         except Exception:
             pass
-        if attempts % 40 == 1:
-            _row("健康检查", _label(f"等待中（{attempts} 次）..."))
+
+        if attempts == 1 or attempts % 30 == 0:
+            _row("健康检查", _label(f"轮询中（{attempts} 次）…"))
+
+        time.sleep(HEALTH_POLL_INTERVAL)
 
     _row("健康检查", _err("超时"), False)
+    # 尝试获取错误信息
+    try:
+        err = _boot_error_q.get_nowait()
+        _row("错误详情", _err(str(err)[:120]), False)
+    except queue.Empty:
+        pass
     return 0
 
 
