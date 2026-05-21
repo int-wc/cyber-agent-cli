@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import type { FileEntry } from "../../types/agent";
 import {
   ChevronRight, Folder, File, FolderOpen, RefreshCw,
-  FolderOpen as FolderOpenIcon, FolderPlus,
+  FolderOpen as FolderOpenIcon, FolderPlus, Ellipsis,
 } from "lucide-react";
 
 // ── FileTreeNode ──
@@ -117,6 +117,141 @@ function EmptyState({ onOpen }: { onOpen: () => void }) {
   );
 }
 
+// ── Recent folders (persisted in localStorage) ──
+
+const RECENT_KEY = "cyber-ide-recent-folders";
+const MAX_RECENT = 8;
+
+function getRecentFolders(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+  } catch { return []; }
+}
+
+function addRecentFolder(p: string) {
+  const list = [p, ...getRecentFolders().filter((x) => x !== p)].slice(0, MAX_RECENT);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+}
+
+// ── Workspace header ──
+
+function WorkspaceHeader({
+  root, name, onSwitch, onRefresh, recent,
+}: {
+  root: string; name: string; onSwitch: (p: string) => void;
+  onRefresh: () => void; recent: string[];
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div className="glass-surface" style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "6px 8px",
+      }}>
+        {/* Path area — click to switch */}
+        <div
+          onClick={() => onSwitch(root)}
+          style={{
+            flex: 1, minWidth: 0, cursor: "pointer",
+            borderRadius: 6, padding: "4px 8px",
+            background: "transparent",
+            transition: "background 120ms ease",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(124,111,247,0.06)")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+        >
+          <div style={{
+            fontSize: 12, fontWeight: 600, color: "var(--text-primary)",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {name}
+          </div>
+          <div style={{
+            fontSize: 10, color: "var(--text-tertiary)",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            marginTop: 1,
+          }}>
+            {root}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+          <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={onRefresh} title="刷新">
+            <RefreshCw size={12} />
+          </button>
+          <button
+            className="glass-btn"
+            style={{ padding: "2px 6px" }}
+            onClick={() => setMenuOpen(!menuOpen)}
+            title="更多"
+          >
+            <Ellipsis size={12} />
+          </button>
+        </div>
+      </div>
+
+      {/* Dropdown menu */}
+      {menuOpen && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 49 }}
+            onClick={() => setMenuOpen(false)}
+          />
+          <div className="glass-panel" style={{
+            position: "absolute", top: "100%", right: 8, zIndex: 50,
+            minWidth: 200, padding: "4px 0", marginTop: 4,
+          }}>
+            <button
+              style={{
+                display: "flex", alignItems: "center", gap: 8,
+                width: "100%", padding: "7px 12px", border: "none",
+                background: "transparent", cursor: "pointer",
+                fontSize: 12, color: "var(--text-primary)",
+              }}
+              onClick={() => { setMenuOpen(false); onSwitch(root); }}
+            >
+              <FolderPlus size={14} />
+              切换工作目录...
+            </button>
+
+            {recent.length > 0 && (
+              <>
+                <div style={{
+                  padding: "4px 12px", fontSize: 10, color: "var(--text-tertiary)",
+                  textTransform: "uppercase", letterSpacing: "0.05em",
+                }}>
+                  最近打开
+                </div>
+                {recent.filter((x) => x !== root).slice(0, 5).map((p) => (
+                  <button
+                    key={p}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      width: "100%", padding: "6px 12px", border: "none",
+                      background: "transparent", cursor: "pointer",
+                      fontSize: 12, color: "var(--text-secondary)",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}
+                    onClick={() => { setMenuOpen(false); onSwitch(p); }}
+                  >
+                    <Folder size={13} style={{ flexShrink: 0, color: "var(--text-tertiary)" }} />
+                    {p.split("/").pop() || p.split("\\").pop() || p}
+                    <span style={{ fontSize: 10, color: "var(--text-tertiary)", marginLeft: "auto" }}>
+                      {p}
+                    </span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Sidebar ──
 
 export default function Sidebar() {
@@ -124,6 +259,7 @@ export default function Sidebar() {
   const [workspaceName, setWorkspaceName] = useState("");
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [recentFolders, setRecentFolders] = useState<string[]>(getRecentFolders);
   const openFile = useEditorStore((s) => s.openFile);
 
   const loadRoot = useCallback(async (rootPath: string) => {
@@ -132,28 +268,26 @@ export default function Sidebar() {
       const res = await fsApi.list(rootPath);
       setRootEntries(res.entries.filter((e) => !e.name.startsWith(".")));
       setWorkspaceName(rootPath.split("/").pop() || rootPath.split("\\").pop() || rootPath);
+      addRecentFolder(rootPath);
+      setRecentFolders(getRecentFolders());
     } catch {
       setRootEntries([]);
     }
     setLoading(false);
   }, []);
 
-  const handleOpenFolder = useCallback(async () => {
+  const pickAndLoad = useCallback(async (currentRoot?: string) => {
     const api = window.electronAPI;
-    if (api) {
-      const folderPath = await api.openFileDialog({
-        properties: ["openDirectory"],
-      });
-      if (folderPath) {
-        setWorkspaceRoot(folderPath);
-        loadRoot(folderPath);
-      }
+    if (!api) return;
+    const folderPath = await api.openFileDialog({
+      properties: ["openDirectory"],
+      ...(currentRoot ? { defaultPath: currentRoot } : {}),
+    });
+    if (folderPath) {
+      setWorkspaceRoot(folderPath);
+      loadRoot(folderPath);
     }
   }, [loadRoot]);
-
-  const handleChangeFolder = useCallback(() => {
-    handleOpenFolder();
-  }, [handleOpenFolder]);
 
   const handleSelect = useCallback(async (path: string) => {
     try {
@@ -162,41 +296,33 @@ export default function Sidebar() {
     } catch { /* ignore */ }
   }, [openFile]);
 
-  // Try to auto-detect a reasonable default from env
-  useEffect(() => {
-    // Don't auto-select — wait for user to pick
-  }, []);
-
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
       {/* Header */}
-      <div className="glass-surface" style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "8px 12px",
-      }}>
-        <span style={{
-          fontSize: 12, fontWeight: 600, letterSpacing: "0.03em",
-          color: "var(--text-secondary)",
+      {workspaceRoot ? (
+        <WorkspaceHeader
+          root={workspaceRoot}
+          name={workspaceName}
+          onSwitch={pickAndLoad}
+          onRefresh={() => loadRoot(workspaceRoot)}
+          recent={recentFolders}
+        />
+      ) : (
+        <div className="glass-surface" style={{
+          display: "flex", alignItems: "center", padding: "10px 12px",
         }}>
-          {workspaceRoot ? workspaceName : "资源管理器"}
-        </span>
-        <div style={{ display: "flex", gap: 4 }}>
-          {workspaceRoot && (
-            <>
-              <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={() => loadRoot(workspaceRoot)}>
-                <RefreshCw size={12} />
-              </button>
-              <button className="glass-btn" style={{ padding: "2px 6px", fontSize: 11 }} onClick={handleChangeFolder}>
-                <FolderPlus size={12} />
-              </button>
-            </>
-          )}
+          <span style={{
+            fontSize: 12, fontWeight: 600, letterSpacing: "0.03em",
+            color: "var(--text-secondary)",
+          }}>
+            资源管理器
+          </span>
         </div>
-      </div>
+      )}
 
       {/* Content */}
       {!workspaceRoot ? (
-        <EmptyState onOpen={handleOpenFolder} />
+        <EmptyState onOpen={() => pickAndLoad()} />
       ) : loading ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>加载中...</span>
