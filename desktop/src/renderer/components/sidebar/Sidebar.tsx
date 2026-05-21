@@ -121,12 +121,12 @@ export default function Sidebar() {
         className="glass-surface"
         style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "8px 12px", borderBottom: "1px solid rgba(255,255,255,0.06)",
+          padding: "8px 12px",
         }}
       >
-        <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase",
-                       letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
-          资源管理器
+        <span style={{ fontSize: 12, fontWeight: 600,
+                       letterSpacing: "0.03em", color: "var(--text-secondary)" }}>
+          磁盘浏览
         </span>
         <div style={{ display: "flex", gap: 4 }}>
           <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={refresh}>

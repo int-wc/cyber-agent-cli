@@ -9,7 +9,9 @@ export default function StatusBar() {
   const usage = useChatStore((s) => s.usage);
   const activeTabPath = useEditorStore((s) => s.activeTabPath);
   const { sidebarVisible, chatPanelVisible, terminalVisible,
-          toggleSidebar, toggleChatPanel, toggleTerminal } = useUIStore();
+          toggleSidebar, toggleChatPanel, toggleTerminal, centerTab } = useUIStore();
+
+  const tabLabel = centerTab === "viewer" ? "阅览" : centerTab === "yakit" ? "Yakit 工具" : "MITM 浏览器";
 
   return (
     <div
@@ -56,9 +58,12 @@ export default function StatusBar() {
         >
           <MessageSquare size={12} />
         </button>
+        <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>
+          {tabLabel}
+        </span>
         {activeTabPath && (
-          <span style={{ color: "var(--text-tertiary)", marginLeft: 8 }}>
-            {activeTabPath}
+          <span style={{ color: "var(--text-tertiary)" }}>
+            · {activeTabPath}
           </span>
         )}
       </div>

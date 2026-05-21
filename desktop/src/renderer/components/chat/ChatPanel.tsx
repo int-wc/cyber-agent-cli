@@ -71,8 +71,8 @@ export default function ChatPanel() {
         padding: "8px 12px", borderBottom: "1px solid rgba(255,255,255,0.06)",
       }}>
         <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase",
-                       letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
-          AI 助手
+                       letterSpacing: "0.03em", color: "var(--text-secondary)" }}>
+          Agent 辅助
         </span>
         {/* Mode toggle */}
         <div style={{ display: "flex", borderRadius: 8, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)" }}>

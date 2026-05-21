@@ -13,6 +13,8 @@ interface UIState {
   toggleSidebar: () => void;
   toggleChatPanel: () => void;
   toggleTerminal: () => void;
+  centerTab: "viewer" | "yakit" | "mitm";
+  setCenterTab: (t: "viewer" | "yakit" | "mitm") => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -29,4 +31,6 @@ export const useUIStore = create<UIState>((set) => ({
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
   toggleChatPanel: () => set((s) => ({ chatPanelVisible: !s.chatPanelVisible })),
   toggleTerminal: () => set((s) => ({ terminalVisible: !s.terminalVisible })),
+  centerTab: "viewer",
+  setCenterTab: (t) => set({ centerTab: t }),
 }));
