@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import type { FileEntry } from "../../types/agent";
-import { ChevronRight, Folder, File, FolderOpen, RefreshCw, Search } from "lucide-react";
+import { ChevronRight, Folder, File, FolderOpen, RefreshCw } from "lucide-react";
 
 function FileTreeNode({ entry, depth, onSelect }: {
   entry: FileEntry;
@@ -87,9 +87,13 @@ function FileTreeNode({ entry, depth, onSelect }: {
   );
 }
 
+/** 判断路径是否为 OS 根目录（/ 或 Windows 盘符）。 */
+function isOSRoot(p: string): boolean {
+  return p === "/" || /^[A-Z]:\\?$/i.test(p);
+}
+
 export default function Sidebar() {
-  const [roots, setRoots] = useState<{ path: string; name: string }[]>([]);
-  const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
+  const [roots, setRoots] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const openFile = useEditorStore((s) => s.openFile);
 
@@ -97,15 +101,17 @@ export default function Sidebar() {
     setLoading(true);
     try {
       const r = await fsApi.roots();
-      setRoots(r.roots);
-      const all: FileEntry[] = [];
-      for (const root of r.roots) {
-        try {
-          const res = await fsApi.list(root.path);
-          all.push(...res.entries.filter((e) => !e.name.startsWith(".")));
-        } catch { /* permission issues */ }
-      }
-      setRootEntries(all);
+      // 只取 OS 根，过滤掉 cwd 等非系统根路径
+      const osRoots = r.roots
+        .filter((x) => isOSRoot(x.path))
+        .map((x) => ({
+          name: x.name,
+          path: x.path,
+          is_dir: true,
+          size: 0,
+          modified: 0,
+        } as FileEntry));
+      setRoots(osRoots);
     } catch { /* backend not ready */ }
     setLoading(false);
   }, []);
@@ -121,35 +127,29 @@ export default function Sidebar() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
-      {/* Header */}
-      <div
-        className="glass-surface"
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "8px 12px",
-        }}
-      >
+      <div className="glass-surface" style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "8px 12px",
+      }}>
         <span style={{ fontSize: 12, fontWeight: 600,
                        letterSpacing: "0.03em", color: "var(--text-secondary)" }}>
           磁盘浏览
         </span>
-        <div style={{ display: "flex", gap: 4 }}>
-          <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={refresh}>
-            <RefreshCw size={12} />
-          </button>
-          <button className="glass-btn" style={{ padding: "2px 6px" }}>
-            <Search size={12} />
-          </button>
-        </div>
+        <button className="glass-btn" style={{ padding: "2px 6px" }} onClick={refresh}>
+          <RefreshCw size={12} />
+        </button>
       </div>
-      {/* Tree */}
       <div style={{ flex: 1, overflow: "auto", padding: "4px 0" }}>
         {loading ? (
           <div style={{ padding: 16, textAlign: "center", color: "var(--text-tertiary)", fontSize: 12 }}>
-            加载中...
+            检测磁盘...
+          </div>
+        ) : roots.length === 0 ? (
+          <div style={{ padding: 16, textAlign: "center", color: "var(--text-tertiary)", fontSize: 12 }}>
+            未检测到可用磁盘
           </div>
         ) : (
-          rootEntries.map((entry) => (
+          roots.map((entry) => (
             <FileTreeNode key={entry.path} entry={entry} depth={0} onSelect={handleSelect} />
           ))
         )}
