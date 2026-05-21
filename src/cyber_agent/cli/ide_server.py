@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from ..tools.filesystem import (
 _RUNNER: AgentRunner | None = None
 _RUNTIME_CTX: dict[str, object] = {}
 _SERVER_PORT: int = 0
+_SERVER_READY: threading.Event = threading.Event()
 
 AGENT_QUEUE_POLL_TIMEOUT = 0.05
 WS_PING_INTERVAL = 30
@@ -72,8 +74,13 @@ class AgentEventBridge:
             return ApprovalDecision(False, "后端事件循环未就绪")
 
         self._approval_event.clear()
-        future = asyncio.run_coroutine_threadsafe(self._create_approval_future(tool, tool_call), loop)
-        self._pending_approval = future.result()
+        future = asyncio.run_coroutine_threadsafe(
+            self._create_approval_future(tool, tool_call), loop
+        )
+        try:
+            approval_future = future.result(timeout=5)
+        except TimeoutError:
+            return ApprovalDecision(False, "创建审批超时")
 
         self.push_event({
             "type": "approval_request",
@@ -86,15 +93,15 @@ class AgentEventBridge:
         })
 
         try:
-            result = future.result(timeout=APPROVAL_TIMEOUT)
-            return result
+            return approval_future.result(timeout=APPROVAL_TIMEOUT)
         except TimeoutError:
             return ApprovalDecision(False, "审批超时自动拒绝")
-        finally:
-            self._pending_approval = None
 
     async def _create_approval_future(self, tool, tool_call: dict) -> asyncio.Future:
-        return asyncio.get_event_loop().create_future()
+        loop = asyncio.get_event_loop()
+        f = loop.create_future()
+        self._pending_approval = f
+        return f
 
     def resolve_approval(self, decision: ApprovalDecision) -> None:
         if self._pending_approval and not self._pending_approval.done():
@@ -166,19 +173,15 @@ def create_app() -> FastAPI:
                 try:
                     stat = p.stat()
                     entries.append({
-                        "name": p.name,
-                        "path": str(p),
+                        "name": p.name, "path": str(p),
                         "is_dir": p.is_dir(),
                         "size": stat.st_size if not p.is_dir() else 0,
                         "modified": stat.st_mtime,
                     })
                 except OSError:
                     entries.append({
-                        "name": p.name,
-                        "path": str(p),
-                        "is_dir": p.is_dir(),
-                        "size": 0,
-                        "modified": 0,
+                        "name": p.name, "path": str(p),
+                        "is_dir": p.is_dir(), "size": 0, "modified": 0,
                     })
         except PermissionError:
             raise HTTPException(status_code=403, detail="无权限读取目录")
@@ -201,10 +204,8 @@ def create_app() -> FastAPI:
         if truncated:
             content = content[:MAX_FILE_READ_CHARS]
         return {
-            "path": str(target),
-            "content": content,
-            "size": target.stat().st_size,
-            "truncated": truncated,
+            "path": str(target), "content": content,
+            "size": target.stat().st_size, "truncated": truncated,
         }
 
     @app.post("/api/fs/write")
@@ -212,14 +213,6 @@ def create_app() -> FastAPI:
         path = req.get("path", "")
         content = req.get("content", "")
         runner = _get_runner()
-        try:
-            target = resolve_permitted_path(path, runner.allowed_roots)
-        except (ValueError, FileNotFoundError):
-            pass
-        else:
-            if target.exists() and target.is_file():
-                target.write_text(content, encoding="utf-8")
-                return {"path": str(target), "written": True}
         target = Path(path).expanduser().resolve()
         for root in runner.allowed_roots:
             try:
@@ -329,9 +322,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/git/diff")
     async def git_diff(staged: bool = Query(default=False)):
-        args = ["diff"]
-        if staged:
-            args.append("--staged")
+        args = ["diff"];
+        if staged: args.append("--staged")
         return _run_git(args, cwd=Path.cwd())
 
     @app.post("/api/git/stage")
@@ -362,15 +354,13 @@ def create_app() -> FastAPI:
     @app.post("/api/git/branch-create")
     async def git_branch_create(req: dict):
         name = req.get("name", "")
-        if not name:
-            raise HTTPException(status_code=400, detail="分支名不能为空")
+        if not name: raise HTTPException(status_code=400, detail="分支名不能为空")
         return _run_git(["checkout", "-b", name], cwd=Path.cwd())
 
     @app.post("/api/git/branch-checkout")
     async def git_branch_checkout(req: dict):
         name = req.get("name", "")
-        if not name:
-            raise HTTPException(status_code=400, detail="分支名不能为空")
+        if not name: raise HTTPException(status_code=400, detail="分支名不能为空")
         return _run_git(["checkout", name], cwd=Path.cwd())
 
     # ── 会话管理 ──
@@ -389,8 +379,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/session/reset")
     async def session_reset():
-        runner = _get_runner()
-        runner.reset()
+        _get_runner().reset()
         return {"status": "ok", "message": "会话上下文已重置"}
 
     @app.post("/api/session/mode")
@@ -418,17 +407,14 @@ def create_app() -> FastAPI:
         service_name = req.get("service", "")
         model_name = req.get("model", "")
         runner = _get_runner()
-        if service_name:
-            runner.service = service_name
-        if model_name:
-            runner.model_name = model_name
+        if service_name: runner.service = service_name
+        if model_name: runner.model_name = model_name
         runner.update_llm_config(service=runner.service, model=runner.model_name)
         return {"service": runner.service, "model": runner.model_name}
 
     @app.post("/api/session/stop")
     async def session_stop():
-        runner = _get_runner()
-        runner.execution_controller.request_stop("IDE 用户点击停止")
+        _get_runner().execution_controller.request_stop("IDE 用户点击停止")
         _get_bridge().reject_pending_approval("已停止")
         return {"status": "stopped"}
 
@@ -441,8 +427,6 @@ def create_app() -> FastAPI:
             "service": settings.get_service(),
             "model": settings.get_model_name(),
             "base_url": settings.resolve_base_url(),
-            "max_context_chars": settings.max_context_chars,
-            "max_context_tokens": settings.max_context_tokens,
         }
 
     @app.get("/api/config/providers")
@@ -475,32 +459,11 @@ def create_app() -> FastAPI:
         sessions = list_stored_sessions()
         return {
             "sessions": [
-                {
-                    "session_id": s.session_id,
-                    "title": s.title,
-                    "created_at": s.created_at,
-                    "updated_at": s.updated_at,
-                    "mode": s.mode,
-                    "turn_count": s.turn_count,
-                }
+                {"session_id": s.session_id, "title": s.title,
+                 "created_at": s.created_at, "updated_at": s.updated_at,
+                 "mode": s.mode, "turn_count": s.turn_count}
                 for s in sessions
             ]
-        }
-
-    @app.get("/api/history/show/{session_id}")
-    async def history_show(session_id: str):
-        from ..session_store import load_session_history
-        session = load_session_history(session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="会话不存在")
-        return {
-            "session_id": session.summary.session_id,
-            "title": session.summary.title,
-            "mode": session.summary.mode,
-            "messages": [
-                {"role": type(m).__name__, "content": extract_text_content(m.content)}
-                for m in session.messages
-            ],
         }
 
     # ── WebSocket ──
@@ -514,15 +477,20 @@ def create_app() -> FastAPI:
         bridge.set_loop(asyncio.get_event_loop())
 
         runner = _get_runner()
-        await ws.send_json({"type": "connected", "session_id": _RUNTIME_CTX.get("session_id", ""),
-                            "mode": runner.mode.value, "service": runner.service,
-                            "model": runner.model_name})
+        await ws.send_json({
+            "type": "connected",
+            "session_id": _RUNTIME_CTX.get("session_id", ""),
+            "mode": runner.mode.value,
+            "service": runner.service,
+            "model": runner.model_name,
+        })
 
         agent_task: asyncio.Task | None = None
         ping_task = asyncio.create_task(_ws_ping_loop(ws))
 
         try:
             while True:
+                # 从 WebSocket 读取客户端消息
                 try:
                     raw = await asyncio.wait_for(ws.receive_text(), timeout=AGENT_QUEUE_POLL_TIMEOUT)
                 except asyncio.TimeoutError:
@@ -550,7 +518,7 @@ def create_app() -> FastAPI:
                     elif msg_type == "ping":
                         await ws.send_json({"type": "pong"})
 
-                # 发送队列中的事件
+                # 发送事件队列中的待处理事件
                 event = await bridge.get_event()
                 if event is not None:
                     try:
@@ -558,7 +526,6 @@ def create_app() -> FastAPI:
                     except Exception:
                         break
 
-                # 检查 agent 任务是否完成
                 if agent_task and agent_task.done():
                     try:
                         await agent_task
@@ -593,15 +560,13 @@ async def _ws_ping_loop(ws: WebSocket) -> None:
 
 
 async def _run_agent_in_thread(runner: AgentRunner, bridge: AgentEventBridge, user_input: str) -> None:
-    """在线程池中运行同步 AgentRunner.run()，通过 bridge 转发事件。"""
     event_handler = bridge.create_event_handler()
     approval_handler = bridge.create_approval_handler()
 
     def _run():
         try:
             result = runner.run(
-                user_input,
-                verbose=False,
+                user_input, verbose=False,
                 event_handler=event_handler,
                 approval_handler=approval_handler,
             )
@@ -612,7 +577,7 @@ async def _run_agent_in_thread(runner: AgentRunner, bridge: AgentEventBridge, us
     await asyncio.get_event_loop().run_in_executor(None, _run)
 
 
-# ── 启动入口 ──
+# ── 初始化函数（供 ide_launcher 内联调用） ──
 
 def build_ide_runtime_context(
     mode: str = "standard",
@@ -623,6 +588,8 @@ def build_ide_runtime_context(
 ) -> dict[str, object]:
     """构建 IDE 运行上下文（独立于 CLI flags）。"""
     from ..config import settings
+    from datetime import datetime
+    from ..session_store import create_session_id
 
     agent_mode = parse_agent_mode(mode)
     policy = parse_approval_policy(approval_policy)
@@ -636,9 +603,6 @@ def build_ide_runtime_context(
         allowed_roots = normalize_allowed_roots(allowed_roots + extra_paths)
 
     execution_controller = ExecutionController()
-
-    from ..session_store import create_session_id
-    from datetime import datetime
 
     return {
         "mode": agent_mode,
@@ -662,7 +626,7 @@ def build_ide_runtime_context(
 
 
 def init_runner(runtime_context: dict[str, object]) -> AgentRunner:
-    """从 IDE 运行上下文初始化 AgentRunner。"""
+    """从 IDE 运行上下文初始化 AgentRunner（内部使用，返回 runner）。"""
     global _RUNNER, _RUNTIME_CTX, _bridge
 
     from ..agent.runner import AgentRunner as AR
@@ -670,7 +634,6 @@ def init_runner(runtime_context: dict[str, object]) -> AgentRunner:
 
     _RUNTIME_CTX = runtime_context
 
-    # 初始化 capability registry
     cap_registry = CapabilityRegistry(
         execution_controller=runtime_context["execution_controller"],
         service_name=str(runtime_context["service_name"]),
@@ -679,7 +642,6 @@ def init_runner(runtime_context: dict[str, object]) -> AgentRunner:
         base_url=str(runtime_context.get("base_url", "")),
     )
 
-    # 加载工具
     from ..tools import get_default_tools
     tools = get_default_tools(
         runtime_context["mode"],
@@ -717,6 +679,8 @@ def init_runner(runtime_context: dict[str, object]) -> AgentRunner:
     return runner
 
 
+# ── 启动入口（供独立子进程使用 / python -m cyber_agent.cli.ide_server） ──
+
 def run_ide_server(
     host: str = "127.0.0.1",
     port: int = 0,
@@ -726,21 +690,18 @@ def run_ide_server(
     service_name: str | None = None,
     model_name: str | None = None,
 ) -> None:
-    """启动 IDE 后端服务器。"""
+    """启动 IDE 后端服务器（阻塞，供子进程入口使用）。"""
     import uvicorn
 
     runtime_context = build_ide_runtime_context(
-        mode=mode,
-        allow_paths=allow_paths,
+        mode=mode, allow_paths=allow_paths,
         approval_policy=approval_policy,
-        service_name=service_name,
-        model_name=model_name,
+        service_name=service_name, model_name=model_name,
     )
     init_runner(runtime_context)
 
     app = create_app()
 
-    # 如果 port=0，让 OS 分配空闲端口
     if port == 0:
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -750,7 +711,5 @@ def run_ide_server(
     global _SERVER_PORT
     _SERVER_PORT = port
 
-    # 打印端口号供 Electron 主进程解析
     print(f"IDE_SERVER_PORT={port}", flush=True)
-
     uvicorn.run(app, host=host, port=port, log_level="info")
