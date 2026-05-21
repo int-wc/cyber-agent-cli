@@ -1,9 +1,53 @@
+import { useEffect, useState } from "react";
 import { useUIStore } from "../../stores/uiStore";
 import NavTabs from "./NavTabs";
 import CodeEditor from "../editor/CodeEditor";
 import TerminalPanel from "../terminal/TerminalPanel";
 
-function YakitPlaceholder() {
+// ── Yakit 真实集成 ──
+
+const YAKIT_DEFAULT_PORT = 8087;
+
+function YakitPanel() {
+  const [status, setStatus] = useState<"checking" | "running" | "stopped">("checking");
+
+  useEffect(() => {
+    checkYakit();
+  }, []);
+
+  async function checkYakit() {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${YAKIT_DEFAULT_PORT}/api/info`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (resp.ok) {
+        setStatus("running");
+      } else {
+        setStatus("stopped");
+      }
+    } catch {
+      setStatus("stopped");
+    }
+  }
+
+  if (status === "checking") {
+    return (
+      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ color: "var(--text-tertiary)", fontSize: 13 }}>检测 Yakit 引擎 ...</span>
+      </div>
+    );
+  }
+
+  if (status === "running") {
+    return (
+      <iframe
+        src={`http://127.0.0.1:${YAKIT_DEFAULT_PORT}`}
+        style={{ width: "100%", height: "100%", border: "none" }}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      />
+    );
+  }
+
   return (
     <div style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -19,20 +63,38 @@ function YakitPlaceholder() {
       </div>
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4 }}>
-          Yakit 工具
+          Yakit 引擎未启动
         </div>
-        <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-          安全工具集成面板
+        <div style={{ fontSize: 12, lineHeight: 1.6, maxWidth: 320 }}>
+          Yakit 是一个网络安全工具平台。
+          <br />
+          请先启动 Yakit 引擎，或下载安装：
         </div>
-        <div style={{ fontSize: 11, marginTop: 8, color: "var(--text-tertiary)" }}>
-          端口扫描 · 漏洞检测 · 数据包分析 · 插件管理
-        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="glass-btn" style={{ fontSize: 12 }} onClick={checkYakit}>
+          重新检测
+        </button>
+        <button
+          className="glass-btn glass-btn-primary"
+          style={{ fontSize: 12 }}
+          onClick={() => {
+            window.open(`http://127.0.0.1:${YAKIT_DEFAULT_PORT}`, "_blank");
+          }}
+        >
+          在浏览器打开
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+        端口: {YAKIT_DEFAULT_PORT} · 状态: 未连接
       </div>
     </div>
   );
 }
 
-function MitmPlaceholder() {
+// ── MITM 占位 ──
+
+function MitmPanel() {
   return (
     <div style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -64,17 +126,22 @@ function MitmPlaceholder() {
   );
 }
 
+// ── 主组件 ──
+
 export default function CenterWorkspace() {
-  const { terminalVisible, terminalHeight, setTerminalHeight, centerTab, setCenterTab } = useUIStore();
+  const { centerTab, terminalTabs } = useUIStore();
+
+  const isTerminalTab = terminalTabs.includes(centerTab);
 
   const renderContent = () => {
+    if (isTerminalTab) {
+      return <TerminalPanel key={centerTab} sessionKey={centerTab} standalone />;
+    }
     switch (centerTab) {
-      case "viewer":
-        return <CodeEditor />;
-      case "yakit":
-        return <YakitPlaceholder />;
-      case "mitm":
-        return <MitmPlaceholder />;
+      case "viewer": return <CodeEditor />;
+      case "yakit":  return <YakitPanel />;
+      case "mitm":   return <MitmPanel />;
+      default:       return <CodeEditor />;
     }
   };
 
@@ -83,41 +150,10 @@ export default function CenterWorkspace() {
       flex: 1, display: "flex", flexDirection: "column",
       overflow: "hidden", minWidth: 0,
     }}>
-      {/* Navigation tabs */}
-      <NavTabs active={centerTab} onSelect={setCenterTab} />
-
-      {/* Content area */}
+      <NavTabs />
       <div style={{ flex: 1, overflow: "hidden" }}>
         {renderContent()}
       </div>
-
-      {/* Terminal */}
-      {terminalVisible && (
-        <>
-          <div
-            className="resize-handle resize-handle-vertical"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const startY = e.clientY;
-              const startHeight = terminalHeight;
-              const onMove = (ev: MouseEvent) => setTerminalHeight(startHeight + (startY - ev.clientY));
-              const onUp = () => {
-                document.removeEventListener("mousemove", onMove);
-                document.removeEventListener("mouseup", onUp);
-                document.body.style.cursor = "";
-                document.body.style.userSelect = "";
-              };
-              document.body.style.cursor = "row-resize";
-              document.body.style.userSelect = "none";
-              document.addEventListener("mousemove", onMove);
-              document.addEventListener("mouseup", onUp);
-            }}
-          />
-          <div style={{ height: terminalHeight, flexShrink: 0, overflow: "hidden" }}>
-            <TerminalPanel />
-          </div>
-        </>
-      )}
     </div>
   );
 }

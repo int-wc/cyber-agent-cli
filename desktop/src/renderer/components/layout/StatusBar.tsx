@@ -8,31 +8,36 @@ export default function StatusBar() {
   const { config, connected } = useSessionStore();
   const usage = useChatStore((s) => s.usage);
   const activeTabPath = useEditorStore((s) => s.activeTabPath);
-  const { sidebarVisible, chatPanelVisible, terminalVisible,
-          toggleSidebar, toggleChatPanel, toggleTerminal, centerTab } = useUIStore();
+  const {
+    sidebarVisible, chatPanelVisible,
+    toggleSidebar, toggleChatPanel,
+    centerTab, setCenterTab, terminalTabs,
+  } = useUIStore();
 
-  const tabLabel = centerTab === "viewer" ? "阅览" : centerTab === "yakit" ? "Yakit 工具" : "MITM 浏览器";
+  const tabLabel = terminalTabs.includes(centerTab)
+    ? `终端 ${terminalTabs.indexOf(centerTab) + 1}`
+    : centerTab === "viewer" ? "阅览"
+    : centerTab === "yakit" ? "Yakit 工具"
+    : centerTab === "mitm" ? "MITM 浏览器"
+    : centerTab;
+
+  const jumpToTerminal = () => setCenterTab(terminalTabs[0] || "viewer");
 
   return (
     <div
       className="glass-surface"
       style={{
-        height: 28,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "0 10px",
-        borderTop: "1px solid rgba(255,255,255,0.06)",
-        fontSize: 11,
+        height: 28, display: "flex", alignItems: "center",
+        justifyContent: "space-between", padding: "0 10px",
+        borderTop: "1px solid rgba(0,0,0,0.05)", fontSize: 11,
       }}
     >
-      {/* Left: Toggle buttons + file path */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
           className="glass-btn"
           style={{
             padding: "2px 6px", borderRadius: 4, fontSize: 11,
-            background: sidebarVisible ? "var(--accent-soft)" : undefined,
+            background: sidebarVisible ? "rgba(124,111,247,0.10)" : undefined,
           }}
           onClick={toggleSidebar}
         >
@@ -42,9 +47,9 @@ export default function StatusBar() {
           className="glass-btn"
           style={{
             padding: "2px 6px", borderRadius: 4, fontSize: 11,
-            background: terminalVisible ? "var(--accent-soft)" : undefined,
+            background: terminalTabs.includes(centerTab) ? "rgba(124,111,247,0.10)" : undefined,
           }}
-          onClick={toggleTerminal}
+          onClick={jumpToTerminal}
         >
           <Terminal size={12} />
         </button>
@@ -52,7 +57,7 @@ export default function StatusBar() {
           className="glass-btn"
           style={{
             padding: "2px 6px", borderRadius: 4, fontSize: 11,
-            background: chatPanelVisible ? "var(--accent-soft)" : undefined,
+            background: chatPanelVisible ? "rgba(124,111,247,0.10)" : undefined,
           }}
           onClick={toggleChatPanel}
         >
@@ -68,7 +73,6 @@ export default function StatusBar() {
         )}
       </div>
 
-      {/* Right: Session info */}
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         {usage && (
           <span style={{ color: "var(--text-tertiary)" }}>

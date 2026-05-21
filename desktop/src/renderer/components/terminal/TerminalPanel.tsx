@@ -1,14 +1,11 @@
-import { useEffect, useRef, useCallback, useState } from "react";
-import { Plus, X, Terminal as TerminalIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
-interface TerminalTab {
-  id: string;
-  title: string;
+interface Props {
+  standalone?: boolean;   // single terminal, no tab bar
+  sessionKey?: string;    // unique key for re-init when switching tabs
 }
 
-export default function TerminalPanel() {
-  const [tabs, setTabs] = useState<TerminalTab[]>([{ id: "term-1", title: "bash" }]);
-  const [activeTab, setActiveTab] = useState("term-1");
+export default function TerminalPanel({ standalone, sessionKey }: Props) {
   const [xtermReady, setXtermReady] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<{
@@ -36,22 +33,13 @@ export default function TerminalPanel() {
             foreground: "#1e293b",
             cursor: "#7c6ff7",
             selectionBackground: "#7c6ff720",
-            black: "#e2e8f0",
-            red: "#ef4444",
-            green: "#22c55e",
-            yellow: "#eab308",
-            blue: "#3b82f6",
-            magenta: "#a855f7",
-            cyan: "#06b6d4",
-            white: "#1e293b",
-            brightBlack: "#94a3b8",
-            brightRed: "#f87171",
-            brightGreen: "#4ade80",
-            brightYellow: "#facc15",
-            brightBlue: "#60a5fa",
-            brightMagenta: "#c084fc",
-            brightCyan: "#22d3ee",
-            brightWhite: "#0f172a",
+            black: "#e2e8f0", red: "#ef4444", green: "#22c55e",
+            yellow: "#eab308", blue: "#3b82f6", magenta: "#a855f7",
+            cyan: "#06b6d4", white: "#1e293b",
+            brightBlack: "#94a3b8", brightRed: "#f87171",
+            brightGreen: "#4ade80", brightYellow: "#facc15",
+            brightBlue: "#60a5fa", brightMagenta: "#c084fc",
+            brightCyan: "#22d3ee", brightWhite: "#0f172a",
           },
           cursorBlink: true,
           cursorStyle: "bar",
@@ -62,18 +50,13 @@ export default function TerminalPanel() {
         term.loadAddon(fitAddon);
         term.open(terminalRef.current);
 
-        // Delay fit to let DOM settle
         setTimeout(() => {
           try { fitAddon.fit(); } catch {}
         }, 100);
 
-        xtermRef.current = {
-          term,
-          fitAddon,
-          sessionId: null,
-        };
+        xtermRef.current = { term, fitAddon, sessionId: null };
 
-        // If Electron terminal is available, hook it up
+        // Electron PTY bridge
         const electronAPI = window.electronAPI;
         if (electronAPI) {
           electronAPI.terminalCreate().then((sess) => {
@@ -94,14 +77,8 @@ export default function TerminalPanel() {
           if (ref?.sessionId && window.electronAPI) {
             window.electronAPI.terminalWrite(ref.sessionId, data);
           } else {
-            // Fallback: handle locally
-            if (data === "\r") {
-              term.write("\r\n$ ");
-            } else if (data === "") {
-              // backspace handled by PTY in real mode
-            } else {
-              term.write(data);
-            }
+            if (data === "\r") term.write("\r\n$ ");
+            else term.write(data);
           }
         });
 
@@ -120,15 +97,13 @@ export default function TerminalPanel() {
         setXtermReady(true);
 
         term.writeln("Cyber Agent IDE Terminal");
-        term.writeln("终端已就绪。");
         if (!window.electronAPI) {
-          term.writeln("(Electron 环境未检测到 — 使用本地回显模式)");
+          term.writeln("(Electron 环境未检测到)");
         }
+        term.writeln("");
         term.write("$ ");
 
-        return () => {
-          resizeObserver.disconnect();
-        };
+        return () => { resizeObserver.disconnect(); };
       } catch (err) {
         console.error("xterm init failed:", err);
       }
@@ -141,57 +116,25 @@ export default function TerminalPanel() {
       xtermRef.current?.term.dispose();
       xtermRef.current = null;
     };
-  }, []);
-
-  const addTab = () => {
-    const id = `term-${tabs.length + 1}`;
-    setTabs([...tabs, { id, title: "bash" }]);
-    setActiveTab(id);
-  };
-
-  const removeTab = (id: string) => {
-    setTabs(tabs.filter((t) => t.id !== id));
-    if (activeTab === id) setActiveTab(tabs[0]?.id || "term-1");
-  };
+  }, [sessionKey]);
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "transparent" }}>
-      {/* Tab bar */}
-      <div className="glass-surface" style={{
-        display: "flex", alignItems: "center", flexShrink: 0,
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-      }}>
-        {tabs.map((tab) => (
-          <div
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              display: "flex", alignItems: "center", gap: 4,
-              padding: "4px 12px", fontSize: 12, cursor: "pointer",
-              color: tab.id === activeTab ? "var(--text-primary)" : "var(--text-tertiary)",
-              background: tab.id === activeTab ? "var(--glass-fill-active)" : "transparent",
-              borderRight: "1px solid rgba(255,255,255,0.05)",
-              transition: "background 150ms ease",
-            }}
-          >
-            <TerminalIcon size={11} />
-            <span>{tab.title}</span>
-            {tabs.length > 1 && (
-              <X size={11} style={{ cursor: "pointer" }} onClick={(e) => { e.stopPropagation(); removeTab(tab.id); }} />
-            )}
-          </div>
-        ))}
-        <button className="glass-btn" style={{ padding: "2px 8px", margin: "2px 4px" }} onClick={addTab}>
-          <Plus size={12} />
-        </button>
-        {!xtermReady && (
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginLeft: 8 }}>
-            加载中...
+      {/* Only show internal tab bar when NOT standalone */}
+      {!standalone && (
+        <div className="glass-surface" style={{
+          display: "flex", alignItems: "center", flexShrink: 0, padding: "2px 8px", gap: 4,
+          borderBottom: "1px solid rgba(0,0,0,0.05)",
+        }}>
+          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+            终端
           </span>
-        )}
-      </div>
-      {/* Terminal container */}
-      <div ref={terminalRef} style={{ flex: 1, padding: "4px" }} />
+          {!xtermReady && (
+            <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>加载中...</span>
+          )}
+        </div>
+      )}
+      <div ref={terminalRef} style={{ flex: 1, padding: standalone ? "6px" : "4px" }} />
     </div>
   );
 }
