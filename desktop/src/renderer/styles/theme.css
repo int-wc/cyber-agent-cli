@@ -1,52 +1,52 @@
-/* ── Cyber Agent IDE Theme ── */
+/* ── Cyber Agent IDE — Apple Liquid Glass Light Theme ── */
 
 :root {
-  /* Deep base */
-  --bg-base: #0a0a0f;
-  --bg-elevated: #111118;
-  --bg-overlay: #181828;
-  --bg-surface: #14141e;
+  /* Light base */
+  --bg-base: #f0f0f5;
+  --bg-elevated: #f8f8fd;
+  --bg-overlay: #ffffff;
+  --bg-surface: #fafafe;
 
-  /* Glass */
-  --glass-fill: rgba(255, 255, 255, 0.04);
-  --glass-fill-hover: rgba(255, 255, 255, 0.08);
-  --glass-fill-active: rgba(255, 255, 255, 0.12);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-border-hover: rgba(255, 255, 255, 0.15);
+  /* Glass — white translucent */
+  --glass-fill: rgba(255, 255, 255, 0.45);
+  --glass-fill-hover: rgba(255, 255, 255, 0.65);
+  --glass-fill-active: rgba(255, 255, 255, 0.80);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-border-hover: rgba(0, 0, 0, 0.10);
   --glass-blur: 24px;
   --glass-blur-heavy: 48px;
   --glass-saturate: 1.8;
 
-  /* Accent - Purple */
-  --accent: #6c5ce7;
-  --accent-soft: rgba(108, 92, 231, 0.15);
-  --accent-glow: rgba(108, 92, 231, 0.4);
-  --accent-light: #a29bfe;
+  /* Accent — Soft purple (Apple style) */
+  --accent: #7c6ff7;
+  --accent-soft: rgba(124, 111, 247, 0.10);
+  --accent-glow: rgba(124, 111, 247, 0.25);
+  --accent-light: #9b8ffb;
 
-  /* Semantic colors */
-  --blue: #4fc3f7;
-  --green: #69f0ae;
-  --orange: #ffab40;
-  --red: #ff5252;
-  --yellow: #ffd740;
+  /* Semantic */
+  --blue: #3b82f6;
+  --green: #22c55e;
+  --orange: #f59e0b;
+  --red: #ef4444;
+  --yellow: #eab308;
 
-  /* Text */
-  --text-primary: rgba(255, 255, 255, 0.90);
-  --text-secondary: rgba(255, 255, 255, 0.60);
-  --text-tertiary: rgba(255, 255, 255, 0.35);
-  --text-accent: #a29bfe;
+  /* Text — dark for light bg */
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.58);
+  --text-tertiary: rgba(0, 0, 0, 0.32);
+  --text-accent: #7c6ff7;
 
-  /* Shadows */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 8px 32px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 16px 64px rgba(0, 0, 0, 0.5);
-  --shadow-glow: 0 0 20px -4px var(--accent-glow);
+  /* Shadows — soft and elevated */
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 24px -4px var(--accent-glow);
 
   /* Radius */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
 
   /* Easing */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -68,7 +68,7 @@
 .text-lg { font-size: 16px; line-height: 1.6; }
 .text-xl { font-size: 20px; line-height: 1.4; }
 
-/* ── Utility: Layout ── */
+/* ── Utility ── */
 .flex { display: flex; }
 .flex-col { flex-direction: column; }
 .flex-1 { flex: 1; }
@@ -84,13 +84,6 @@
 .p-4 { padding: 16px; }
 .px-3 { padding-left: 12px; padding-right: 12px; }
 .py-2 { padding-top: 8px; padding-bottom: 8px; }
-
-/* ── Utility: Display ── */
-.truncate {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .overflow-auto { overflow: auto; }
 .overflow-hidden { overflow: hidden; }

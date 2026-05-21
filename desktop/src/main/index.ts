@@ -28,7 +28,7 @@ async function createWindow(backendPort: number) {
     title: "Cyber Agent IDE",
     titleBarStyle: "hidden",
     frame: false,
-    backgroundColor: "#0a0a0f",
+    backgroundColor: "#f0f0f5",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

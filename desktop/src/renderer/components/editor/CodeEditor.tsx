@@ -5,29 +5,29 @@ import { X } from "lucide-react";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 
-// Monaco dark theme matching Liquid Glass design
+// Apple Liquid Glass light editor theme
 const MONACO_THEME = {
-  base: "vs-dark" as const,
+  base: "vs" as const,
   inherit: true,
   rules: [
-    { token: "comment", foreground: "6A9955", fontStyle: "italic" },
-    { token: "keyword", foreground: "C586C0" },
-    { token: "string", foreground: "CE9178" },
-    { token: "number", foreground: "B5CEA8" },
-    { token: "type", foreground: "4EC9B0" },
-    { token: "function", foreground: "DCDCAA" },
-    { token: "variable", foreground: "9CDCFE" },
+    { token: "comment", foreground: "8c8c8c", fontStyle: "italic" },
+    { token: "keyword", foreground: "7c6ff7" },
+    { token: "string", foreground: "22c55e" },
+    { token: "number", foreground: "f59e0b" },
+    { token: "type", foreground: "3b82f6" },
+    { token: "function", foreground: "7c6ff7" },
+    { token: "variable", foreground: "1e293b" },
   ],
   colors: {
-    "editor.background": "#0a0a0f",
-    "editor.foreground": "#d4d4d4",
-    "editor.lineHighlightBackground": "#ffffff08",
-    "editor.selectionBackground": "#6c5ce740",
-    "editor.inactiveSelectionBackground": "#6c5ce720",
-    "editorCursor.foreground": "#a29bfe",
-    "editorLineNumber.foreground": "#ffffff30",
-    "editorLineNumber.activeForeground": "#a29bfe",
-    "editor.selectionHighlightBackground": "#ffffff08",
+    "editor.background": "#f8f8fc99",
+    "editor.foreground": "#1e293b",
+    "editor.lineHighlightBackground": "#7c6ff712",
+    "editor.selectionBackground": "#7c6ff725",
+    "editor.inactiveSelectionBackground": "#7c6ff712",
+    "editorCursor.foreground": "#7c6ff7",
+    "editorLineNumber.foreground": "#94a3b8",
+    "editorLineNumber.activeForeground": "#7c6ff7",
+    "editor.selectionHighlightBackground": "#7c6ff710",
   },
 };
 
