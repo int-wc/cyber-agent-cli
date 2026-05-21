@@ -16,7 +16,7 @@ import FileContextMenu, {
 function FileTreeNode({ entry, depth, onSelect, selectedPath, onSelectPath, onRefresh, onNewFile, onNewFolder, onRename, onDelete }: {
   entry: FileEntry;
   depth: number;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, content: string) => void;
   selectedPath: string | null;
   onSelectPath: (p: string) => void;
   onRefresh: () => void;
@@ -52,8 +52,10 @@ function FileTreeNode({ entry, depth, onSelect, selectedPath, onSelectPath, onRe
     } else {
       try {
         const res = await fsApi.read(entry.path);
-        onSelect(entry.path);
-      } catch { /* ignore */ }
+        onSelect(entry.path, res.content);
+      } catch (err) {
+        console.error("读取文件失败:", entry.path, err);
+      }
     }
   }, [entry, expanded, loadChildren, onSelect, onSelectPath]);
 
@@ -307,11 +309,8 @@ export default function Sidebar() {
     }
   }, [loadRoot]);
 
-  const handleSelect = useCallback(async (path: string) => {
-    try {
-      const res = await fsApi.read(path);
-      openFile(path, res.content);
-    } catch { /* ignore */ }
+  const handleSelect = useCallback((path: string, content: string) => {
+    openFile(path, content);
   }, [openFile]);
 
   // ── File operations ──
