@@ -16,6 +16,57 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     pass
 
+# ── ANSI 颜色 ──
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_MAGENTA = "\033[35m"
+_CYAN = "\033[36m"
+_WHITE = "\033[37m"
+_BRIGHT_BLACK = "\033[90m"
+_BRIGHT_RED = "\033[91m"
+_BRIGHT_GREEN = "\033[92m"
+_BRIGHT_YELLOW = "\033[93m"
+_BRIGHT_BLUE = "\033[94m"
+_BRIGHT_MAGENTA = "\033[95m"
+_BRIGHT_CYAN = "\033[96m"
+_BRIGHT_WHITE = "\033[97m"
+
+
+def _c(color: str, text: str) -> str:
+    """用 ANSI 颜色包裹文本。"""
+    return f"{color}{text}{_RESET}"
+
+
+def _ok(text: str = "✓") -> str:
+    return _c(_GREEN, text)
+
+
+def _err(text: str = "✗") -> str:
+    return _c(_RED, text)
+
+
+def _warn(text: str) -> str:
+    return _c(_YELLOW, text)
+
+
+def _info(text: str) -> str:
+    return _c(_CYAN, text)
+
+
+def _label(text: str) -> str:
+    return _c(_DIM, text)
+
+
+def _ide() -> str:
+    return _c(_BRIGHT_MAGENTA, "[IDE]")
+
+
 # ── 常量 ──
 
 DEFAULT_IDE_HOST = "127.0.0.1"
@@ -152,23 +203,36 @@ def detect_environment() -> EnvReport:
 
 def print_env_report(env: EnvReport) -> None:
     """打印环境检测报告。"""
-    print("╔══════════════════════════════════════╗")
-    print("║   Cyber Agent IDE — 环境检测         ║")
-    print("╚══════════════════════════════════════╝")
-    print(f"  系统:        {env.os_name}")
-    print(f"  Python:      {sys.version.split()[0]}")
-    print(f"  Node.js:     {env.node_version or '❌ 未安装'}")
-    print(f"  npm:         {env.npm_version or '❌ 未安装'}")
-    print(f"  desktop/:    {'✓' if env.desktop_dir.exists() else '✗ 不存在'}")
-    print(f"  依赖:        {'✓ 已安装' if env.node_modules_exists else '○ 待安装'}")
-    print(f"  Electron:    {env.electron_bin or '○ 待安装'}")
-    print(f"  Vite Dev:    {'✓ 运行中' if env.vite_dev_server_running else '○ 未启动'}")
+    box_top = _c(_BRIGHT_CYAN, "╔══════════════════════════════════════╗")
+    box_mid = _c(_BRIGHT_CYAN, "║")
+    box_bot = _c(_BRIGHT_CYAN, "╚══════════════════════════════════════╝")
+    title = _c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE — 环境检测")
+
+    print(box_top)
+    print(f"{box_mid}   {title}{' ' * (23 - len('Cyber Agent IDE — 环境检测'))} {box_mid}")
+    print(box_bot)
+
+    def _row(key: str, value: str) -> None:
+        print(f"  {_label(key + ':').ljust(16)} {value}")
+
+    _row("系统", _c(_BRIGHT_WHITE, env.os_name))
+    _row("Python", _c(_BRIGHT_WHITE, sys.version.split()[0]))
+    _row("Node.js", _c(_BRIGHT_WHITE, env.node_version) if env.node_version else _err("❌ 未安装"))
+    _row("npm", _c(_BRIGHT_WHITE, env.npm_version) if env.npm_version else _err("❌ 未安装"))
+    _row("desktop/", _ok("✓ 存在") if env.desktop_dir.exists() else _err("✗ 不存在"))
+    _row("依赖", _ok("✓ 已安装") if env.node_modules_exists else _warn("○ 待安装"))
+    _row("Electron",
+          _c(_BRIGHT_WHITE, str(env.electron_bin)) if env.electron_bin
+          else _warn("○ 待安装"))
+    _row("Vite Dev",
+          _ok("✓ 运行中") if env.vite_dev_server_running
+          else _label("○ 未启动"))
     if env.warnings:
         for w in env.warnings:
-            print(f"  ⚠ {w}")
+            print(f"  {_warn('⚠')} {_warn(w)}")
     if env.errors:
         for e in env.errors:
-            print(f"  ✗ {e}")
+            print(f"  {_err('✗')} {_err(e)}")
     print()
 
 
@@ -177,16 +241,16 @@ def print_env_report(env: EnvReport) -> None:
 def install_dependencies(env: EnvReport, force: bool = False) -> bool:
     """Phase 2: 自动安装前端依赖 (npm install)。"""
     if env.node_modules_exists and not force:
-        print("[IDE] 依赖已安装，跳过 npm install。")
+        print(f"{_ide()} {_ok('✓')} 依赖已安装，跳过 npm install。")
         return True
 
     if not env.npm_bin:
-        print("[IDE] ✗ 未找到 npm，无法安装依赖。")
+        print(f"{_ide()} {_err('✗')} 未找到 npm，无法安装依赖。")
         return False
 
-    print(f"[IDE] 正在安装前端依赖...")
-    print(f"[IDE] 目录: {env.desktop_dir}")
-    print(f"[IDE] 这可能需要几分钟（首次安装需下载 Electron ~180MB）...")
+    print(f"{_ide()} 正在安装前端依赖...")
+    print(f"{_ide()} 目录: {_c(_CYAN, str(env.desktop_dir))}")
+    print(f"{_ide()} 这可能需要几分钟（{_label('首次安装需下载 Electron ~180MB')}）...")
 
     try:
         result = subprocess.run(
@@ -204,14 +268,14 @@ def install_dependencies(env: EnvReport, force: bool = False) -> bool:
             },
         )
         if result.returncode != 0:
-            print("[IDE] ✗ npm install 失败。")
-            print("[IDE] 请手动执行: cd desktop && npm install")
+            print(f"{_ide()} {_err('✗')} npm install 失败。")
+            print(f"{_ide()} 请手动执行: {_c(_CYAN, 'cd desktop && npm install')}")
             return False
     except subprocess.TimeoutExpired:
-        print("[IDE] ✗ npm install 超时。请手动执行: cd desktop && npm install")
+        print(f"{_ide()} {_err('✗')} npm install 超时。请手动执行: {_c(_CYAN, 'cd desktop && npm install')}")
         return False
     except FileNotFoundError:
-        print("[IDE] ✗ 未找到 npm。")
+        print(f"{_ide()} {_err('✗')} 未找到 npm。")
         return False
 
     # 验证安装
@@ -223,7 +287,7 @@ def install_dependencies(env: EnvReport, force: bool = False) -> bool:
             if electron.exists():
                 env.electron_bin = str(electron)
 
-    print("[IDE] ✓ 依赖安装完成。")
+    print(f"{_ide()} {_ok('✓')} 依赖安装完成。")
     return True
 
 
@@ -290,7 +354,7 @@ def _wait_backend_ready(host: str, port: int) -> int:
 
     # 先等 uvicorn started 事件
     if not _backend_ready.wait(timeout=BACKEND_STARTUP_TIMEOUT):
-        print("[IDE] ✗ 后端服务器启动超时（uvicorn 未就绪）。")
+        print(f"{_ide()} {_err('✗')} 后端服务器启动超时（uvicorn 未就绪）。")
         return 0
 
     # 再通过 HTTP 健康检查确认 AgentRunner 已就绪
@@ -306,7 +370,7 @@ def _wait_backend_ready(host: str, port: int) -> int:
             pass
         time.sleep(HEALTH_POLL_INTERVAL)
 
-    print("[IDE] ✗ 后端启动超时（HTTP 健康检查未通过）。")
+    print(f"{_ide()} {_err('✗')} 后端启动超时（HTTP 健康检查未通过）。")
     return 0
 
 
@@ -400,35 +464,43 @@ def launch_ide(
     Returns:
         进程退出码 (0 = 正常退出)
     """
+    # ── 启动横幅 ──
+    box_line = _c(_BRIGHT_CYAN, "╔══════════════════════════════════════╗")
+    box_mid  = _c(_BRIGHT_CYAN, "║")
+    box_line2 = _c(_BRIGHT_CYAN, "╚══════════════════════════════════════╝")
+    name = _c(_BOLD + _BRIGHT_WHITE, "Cyber Agent IDE")
+    glass = _c(_BRIGHT_CYAN, "Liquid Glass · 一键启动")
+
     print()
-    print("╔══════════════════════════════════════╗")
-    print("║   Cyber Agent IDE                     ║")
-    print("║   Liquid Glass · 一键启动              ║")
-    print("╚══════════════════════════════════════╝")
+    print(box_line)
+    print(f"{box_mid}   {name}{' ' * (24 - len('Cyber Agent IDE'))} {box_mid}")
+    print(f"{box_mid}   {glass}{' ' * (22 - len('Liquid Glass · 一键启动'))} {box_mid}")
+    print(box_line2)
     print()
 
     # ── Phase 1: 环境检测 ──
-    print("[1/4] 环境检测...")
+    print(f" {_c(_BOLD + _BRIGHT_BLUE, '[1/4]')} {_c(_BRIGHT_WHITE, '环境检测')}...")
     env = detect_environment()
     print_env_report(env)
 
     if env.errors:
-        print("[IDE] ✗ 环境检测失败，请修复上述错误后重试。")
+        print(f"{_ide()} {_err('✗')} {_err('环境检测失败，请修复上述错误后重试。')}")
         return 1
 
     # ── Phase 2: 依赖安装 ──
     if not skip_install and not env.node_modules_exists:
-        print("[2/4] 安装前端依赖...")
+        print(f" {_c(_BOLD + _BRIGHT_BLUE, '[2/4]')} {_c(_BRIGHT_WHITE, '安装前端依赖')}...")
         if not install_dependencies(env):
-            print("[IDE] ✗ 依赖安装失败。")
+            print(f"{_ide()} {_err('✗')} {_err('依赖安装失败。')}")
             return 1
         # 刷新检测结果
         env = detect_environment()
     else:
-        print(f"[2/4] 依赖: {'✓ 已安装' if env.node_modules_exists else '○ 已跳过'}")
+        status = _ok("✓ 已安装") if env.node_modules_exists else _label("○ 已跳过")
+        print(f" {_c(_BOLD + _BRIGHT_BLUE, '[2/4]')} {_c(_BRIGHT_WHITE, '依赖')}: {status}")
 
     # ── Phase 3: 启动后端 ──
-    print("[3/4] 启动后端服务器...")
+    print(f" {_c(_BOLD + _BRIGHT_BLUE, '[3/4]')} {_c(_BRIGHT_WHITE, '启动后端服务器')}...")
     backend_port = _start_backend_in_thread(
         host=DEFAULT_IDE_HOST,
         mode=mode,
@@ -439,23 +511,24 @@ def launch_ide(
     )
 
     if backend_port == 0:
-        print("[IDE] ✗ 后端启动失败。")
+        print(f"{_ide()} {_err('✗')} {_err('后端启动失败。')}")
         return 1
 
-    print(f"[IDE] ✓ 后端就绪: http://{DEFAULT_IDE_HOST}:{backend_port}")
+    backend_url = _c(_BRIGHT_CYAN, f"http://{DEFAULT_IDE_HOST}:{backend_port}")
+    print(f"{_ide()} {_ok('✓')} 后端就绪: {backend_url}")
 
     # ── Phase 4: 启动前端 ──
-    print("[4/4] 启动前端...")
+    print(f" {_c(_BOLD + _BRIGHT_BLUE, '[4/4]')} {_c(_BRIGHT_WHITE, '启动前端')}...")
 
     is_dev = dev or (not (env.desktop_dir / "dist" / "renderer" / "index.html").exists())
 
     if is_dev:
         # 开发模式：检测 Vite 是否在运行
         if not env.vite_dev_server_running:
-            print("[IDE] 开发模式: 启动 Vite 开发服务器...")
-            print(f"[IDE] 请在另一个终端执行: cd {env.desktop_dir} && npx vite")
-            print(f"[IDE] 后端运行中: http://{DEFAULT_IDE_HOST}:{backend_port}")
-            print("[IDE] 按 Ctrl+C 退出...")
+            print(f"{_ide()} {_warn('开发模式')}: 启动 Vite 开发服务器...")
+            print(f"{_ide()} 请在另一个终端执行: {_c(_CYAN, f'cd {env.desktop_dir} && npx vite')}")
+            print(f"{_ide()} 后端运行中: {backend_url}")
+            print(f"{_ide()} {_label('按 Ctrl+C 退出...')}")
             try:
                 while True:
                     time.sleep(1)
@@ -465,7 +538,7 @@ def launch_ide(
     # 查找 Electron
     electron_bin = _find_electron(env)
     if not electron_bin or electron_bin == "npx":
-        print("[IDE] 未找到 Electron，尝试 npx electron...")
+        print(f"{_ide()} 未找到 Electron，尝试 {_c(_CYAN, 'npx electron')}...")
         electron_bin = "npx"
         electron_args = ["electron"]
     else:
@@ -479,9 +552,9 @@ def launch_ide(
 
     electron_env = _build_electron_env(backend_port)
 
-    print(f"[IDE] 启动 Electron...")
-    print(f"[IDE] 后端: http://{DEFAULT_IDE_HOST}:{backend_port}")
-    print(f"[IDE] 按 Ctrl+C 退出。")
+    print(f"{_ide()} 启动 Electron...")
+    print(f"{_ide()} 后端: {backend_url}")
+    print(f"{_ide()} {_label('按 Ctrl+C 退出。')}")
     print()
 
     try:
@@ -494,10 +567,10 @@ def launch_ide(
         exit_code = electron_process.wait()
         return exit_code
     except FileNotFoundError:
-        print(f"[IDE] ✗ 未找到 Electron。请运行: cd desktop && npm install")
+        print(f"{_ide()} {_err('✗')} 未找到 Electron。请运行: {_c(_CYAN, 'cd desktop && npm install')}")
         return 1
     except KeyboardInterrupt:
-        print("\n[IDE] 正在退出...")
+        print(f"\n{_ide()} {_label('正在退出...')}")
         return 0
 
 
