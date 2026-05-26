@@ -40,7 +40,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             allowed_dir = Path.cwd() / "allowed root"
             allowed_dir.mkdir()
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [],
@@ -111,7 +111,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 source_session_id="source-root",
             )
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [],
@@ -151,7 +151,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 approval_policy="auto",
             )
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [],
@@ -248,7 +248,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
                 approval_policy="auto",
             )
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [],
@@ -269,7 +269,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         """
         cli_runner = CliRunner()
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             result = cli_runner.invoke(
                 app,
                 ["--mode", "authorized", "--approval-policy", "auto"],
@@ -286,7 +286,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         """
         cli_runner = CliRunner()
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             with patch(
                 "cyber_agent.cli.tui.launch_textual_chat",
                 side_effect=AssertionError("不应启动 TUI"),
@@ -310,7 +310,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         with (
             patch.object(settings, "gateway_base_url", "http://127.0.0.1:8317/v1"),
-            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI),
         ):
             result = cli_runner.invoke(
                 app,
@@ -345,7 +345,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             patch.object(settings, "gateway_base_url", "http://127.0.0.1:8317/v1"),
             patch.object(settings, "deepseek_base_url", None),
             patch("cyber_agent.cli.app._get_settings", return_value=settings),
-            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI),
         ):
             result = cli_runner.invoke(
                 app,
@@ -363,7 +363,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         """
         cli_runner = CliRunner()
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             with patch("cyber_agent.cli.tui.launch_textual_chat") as mock_launch:
                 result = cli_runner.invoke(app, ["--ui", "tui"])
 
@@ -389,7 +389,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         cli_runner = CliRunner()
         with TemporaryDirectory() as temp_dir:
             tool_spec = f"python={Path(sys.executable).resolve()}"
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [
@@ -425,7 +425,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         """
         cli_runner = CliRunner()
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             result = cli_runner.invoke(app, ["doctor", "--json"])
 
         self.assertEqual(result.exit_code, 0)
@@ -445,10 +445,10 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         import_error = ModuleNotFoundError("No module named 'langchain_openai'")
 
         with (
-            patch("cyber_agent.agent.runner.ChatOpenAI", None),
-            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
-            patch("cyber_agent.capability_registry.ChatOpenAI", None),
-            patch("cyber_agent.capability_registry.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", None),
+            patch("cyber_agent._lazy_imports.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", None),
+            patch("cyber_agent._lazy_imports.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
         ):
             result = cli_runner.invoke(app, ["doctor"])
 
@@ -529,10 +529,10 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         import_error = ModuleNotFoundError("No module named 'langchain_openai'")
 
         with (
-            patch("cyber_agent.agent.runner.ChatOpenAI", None),
-            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
-            patch("cyber_agent.capability_registry.ChatOpenAI", None),
-            patch("cyber_agent.capability_registry.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", None),
+            patch("cyber_agent._lazy_imports.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", None),
+            patch("cyber_agent._lazy_imports.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
         ):
             result = cli_runner.invoke(app, ["run", "hello"])
 
@@ -565,7 +565,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
             allowed_dir.mkdir()
             local_config_path = working_directory / ".cyber-agent-cli.json"
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
                 first_result = cli_runner.invoke(
                     app,
                     [],

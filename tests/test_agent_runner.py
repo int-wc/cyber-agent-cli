@@ -391,7 +391,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             tool_inputs.append(text)
             return f"processed:{text}"
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             first_response = runner.run("first", verbose=False)
             second_response = runner.run("second", verbose=False)
@@ -421,7 +421,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             if event_type == "response_token":
                 token_events.append(str(payload))
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             response = runner.run(
                 "first",
@@ -447,7 +447,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             if runner is not None and len(token_events) == 1:
                 runner.execution_controller.request_stop("测试中主动停止")
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", InterruptibleFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", InterruptibleFakeChatOpenAI):
             runner = AgentRunner([])
             with self.assertRaises(ExecutionInterruptedError):
                 runner.run(
@@ -462,7 +462,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         """
         测试：切换模式后应更新模式并重置上下文。
         """
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner([], mode=AgentMode.STANDARD)
             runner.history.append(HumanMessage(content="keep"))
             runner.switch_mode(AgentMode.AUTHORIZED)
@@ -476,7 +476,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         """
         测试：当完整历史超过上下文阈值时，会保留最近消息并插入压缩摘要。
         """
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner(
                 [],
                 max_context_chars=80,
@@ -510,7 +510,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         """
         测试：压缩边界若落在工具回合中间，应自动前移，避免模型上下文里留下孤立 ToolMessage。
         """
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner(
                 [],
                 max_context_chars=40,
@@ -549,7 +549,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         CapturingFinalFakeChatOpenAI.last_messages = []
         huge_input = "x" * 5000
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", CapturingFinalFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", CapturingFinalFakeChatOpenAI):
             runner = AgentRunner(
                 [],
                 max_context_chars=10_000_000,
@@ -570,7 +570,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         """
         测试：需要压缩的历史本身已超过模型预算时，不再调用模型摘要器。
         """
-        with patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
             runner = AgentRunner(
                 [],
                 max_context_chars=10_000_000,
@@ -613,7 +613,7 @@ class AgentRunnerTestCase(unittest.TestCase):
                 "cyber_agent.agent.runner.settings.gateway_base_url",
                 "http://127.0.0.1:8317/v1",
             ),
-            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI),
         ):
             runner = AgentRunner(
                 [],
@@ -666,7 +666,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             """回显文本。"""
             return f"processed:{text}"
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", LongSequenceFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", LongSequenceFakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             response = runner.run("请执行一个较长的工具链", verbose=False)
 
@@ -682,7 +682,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             """回显文本。"""
             return f"processed:{text}"
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", RepeatedLoopFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", RepeatedLoopFakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             with self.assertRaises(RuntimeError) as captured:
                 runner.run("进入循环", verbose=False)
@@ -704,7 +704,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             tool_inputs.append(text)
             return f"processed:{text}"
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", TransientStreamStartErrorFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", TransientStreamStartErrorFakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             response = runner.run("请继续", verbose=False)
 
@@ -733,7 +733,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             if event_type == "response_retry":
                 retry_events.append(payload)
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", EmptyFinalReplyFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", EmptyFinalReplyFakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             response = runner.run(
                 "请执行后总结",
@@ -760,7 +760,7 @@ class AgentRunnerTestCase(unittest.TestCase):
             tool_inputs.append(text)
             return f"processed:{text}"
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", AlwaysEmptyFinalReplyFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", AlwaysEmptyFinalReplyFakeChatOpenAI):
             runner = AgentRunner([echo_tool])
             with self.assertRaises(RuntimeError) as captured:
                 runner.run("请执行后总结", verbose=False)
@@ -785,7 +785,7 @@ class AgentRunnerTestCase(unittest.TestCase):
         def reject_all(tool, tool_call):
             return ApprovalDecision(False, "测试中拒绝所有写入。")
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", ApprovalFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", ApprovalFakeChatOpenAI):
             runner = AgentRunner([write_text_file])
             response = runner.run(
                 "请写文件",
@@ -804,8 +804,8 @@ class AgentRunnerTestCase(unittest.TestCase):
         import_error = ModuleNotFoundError("No module named 'langchain_openai'")
 
         with (
-            patch("cyber_agent.agent.runner.ChatOpenAI", None),
-            patch("cyber_agent.agent.runner.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", None),
+            patch("cyber_agent._lazy_imports.LANGCHAIN_OPENAI_IMPORT_ERROR", import_error),
         ):
             runner = AgentRunner([])
 

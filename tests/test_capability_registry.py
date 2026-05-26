@@ -259,7 +259,7 @@ def handle_request(request: str, context: str) -> str:
                 execution_controller=execution_controller,
             )
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", NoopChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", NoopChatOpenAI):
                 runner = AgentRunner(
                     get_default_tools(
                         execution_controller=execution_controller,

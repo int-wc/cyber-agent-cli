@@ -211,7 +211,7 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
         测试：TUI 捕获内建命令输出时，会保留 CLI 原始 Rich 面板而不是退化成纯字符串。
         """
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", PassiveFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", PassiveFakeChatOpenAI):
             runner = AgentRunner([])
 
         result, renderables = capture_builtin_command_renderables("/help", runner, {})
@@ -232,7 +232,7 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
         测试：交互式启动在真实终端中会先清屏，再显示启动页。
         """
 
-        with patch("cyber_agent.agent.runner.ChatOpenAI", PassiveFakeChatOpenAI):
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", PassiveFakeChatOpenAI):
             runner = AgentRunner([])
 
         ordered_calls: list[str] = []

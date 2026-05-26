@@ -21,6 +21,7 @@ from ..agent.approval import (
     get_approval_policy_label,
     parse_approval_policy,
 )
+from ..agent.events import AgentEventType
 from ..agent.mode import AgentMode, get_mode_label, parse_agent_mode
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..local_config import (
@@ -1094,41 +1095,41 @@ def _consume_stop_input_nonblocking(
 
 def render_agent_event(event_type: str, payload: object) -> None:
     """将运行器事件映射为富文本展示。"""
-    if event_type == "turn_start":
+    if event_type == AgentEventType.TURN_START:
         renderer.print_turn_start()
         return
-    if event_type == "response_begin":
+    if event_type == AgentEventType.RESPONSE_BEGIN:
         renderer.begin_response_stream()
         return
-    if event_type == "reasoning_token":
+    if event_type == AgentEventType.REASONING_TOKEN:
         renderer.append_reasoning_token(str(payload))
         return
-    if event_type == "response_token":
+    if event_type == AgentEventType.RESPONSE_TOKEN:
         renderer.append_response_token(str(payload))
         return
-    if event_type == "response_end":
+    if event_type == AgentEventType.RESPONSE_END:
         if isinstance(payload, dict):
             renderer.end_response_stream(
                 str(payload.get("content", "")),
                 bool(payload.get("has_tool_calls", False)),
             )
         return
-    if event_type == "tool_call":
+    if event_type == AgentEventType.TOOL_CALL:
         renderer.print_tool_call(payload if isinstance(payload, list) else [])
         return
-    if event_type == "approval_request":
+    if event_type == AgentEventType.APPROVAL_REQUEST:
         if isinstance(payload, dict):
             renderer.print_approval_request(payload)
         return
-    if event_type == "approval_result":
+    if event_type == AgentEventType.APPROVAL_RESULT:
         if isinstance(payload, dict):
             renderer.print_approval_result(payload)
         return
-    if event_type == "turn_end":
+    if event_type == AgentEventType.TURN_END:
         if isinstance(payload, dict):
             renderer.print_token_usage(payload)
         return
-    if event_type == "tool_result":
+    if event_type == AgentEventType.TOOL_RESULT:
         if isinstance(payload, dict):
             renderer.print_tool_result(str(payload.get("content", "")))
         else:

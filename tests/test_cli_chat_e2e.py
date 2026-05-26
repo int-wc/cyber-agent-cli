@@ -131,7 +131,7 @@ class CliChatE2ETestCase(unittest.TestCase):
         cli_runner = CliRunner()
 
         with (
-            patch("cyber_agent.agent.runner.ChatOpenAI", FakeChatOpenAI),
+            patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI),
             patch("cyber_agent.tools.security.socket.socket", FakeSocket),
         ):
             result = cli_runner.invoke(app, [], input="扫描一下 127.0.0.1 80\nquit\n")
@@ -162,7 +162,7 @@ class CliChatE2ETestCase(unittest.TestCase):
             target_path = Path(temp_dir) / "approval-note.txt"
             ApprovalCliFakeChatOpenAI.target_path = target_path
 
-            with patch("cyber_agent.agent.runner.ChatOpenAI", ApprovalCliFakeChatOpenAI):
+            with patch("cyber_agent._lazy_imports.ChatOpenAI", ApprovalCliFakeChatOpenAI):
                 result = cli_runner.invoke(
                     app,
                     [

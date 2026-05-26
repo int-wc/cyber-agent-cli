@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
+from .._lazy_imports import load_chat_openai
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..openai_compat import (
@@ -16,6 +17,7 @@ from ..openai_compat import (
     prepare_messages_for_openai_compatible_service,
 )
 from .approval import ApprovalDecision
+from .events import AgentEventType
 from .mode import AgentMode, get_mode_system_prompt
 
 if TYPE_CHECKING:
@@ -23,8 +25,6 @@ if TYPE_CHECKING:
 
 AgentEventHandler = Callable[[str, object], None]
 ApprovalHandler = Callable[[BaseTool, dict], ApprovalDecision]
-ChatOpenAI: Any | None = None
-LANGCHAIN_OPENAI_IMPORT_ERROR: ModuleNotFoundError | None = None
 MAX_TOOL_ITERATIONS = 9999
 MAX_IDENTICAL_TOOL_ROUNDS = 3
 MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
@@ -50,26 +50,6 @@ def _load_tool_support():
     from ..tools import get_default_tools, resolve_allowed_roots, resolve_command_registry
 
     return get_default_tools, resolve_allowed_roots, resolve_command_registry
-
-
-def _load_chat_openai() -> Any:
-    """按需导入 ChatOpenAI，避免 CLI 启动阶段加载 OpenAI 全量依赖树。"""
-    global ChatOpenAI, LANGCHAIN_OPENAI_IMPORT_ERROR
-
-    if ChatOpenAI is not None:
-        return ChatOpenAI
-    if LANGCHAIN_OPENAI_IMPORT_ERROR is not None:
-        raise LANGCHAIN_OPENAI_IMPORT_ERROR
-
-    try:
-        from langchain_openai import ChatOpenAI as LoadedChatOpenAI
-    except ModuleNotFoundError as exc:  # pragma: no cover - 是否安装依赖由运行环境决定
-        LANGCHAIN_OPENAI_IMPORT_ERROR = exc
-        raise
-
-    ChatOpenAI = LoadedChatOpenAI
-    LANGCHAIN_OPENAI_IMPORT_ERROR = None
-    return ChatOpenAI
 
 
 def extract_text_content(content: str | list[str | dict]) -> str:
@@ -324,7 +304,7 @@ class AgentRunner:
     def _build_llm(self) -> Any:
         """按当前运行时服务商与模型配置重建模型实例。"""
         try:
-            chat_openai_cls = _load_chat_openai()
+            chat_openai_cls = load_chat_openai()
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "缺少 `langchain_openai` 依赖，当前环境无法创建模型客户端。"
@@ -733,7 +713,7 @@ class AgentRunner:
         llm_with_tools = self._get_llm().bind_tools(self.tools, parallel_tool_calls=False)
 
         if event_handler is not None:
-            event_handler("response_begin", None)
+            event_handler(AgentEventType.RESPONSE_BEGIN, None)
 
         accumulated_chunk: AIMessageChunk | None = None
         for attempt_index in range(1, MAX_MODEL_STREAM_START_ATTEMPTS + 1):
@@ -745,10 +725,10 @@ class AgentRunner:
                     token_text = extract_text_content(chunk.content)
                     reasoning = chunk.additional_kwargs.get("reasoning_content", "")
                     if reasoning and event_handler is not None:
-                        event_handler("reasoning_token", str(reasoning))
+                        event_handler(AgentEventType.REASONING_TOKEN, str(reasoning))
                     if token_text and event_handler is not None:
                         for character in iter_stream_characters(token_text):
-                            event_handler("response_token", character)
+                            event_handler(AgentEventType.RESPONSE_TOKEN, character)
             except ExecutionInterruptedError:
                 raise
             except Exception as exc:
@@ -776,7 +756,7 @@ class AgentRunner:
         usage = _extract_usage_from_chunk(accumulated_chunk)
         if event_handler is not None:
             event_handler(
-                "response_end",
+                AgentEventType.RESPONSE_END,
                 {
                     "content": accumulated_text,
                     "has_tool_calls": has_tool_calls,
@@ -822,7 +802,7 @@ class AgentRunner:
         if self._tool_requires_approval(tool):
             if event_handler is not None:
                 event_handler(
-                    "approval_request",
+                    AgentEventType.APPROVAL_REQUEST,
                     {
                         "tool_name": tool_name,
                         "tool_call": tool_call,
@@ -840,7 +820,7 @@ class AgentRunner:
 
             if event_handler is not None:
                 event_handler(
-                    "approval_result",
+                    AgentEventType.APPROVAL_RESULT,
                     {
                         "tool_name": tool_name,
                         "approved": decision.approved,
@@ -868,7 +848,7 @@ class AgentRunner:
 
         if event_handler is not None:
             event_handler(
-                "tool_result",
+                AgentEventType.TOOL_RESULT,
                 {
                     "tool_name": tool_name,
                     "content": normalized_result,
@@ -898,7 +878,7 @@ class AgentRunner:
         self.execution_controller.begin_run()
         try:
             if event_handler is not None:
-                event_handler("turn_start", {"input": user_input})
+                event_handler(AgentEventType.TURN_START, {"input": user_input})
             elif verbose:
                 print("开始处理用户输入...")
 
@@ -916,7 +896,7 @@ class AgentRunner:
 
                 if ai_message.tool_calls:
                     if event_handler is not None:
-                        event_handler("tool_call", ai_message.tool_calls)
+                        event_handler(AgentEventType.TOOL_CALL, ai_message.tool_calls)
 
                     tool_registry = self._build_tool_registry()
                     round_tool_messages: list[ToolMessage] = []
@@ -950,7 +930,7 @@ class AgentRunner:
                         empty_final_response_retries += 1
                         if event_handler is not None:
                             event_handler(
-                                "response_retry",
+                                AgentEventType.RESPONSE_RETRY,
                                 {
                                     "reason": EMPTY_FINAL_RESPONSE_ERROR,
                                     "attempt": empty_final_response_retries,
@@ -959,7 +939,7 @@ class AgentRunner:
                         continue
                     raise RuntimeError(EMPTY_FINAL_RESPONSE_ERROR)
                 if event_handler is not None and turn_usage:
-                    event_handler("turn_end", turn_usage)
+                    event_handler(AgentEventType.TURN_END, turn_usage)
                 if event_handler is None and verbose:
                     print(f"最终回复: {final_response}")
                 return final_response

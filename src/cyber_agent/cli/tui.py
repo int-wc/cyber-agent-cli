@@ -6,6 +6,7 @@ from typing import Any
 from rich.console import RenderableType
 from rich.text import Text
 
+from ..agent.events import AgentEventType
 from ..execution_control import ExecutionInterruptedError
 from .branding import (
     STARTUP_ANIMATION_DELAY_SECONDS,
@@ -267,17 +268,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             from .app import create_approval_handler, persist_runtime_session
 
             def event_handler(event_type: str, payload: object) -> None:
-                if event_type == "reasoning_token":
+                if event_type == AgentEventType.REASONING_TOKEN:
                     self.call_from_thread(self._append_reasoning, str(payload))
                     return
-                if event_type == "response_begin":
+                if event_type == AgentEventType.RESPONSE_BEGIN:
                     self.call_from_thread(self._flush_reasoning)
                     self.call_from_thread(self._set_assistant_content, "")
                     return
-                if event_type == "response_token":
+                if event_type == AgentEventType.RESPONSE_TOKEN:
                     self.call_from_thread(self._append_assistant_content, str(payload))
                     return
-                if event_type == "response_end" and isinstance(payload, dict):
+                if event_type == AgentEventType.RESPONSE_END and isinstance(payload, dict):
                     content = str(payload.get("content", ""))
                     has_tool_calls = bool(payload.get("has_tool_calls", False))
                     if content and not has_tool_calls:
@@ -286,13 +287,13 @@ if TEXTUAL_IMPORT_ERROR is None:
                     if has_tool_calls:
                         self.call_from_thread(self._set_assistant_content, "正在调用工具...")
                     return
-                if event_type == "tool_call":
+                if event_type == AgentEventType.TOOL_CALL:
                     self.call_from_thread(
                         self._add_renderable,
                         build_tool_call_panel(payload if isinstance(payload, list) else []),
                     )
                     return
-                if event_type == "tool_result":
+                if event_type == AgentEventType.TOOL_RESULT:
                     content = ""
                     if isinstance(payload, dict):
                         content = str(payload.get("content", ""))
@@ -303,19 +304,19 @@ if TEXTUAL_IMPORT_ERROR is None:
                         build_tool_result_panel(content),
                     )
                     return
-                if event_type == "approval_request" and isinstance(payload, dict):
+                if event_type == AgentEventType.APPROVAL_REQUEST and isinstance(payload, dict):
                     self.call_from_thread(
                         self._add_renderable,
                         build_approval_request_panel(payload),
                     )
                     return
-                if event_type == "approval_result" and isinstance(payload, dict):
+                if event_type == AgentEventType.APPROVAL_RESULT and isinstance(payload, dict):
                     self.call_from_thread(
                         self._add_renderable,
                         build_approval_result_panel(payload),
                     )
                     return
-                if event_type == "turn_end" and isinstance(payload, dict):
+                if event_type == AgentEventType.TURN_END and isinstance(payload, dict):
                     self.call_from_thread(self._show_token_usage, payload)
                     return
 
