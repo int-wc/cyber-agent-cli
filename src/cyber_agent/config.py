@@ -7,10 +7,13 @@ DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 # 服务商默认模型。可通过 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖。
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
-    "deepseek": "deepseek-v4-pro",
+    "deepseek": "deepseek-v4-pro[1m]",
     "mimo": "mimo-v2.5-pro",
     "claude": "claude-opus-4-6"
 }
+# DeepSeek V4 Pro [1m] 上下文窗口参数
+DEEPSEEK_MAX_CONTEXT_TOKENS = 1_000_000
+DEEPSEEK_AUTO_COMPACT_WINDOW = 400_000
 
 
 class Settings(BaseSettings):
@@ -20,7 +23,7 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_API_KEY",
     )
     gateway_default_model: str = Field(
-        default="gpt-5.4",
+        default="deepseek-v4-pro[1m]",
         validation_alias="GATEWAY_DEFAULT_MODEL",
     )
     gateway_base_url: str | None = Field(
@@ -70,20 +73,38 @@ class Settings(BaseSettings):
 
     # ── 上下文压缩 ──
     max_context_chars: int = Field(
-        default=14000,
+        default=30000,
         validation_alias="MAX_CONTEXT_CHARS",
     )
     max_context_tokens: int = Field(
-        default=128_000,
+        default=DEEPSEEK_AUTO_COMPACT_WINDOW,
         validation_alias="MAX_CONTEXT_TOKENS",
     )
+    auto_compact_window: int = Field(
+        default=DEEPSEEK_AUTO_COMPACT_WINDOW,
+        validation_alias="AUTO_COMPACT_WINDOW",
+    )
     context_keep_recent_messages: int = Field(
-        default=8,
+        default=12,
         validation_alias="CONTEXT_KEEP_RECENT_MESSAGES",
     )
     context_summary_max_chars: int = Field(
-        default=2000,
+        default=4000,
         validation_alias="CONTEXT_SUMMARY_MAX_CHARS",
+    )
+
+    # ── 多 Agent 架构 ──
+    subagent_model: str = Field(
+        default="deepseek-v4-flash",
+        validation_alias="SUBAGENT_MODEL",
+    )
+    multi_agent_max_workers: int = Field(
+        default=8,
+        validation_alias="MULTI_AGENT_MAX_WORKERS",
+    )
+    agent_effort_level: str = Field(
+        default="max",
+        validation_alias="AGENT_EFFORT_LEVEL",
     )
 
     # ── 动态 capability ──

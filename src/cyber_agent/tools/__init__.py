@@ -18,6 +18,7 @@ from .filesystem import (
 from .patching import create_apply_unified_patch_tool
 from .search import create_search_web_tool
 from .security import scan_port
+from .web_fetch import create_web_fetch_tool
 from .system import (
     create_run_registered_tool_tool,
     create_run_shell_command_tool,
@@ -88,6 +89,7 @@ def get_default_tools(
             execution_controller,
             capability_registry=capability_registry,
         ),
+        create_web_fetch_tool(execution_controller),
         create_list_directory_tool(allowed_roots),
         create_read_text_file_tool(allowed_roots),
         create_write_text_file_tool(allowed_roots),

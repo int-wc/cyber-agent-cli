@@ -56,10 +56,10 @@ class SettingsTestCase(unittest.TestCase):
             settings = config_module.Settings(_env_file=None)
 
         self.assertEqual(settings.gateway_api_key, "test-key")
-        self.assertEqual(settings.gateway_default_model, "gpt-5.4")
+        self.assertEqual(settings.gateway_default_model, "deepseek-v4-pro[1m]")
         self.assertIsNone(settings.gateway_base_url)
         self.assertEqual(settings.resolve_base_url(), "http://127.0.0.1:8317/v1")
-        self.assertEqual(settings.max_context_tokens, 128_000)
+        self.assertEqual(settings.max_context_tokens, 400_000)
         self.assertEqual(settings.get_service(), "deepseek")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:

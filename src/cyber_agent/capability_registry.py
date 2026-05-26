@@ -50,6 +50,7 @@ RESERVED_TOOL_NAMES = {
     "run_shell_command",
     "run_registered_tool",
     "search_web",
+    "fetch_web_page",
     "create_generated_capability",
     "revise_generated_capability",
     "list_generated_capabilities",

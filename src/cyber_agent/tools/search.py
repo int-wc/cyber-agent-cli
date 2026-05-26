@@ -85,6 +85,7 @@ window.navigator.permissions.query = (parameters) => (
     originalQuery(parameters)
 );
 """
+SEARCH_TIME_BUDGET_SECONDS = 5.5
 MAX_SEARCH_QUERY_LENGTH = 300
 PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 4
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
@@ -1137,6 +1138,61 @@ def _search_engine_in_isolated_context(
             browser.close()
 
 
+def _search_bing_paginated(
+    page: Any,
+    engine_spec: SearchEngineSpec,
+    query: str,
+    result_limit: int,
+    execution_controller: ExecutionController | None,
+) -> tuple[list[SearchResult], str | None]:
+    """对 Bing 执行分页搜索，多页结果合并去重以突破单页 10 条限制。
+    使用 &first=N 参数直接跳转到不同分页，比模拟点击更快。"""
+    raw_results: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    pages_needed = max(1, min((result_limit + 9) // 10, 5))
+    page_offsets = [1, 11, 21, 31, 41][:pages_needed]
+
+    for offset in page_offsets:
+        if execution_controller is not None:
+            execution_controller.ensure_not_cancelled()
+
+        paginated_url = f"https://www.bing.com/search?q={query}&first={offset}&form=QBLH"
+        try:
+            page.goto(
+                paginated_url,
+                wait_until="domcontentloaded",
+                timeout=engine_spec.homepage_goto_timeout_milliseconds,
+            )
+            page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
+
+            if _page_looks_blocked(page, engine_spec):
+                continue
+
+            if not _wait_for_results_to_settle(page, engine_spec, execution_controller):
+                continue
+
+            page_results = _extract_results_from_page(
+                page, engine_spec, query, result_limit, execution_controller,
+            )
+            new_count = 0
+            for r in page_results:
+                dedup_url = r.url.rstrip("/")
+                if dedup_url not in seen_urls:
+                    seen_urls.add(dedup_url)
+                    raw_results.append(r)
+                    new_count += 1
+
+            if new_count == 0:
+                break  # 无新结果，后续分页不会再有
+
+        except Exception:
+            break  # 分页请求失败则停止
+
+    if not raw_results:
+        return [], f"{engine_spec.name} 分页搜索未返回可用结果。"
+    return raw_results, None
+
+
 def search_with_playwright(
     query: str,
     result_limit: int,
@@ -1156,36 +1212,49 @@ def search_with_playwright(
             else "浏览器模式：无头窗口"
         )
     ]
-    min_results_for_early_exit = min(max(3, result_limit // 8), 10)
+    min_results_for_early_exit = min(result_limit, 40)
     raw_results: list[SearchResult] = []
 
-    # 引擎按优先级依次尝试，首个拿到足够结果的引擎立即终止
-    for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
-        if execution_controller is not None:
-            execution_controller.ensure_not_cancelled()
-
+    with sync_playwright() as pw:
+        browser, browser_context = _create_stealth_browser_context(pw)
+        page = browser_context.new_page()
         try:
-            engine_results, engine_note = _search_engine_in_isolated_context(
-                engine_spec, query, result_limit, execution_controller,
-            )
-        except PlaywrightError as exc:
-            engine_results, engine_note = [], str(exc)
-        except Exception as exc:
-            engine_results, engine_note = [], f"{engine_spec.name} 搜索异常：{exc}"
+            for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
+                if execution_controller is not None:
+                    execution_controller.ensure_not_cancelled()
 
-        if engine_note:
-            notes.append(engine_note)
-        raw_results.extend(engine_results)
+                try:
+                    # Bing 启用分页采集突破单页 10 条上限
+                    if engine_spec.search_url_template and engine_spec.name == "bing":
+                        engine_results, engine_note = _search_bing_paginated(
+                            page, engine_spec, query, result_limit, execution_controller,
+                        )
+                    else:
+                        engine_results, engine_note = _search_with_single_engine(
+                            page, engine_spec, query, result_limit, execution_controller,
+                        )
+                except PlaywrightError as exc:
+                    engine_results, engine_note = [], str(exc)
+                except Exception as exc:
+                    engine_results, engine_note = [], f"{engine_spec.name} 搜索异常：{exc}"
 
-        # 当前引擎已返回足够结果，跳过后续引擎以节省时间
-        if len(raw_results) >= min_results_for_early_exit:
-            notes.append(f"{engine_spec.name} 已返回 {len(engine_results)} 条结果，跳过其余引擎。")
-            break
+                if engine_note:
+                    notes.append(engine_note)
+                raw_results.extend(engine_results)
+
+                if len(raw_results) >= min_results_for_early_exit:
+                    notes.append(
+                        f"{engine_spec.name} 累计 {len(raw_results)} 条结果，跳过其余引擎。"
+                    )
+                    break
+        finally:
+            page.close()
+            browser_context.close()
+            browser.close()
 
     if not raw_results:
         return [], notes
 
-    # 仅依靠摘要进行规则评分与排序，不访问页面、不调用模型
     ranked_results = rank_search_results(query, raw_results)[:result_limit]
     return rerank_results_by_relevance(ranked_results)[:result_limit], notes
 
