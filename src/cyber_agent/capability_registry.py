@@ -15,19 +15,29 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 
 from ._lazy_imports import load_chat_openai
+from .capability_codegen import (
+    CAPABILITY_ENTRYPOINT_FILENAME,
+    CAPABILITY_NAME_RE,
+    CAPABILITY_SKILL_LAUNCHER_CMD,
+    CAPABILITY_SKILL_LAUNCHER_SH,
+    CAPABILITY_TOOL_LAUNCHER_CMD,
+    CAPABILITY_TOOL_LAUNCHER_SH,
+    CapabilityArtifacts,
+    _strip_markdown_code_fence,
+    build_capability_source,
+    default_skill_python_code,
+    default_tool_python_code,
+    materialize_capability_artifacts,
+    validate_capability_source,
+)
 from .config import settings
 from .execution_control import ExecutionController, ExecutionInterruptedError
 from .logging import log_capability_operation, log_error
 from .openai_compat import ensure_deepseek_reasoning_content_compat
 from .tools.metadata import attach_tool_risk
 from .tools.system import _run_process_with_controller
+
 CAPABILITY_STORAGE_DIRNAME = ".cyber-agent-cli-capabilities"
-CAPABILITY_ENTRYPOINT_FILENAME = "capability.py"
-CAPABILITY_TOOL_LAUNCHER_CMD = "run_tool.cmd"
-CAPABILITY_TOOL_LAUNCHER_SH = "run_tool.sh"
-CAPABILITY_SKILL_LAUNCHER_CMD = "render_skill.cmd"
-CAPABILITY_SKILL_LAUNCHER_SH = "render_skill.sh"
-CAPABILITY_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{2,63}$")
 CAPABILITY_EXECUTION_TIMEOUT_SECONDS = 30
 MAX_GENERATED_OUTPUT_CHARS = 4000
 RESERVED_TOOL_NAMES = {
@@ -144,16 +154,6 @@ class GeneratedCapability:
         )
 
 
-@dataclass(slots=True)
-class CapabilityArtifacts:
-    """描述已落盘的代码产物位置与校验结果。"""
-
-    artifact_dir: Path
-    entrypoint_path: Path
-    source_code: str
-    tool_launcher_path: Path | None = None
-    skill_launcher_path: Path | None = None
-    validation_issues: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -178,18 +178,6 @@ def get_capability_storage_dir(base_dir: Path | None = None) -> Path:
     return resolved_base_dir / CAPABILITY_STORAGE_DIRNAME
 
 
-def _strip_markdown_code_fence(raw_text: str) -> str:
-    """兼容模型偶尔返回 ```json ... ``` 或 ```python ... ``` 的情况。"""
-    stripped_text = raw_text.strip()
-    if not stripped_text.startswith("```"):
-        return stripped_text
-
-    lines = stripped_text.splitlines()
-    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].startswith("```"):
-        return "\n".join(lines[1:-1]).strip()
-    return stripped_text
-
-
 def _extract_response_text(raw_content: object) -> str:
     """将模型响应内容统一压缩为文本。"""
     if isinstance(raw_content, list):
@@ -206,40 +194,6 @@ def _truncate_output(output: str, *, limit: int = MAX_GENERATED_OUTPUT_CHARS) ->
     if len(output) > limit:
         truncated_output += "\n... 输出过长，已截断。"
     return truncated_output
-
-
-def _default_tool_python_code() -> str:
-    """返回工具逻辑缺失时的最小可运行骨架。"""
-    return textwrap.dedent(
-        """
-        def handle_request(request: str, context: str) -> str:
-            \"\"\"默认工具骨架：在真实逻辑补全前先返回结构化结果。\"\"\"
-            cleaned_request = request.strip()
-            cleaned_context = context.strip()
-            lines = [
-                "当前生成工具尚未补全专用实现，先返回结构化骨架。",
-                f"请求: {cleaned_request or '无'}",
-            ]
-            if cleaned_context:
-                lines.append(f"上下文: {cleaned_context}")
-            lines.append("TODO(人工实现): 在此补充 handle_request 的核心逻辑。")
-            return "\\n".join(lines)
-        """
-    ).strip()
-
-
-def _default_skill_python_code() -> str:
-    """返回技能提示词缺失时的最小可运行骨架。"""
-    return textwrap.dedent(
-        """
-        def build_skill_prompt() -> str:
-            \"\"\"默认 skill 骨架：提示后续开发者继续补全。\"\"\"
-            return (
-                "当前生成 skill 仍是最小骨架。\\n"
-                "TODO(人工实现): 根据真实业务需求补充 build_skill_prompt 的内容。"
-            )
-        """
-    ).strip()
 
 
 class CapabilityRegistry:
@@ -692,11 +646,11 @@ JSON 字段要求：
         """将模型返回的代码片段包装成可直接执行的 Python 文件。"""
         normalized_tool_code = (
             textwrap.dedent(_strip_markdown_code_fence(tool_python_code)).strip()
-            or _default_tool_python_code()
+            or default_tool_python_code()
         )
         normalized_skill_code = (
             textwrap.dedent(_strip_markdown_code_fence(skill_python_code)).strip()
-            or _default_skill_python_code()
+            or default_skill_python_code()
         )
         source_parts = [
             '"""自动生成的 capability 代码文件。"""',
