@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
+import random
 import re
 from dataclasses import dataclass
 from html import unescape
@@ -36,8 +38,55 @@ FALLBACK_SEARCH_ENDPOINTS = (
 )
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+# 多 UA 池：降低单一指纹被识别概率
+_ROTATING_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+)
+# 常见视口尺寸轮播，避免固定指纹
+_ROTATING_VIEWPORTS = (
+    {"width": 1366, "height": 768},
+    {"width": 1920, "height": 1080},
+    {"width": 1440, "height": 900},
+    {"width": 1536, "height": 864},
+    {"width": 1280, "height": 720},
+)
+# Chrome 启动参数：关闭自动化检测标记
+_STEALTH_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-infobars",
+    "--disable-dev-shm-usage",
+    "--disable-web-security",
+    "--disable-features=VizDisplayCompositor",
+]
+# 注入页面以隐藏 WebDriver 特征的脚本
+_STEALTH_SCRIPT = """
+// 移除 navigator.webdriver 标记
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+// 伪造 plugins 数量
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+// 伪造 languages
+Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN','zh','en-US','en'] });
+// 伪造 chrome 对象
+window.chrome = { runtime: {} };
+// 伪造权限查询
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications' ?
+    Promise.resolve({ state: Notification.permission }) :
+    originalQuery(parameters)
+);
+"""
 MAX_SEARCH_QUERY_LENGTH = 300
 PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 4
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
@@ -115,15 +164,24 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         card_link_selectors=("h2 a",),
         card_title_selectors=("h2 a",),
         card_snippet_selectors=(".b_caption p", ".b_snippet"),
+        consent_button_selectors=(
+            "button#bnp_btn_accept",
+            "button:has-text('Accept')",
+            "button:has-text('接受')",
+        ),
         search_button_selectors=("button#search_icon", "input#sb_form_go"),
+        blocked_title_markers=("verify you are human", "security verification"),
         blocked_text_markers=(
             "verify you are human",
             "one last step",
             "enter the characters you see",
             "detected unusual traffic",
             "security check",
+            "unusual activity",
             "请输入验证码",
             "请完成验证",
+            "验证你是人类",
+            "are you a robot",
         ),
         post_submit_wait_milliseconds=200,
         settle_wait_milliseconds=150,
@@ -132,8 +190,8 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="google",
         homepage_url="https://www.google.com/",
-        search_input_selectors=("textarea[name='q']", "input[name='q']"),
-        result_ready_selectors=("#search", "div.g"),
+        search_input_selectors=("textarea[name='q']", "textarea[name='q'][title='搜索']", "input[name='q']"),
+        result_ready_selectors=("#search", "#rso", "div.g"),
         result_selector="div.g",
         link_selector="div.g a[href]:has(h3)",
         title_selector="div.g a[href]:has(h3) h3",
@@ -148,12 +206,19 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         consent_button_selectors=(
             "button:has-text('Accept all')",
             "button:has-text('I agree')",
+            "button:has-text('Accept')",
+            "button:has-text('同意')",
             "button:has-text('全部接受')",
             "button:has-text('接受全部')",
+            "button:has-text('一律接受')",
+            "form[action='https://consent.google.com/save'] button",
         ),
-        blocked_title_markers=("unusual traffic", "before you continue"),
-        blocked_url_markers=("/sorry/",),
-        blocked_text_markers=("unusual traffic", "before you continue", "our systems have detected"),
+        blocked_title_markers=("unusual traffic", "before you continue", "sorry", "consent"),
+        blocked_url_markers=("/sorry/", "/consent", "consent.google.com"),
+        blocked_text_markers=(
+            "unusual traffic", "before you continue", "our systems have detected",
+            "automated queries", "automated requests", "suspicious",
+        ),
         post_submit_wait_milliseconds=200,
         settle_wait_milliseconds=150,
         auto_scroll_rounds=1,
@@ -161,11 +226,12 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="baidu",
         homepage_url="https://www.baidu.com/",
-        search_input_selectors=("textarea[name='wd']", "input[name='wd']"),
+        search_input_selectors=("textarea[name='wd']", "input[name='wd']", "input#kw"),
         result_ready_selectors=(
             "#content_left",
             "#content_left > div.result",
             "#content_left > div.result-op",
+            "#results",
         ),
         result_selector="#content_left > div.result, #content_left > div.result-op",
         link_selector="#content_left > div.result h3 a, #content_left > div.result-op h3 a",
@@ -179,16 +245,36 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         card_title_selectors=("h3 a",),
         card_snippet_selectors=(".c-abstract", ".content-right_8Zs40", ".c-span-last"),
         search_button_selectors=("input#su", "button#su"),
-        blocked_text_markers=("百度安全验证", "安全验证", "请输入验证码"),
+        blocked_title_markers=("百度安全验证", "安全验证", "百度防护", "验证"),
+        blocked_text_markers=(
+            "百度安全验证", "安全验证", "请输入验证码",
+            "访问验证", "行为验证", "网络不给力",
+            "您的网络存在异常", "请完成下方验证",
+        ),
         result_ready_timeout_milliseconds=6000,
         load_state_timeout_milliseconds=6000,
         post_submit_wait_milliseconds=400,
         settle_wait_milliseconds=200,
         auto_scroll_rounds=1,
         wait_for_full_page_load=False,
-        blocked_title_markers=("百度安全验证", "安全验证"),
     ),
 )
+
+
+def _pick_random_user_agent() -> str:
+    """从 UA 池中随机选取一个。"""
+    return random.choice(_ROTATING_USER_AGENTS)
+
+
+def _pick_random_viewport() -> dict[str, int]:
+    """从视口池中随机选取一个常见尺寸。"""
+    return random.choice(_ROTATING_VIEWPORTS)
+
+
+def _random_jitter(base_ms: int, pct: float = 0.3) -> int:
+    """在基准值上下 pct 范围内添加随机抖动，避免机器人般精确的定时模式。"""
+    delta = max(1, int(base_ms * pct))
+    return max(0, base_ms + random.randint(-delta, delta))
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -740,26 +826,26 @@ def _search_with_single_engine(
     result_limit: int,
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
-    """使用单个搜索引擎执行真人式浏览器搜索。"""
+    """使用单个搜索引擎执行真人式浏览器搜索，所有延迟均添加随机抖动。"""
     if execution_controller is not None:
         execution_controller.ensure_not_cancelled()
 
     page.goto(
         engine_spec.homepage_url,
         wait_until="domcontentloaded",
-        timeout=PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS,
+        timeout=_random_jitter(PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS),
     )
-    page.wait_for_timeout(PLAYWRIGHT_WAIT_MILLISECONDS)
+    page.wait_for_timeout(_random_jitter(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
     if engine_spec.consent_button_selectors:
         _click_first_available(page, engine_spec.consent_button_selectors)
-        page.wait_for_timeout(200)
+        page.wait_for_timeout(_random_jitter(200, pct=0.5))
 
     search_input = _wait_for_first_visible_locator(page, engine_spec.search_input_selectors)
     if search_input is None:
         return [], f"{engine_spec.name} 未找到搜索输入框。"
 
     _type_query_like_human(search_input, query)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(_random_jitter(200, pct=0.5))
     _submit_search(page, search_input, engine_spec)
     if not _wait_for_results_to_settle(page, engine_spec, execution_controller):
         if _page_looks_blocked(page, engine_spec):
@@ -968,6 +1054,28 @@ def _should_skip_model_relevance(
     return high_count >= len(visited_results)
 
 
+def _create_stealth_browser_context(playwright: Any) -> tuple[Any, Any]:
+    """创建带反检测能力的浏览器和上下文。"""
+    browser = playwright.chromium.launch(
+        headless=not settings.search_show_browser,
+        args=_STEALTH_LAUNCH_ARGS,
+    )
+    browser_context = browser.new_context(
+        user_agent=_pick_random_user_agent(),
+        viewport=_pick_random_viewport(),
+        locale=random.choice(["zh-CN", "en-US", "zh-TW"]),
+        timezone_id=random.choice(["Asia/Shanghai", "America/New_York", "Europe/London"]),
+        geolocation={
+            "latitude": random.uniform(30.5, 40.0),
+            "longitude": random.uniform(110.0, 122.0),
+        },
+        permissions=["geolocation"],
+    )
+    # 注入反检测脚本到每个新页面
+    browser_context.add_init_script(_STEALTH_SCRIPT)
+    return browser, browser_context
+
+
 def _search_engine_in_thread(
     engine_spec: SearchEngineSpec,
     query: str,
@@ -975,15 +1083,11 @@ def _search_engine_in_thread(
     execution_controller: ExecutionController | None,
     playwright: Any,
 ) -> tuple[list[SearchResult], str | None]:
-    """在独立线程中搜索单个搜索引擎，各线程持有独立的浏览器上下文。"""
+    """在独立线程中搜索单个搜索引擎，各线程持有独立的反检测浏览器上下文。"""
     if execution_controller is not None:
         execution_controller.ensure_not_cancelled()
 
-    browser = playwright.chromium.launch(headless=not settings.search_show_browser)
-    browser_context = browser.new_context(
-        user_agent=DEFAULT_USER_AGENT,
-        viewport={"width": 1366, "height": 900},
-    )
+    browser, browser_context = _create_stealth_browser_context(playwright)
     page = browser_context.new_page()
     try:
         return _search_with_single_engine(

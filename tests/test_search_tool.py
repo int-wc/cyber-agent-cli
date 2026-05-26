@@ -342,12 +342,16 @@ class FakeBrowserContext:
         self.new_page_count = 0
         self.page_factory = page_factory or (lambda: FakeBrowserPage())
         self.created_pages: list[FakeBrowserPage] = []
+        self.init_scripts: list[str] = []
 
     def new_page(self):
         self.new_page_count += 1
         page = self.page_factory()
         self.created_pages.append(page)
         return page
+
+    def add_init_script(self, script: str) -> None:
+        self.init_scripts.append(script)
 
     def close(self) -> None:
         return None
@@ -372,7 +376,7 @@ class FakeChromium:
         self.browser = FakeBrowser()
 
     def launch(self, **kwargs):
-        self.launch_kwargs = kwargs
+        self.launch_kwargs = {k: v for k, v in kwargs.items() if k != "args"}
         return self.browser
 
 
