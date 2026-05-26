@@ -7,13 +7,32 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Base
 
 
 def ensure_deepseek_reasoning_content_compat() -> None:
-    """修补当前 langchain-openai 对 DeepSeek reasoning_content 的透传缺口。"""
+    """修补当前 langchain-openai 对 DeepSeek reasoning_content 的透传缺口。
+
+    仅在 langchain-openai 内部 API 匹配预期签名时才执行 patch；
+    若上游已升级或移除相关函数，则跳过并记录警告。
+    """
     try:
         from langchain_openai.chat_models import base as openai_base
     except ModuleNotFoundError:
         return
 
     if getattr(openai_base, "_cyber_agent_deepseek_reasoning_patch", False):
+        return
+
+    required_functions = (
+        "_convert_delta_to_message_chunk",
+        "_convert_dict_to_message",
+        "_convert_message_to_dict",
+    )
+    missing = [fn for fn in required_functions if not callable(getattr(openai_base, fn, None))]
+    if missing:
+        import warnings
+        warnings.warn(
+            f"langchain-openai 内部 API 已变更，跳过 DeepSeek reasoning_content 兼容 patch。"
+            f"缺失函数：{', '.join(missing)}",
+            RuntimeWarning,
+        )
         return
 
     original_convert_delta = openai_base._convert_delta_to_message_chunk

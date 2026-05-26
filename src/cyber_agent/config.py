@@ -73,7 +73,7 @@ class Settings(BaseSettings):
         validation_alias="MAX_CONTEXT_CHARS",
     )
     max_context_tokens: int = Field(
-        default=1_000_000,
+        default=128_000,
         validation_alias="MAX_CONTEXT_TOKENS",
     )
     context_keep_recent_messages: int = Field(
