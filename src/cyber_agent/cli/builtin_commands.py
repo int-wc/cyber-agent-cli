@@ -56,6 +56,22 @@ def _dispatch_to_module(tokens: list[str]) -> str | None:
     return _COMMAND_ROUTES.get(tokens[0])
 
 
+# ── 公共辅助 ──
+
+
+def _extract_arg(raw_input: str, prefix: str) -> str:
+    """从原始输入中去掉命令前缀，返回剩余参数部分。"""
+    return raw_input[len(prefix):].strip()
+
+
+def _safe(fn, cli_renderer: CliRenderer) -> None:
+    """执行可能抛出 ValueError 的操作，自动捕获并渲染错误。"""
+    try:
+        fn()
+    except ValueError as exc:
+        cli_renderer.print_error(str(exc))
+
+
 # ── 单级命令处理器 ──
 
 def _handle_stop(
@@ -140,49 +156,33 @@ def _handle_history(
         if not args:
             cli_renderer.print_error("请提供要查看的会话 ID。")
             return True
-        try:
-            show_history_session(args[0], cli_renderer)
-        except ValueError as exc:
-            cli_renderer.print_error(str(exc))
+        _safe(lambda: show_history_session(args[0], cli_renderer), cli_renderer)
         return True
 
     if sub_cmd == "load":
         if not args:
             cli_renderer.print_error("请提供要加载的会话 ID。")
             return True
-        try:
-            load_history_session_into_runner(args[0], runner, runtime_context, cli_renderer)
-        except ValueError as exc:
-            cli_renderer.print_error(str(exc))
+        _safe(lambda: load_history_session_into_runner(args[0], runner, runtime_context, cli_renderer), cli_renderer)
         return True
 
     if sub_cmd == "search":
-        # 检索关键词可能包含空格，需要从原始输入提取
-        search_prefix = "/history search "
-        search_query = raw_input[len(search_prefix):].strip()
+        search_query = _extract_arg(raw_input, "/history search ")
         if not search_query:
             cli_renderer.print_error("请提供要检索的关键词。")
             return True
-        try:
-            print_history_search_results(search_query, cli_renderer)
-        except ValueError as exc:
-            cli_renderer.print_error(str(exc))
+        _safe(lambda: print_history_search_results(search_query, cli_renderer), cli_renderer)
         return True
 
     if sub_cmd == "export":
-        # 用原始输入解析参数，避免空格路径被 token 拆分
-        export_prefix = "/history export "
-        export_args = raw_input[len(export_prefix):].strip()
+        export_args = _extract_arg(raw_input, "/history export ")
         session_parts = export_args.split(maxsplit=1)
         session_id = session_parts[0].strip() if session_parts else ""
         output_path = session_parts[1].strip() if len(session_parts) == 2 else None
         if not session_id:
             cli_renderer.print_error("请提供要导出的会话 ID。")
             return True
-        try:
-            export_history_session(session_id, output_path, cli_renderer)
-        except ValueError as exc:
-            cli_renderer.print_error(str(exc))
+        _safe(lambda: export_history_session(session_id, output_path, cli_renderer), cli_renderer)
         return True
 
     cli_renderer.print_error("不支持的 /history 子命令。")
@@ -243,16 +243,11 @@ def _handle_config(
 
     if tokens[1] == "allow-path":
         if len(tokens) >= 3 and tokens[2] == "add":
-            # 路径可能包含空格，从原始输入提取
-            path_prefix = "/config allow-path add "
-            raw_path = raw_input[len(path_prefix):].strip()
+            raw_path = _extract_arg(raw_input, "/config allow-path add ")
             if not raw_path:
                 cli_renderer.print_error("请提供要保存的目录路径。")
                 return True
-            try:
-                add_persisted_allowed_path(raw_path, runner, runtime_context, cli_renderer)
-            except ValueError as exc:
-                cli_renderer.print_error(str(exc))
+            _safe(lambda: add_persisted_allowed_path(raw_path, runner, runtime_context, cli_renderer), cli_renderer)
             return True
         cli_renderer.print_error("不支持的 /config allow-path 子命令。")
         return True
@@ -316,28 +311,19 @@ def _handle_allow_path(
         return True
 
     if tokens[1] == "add":
-        # 路径可能包含空格，从原始输入提取
-        path_prefix = "/allow-path add "
-        raw_path = raw_input[len(path_prefix):].strip()
+        raw_path = _extract_arg(raw_input, "/allow-path add ")
         if not raw_path:
             cli_renderer.print_error("请提供要添加的目录路径。")
             return True
-        try:
-            add_allowed_path(raw_path, runner, runtime_context, cli_renderer)
-        except ValueError as exc:
-            cli_renderer.print_error(str(exc))
+        _safe(lambda: add_allowed_path(raw_path, runner, runtime_context, cli_renderer), cli_renderer)
         return True
 
     # 兼容直接 /allow-path <路径> 的用法
-    raw_path_prefix = "/allow-path "
-    raw_path = raw_input[len(raw_path_prefix):].strip()
+    raw_path = _extract_arg(raw_input, "/allow-path ")
     if not raw_path:
         cli_renderer.print_error("请提供要添加的目录路径。")
         return True
-    try:
-        add_allowed_path(raw_path, runner, runtime_context, cli_renderer)
-    except ValueError as exc:
-        cli_renderer.print_error(str(exc))
+    _safe(lambda: add_allowed_path(raw_path, runner, runtime_context, cli_renderer), cli_renderer)
     return True
 
 
@@ -369,20 +355,15 @@ def _handle_memory(
     if sub_cmd == "add" and len(tokens) >= 4:
         mem_name = tokens[2]
         mem_type = tokens[3]
-        # 正文从原始输入提取
-        add_prefix = "/memory add"
-        body_parts = raw_input[len(add_prefix):].strip().split(maxsplit=2)
+        body_parts = _extract_arg(raw_input, "/memory add").split(maxsplit=2)
         body = body_parts[2] if len(body_parts) >= 3 else ""
         description = body[:120] if body else mem_name
-        try:
-            file_path = save_memory(mem_name, description, body, memory_type=mem_type)
-            cli_renderer.print_info(f"已保存记忆：{mem_name} → {file_path}")
-        except Exception as exc:
-            cli_renderer.print_error(f"保存失败：{exc}")
+        _safe(lambda: save_memory(mem_name, description, body, memory_type=mem_type)
+              and cli_renderer.print_info(f"已保存记忆：{mem_name}"), cli_renderer)
         return True
 
     if sub_cmd == "search" and len(tokens) >= 3:
-        query = " ".join(tokens[2:])
+        query = _extract_arg(raw_input, "/memory search ")
         results = search_memories(query)
         if not results:
             cli_renderer.print_info(f"未找到与 `{query}` 相关的记忆。")
@@ -397,10 +378,9 @@ def _handle_memory(
 
     if sub_cmd == "delete" and len(tokens) >= 3:
         deleted = delete_memory(tokens[2])
-        if deleted:
-            cli_renderer.print_info(f"已删除记忆：{tokens[2]}")
-        else:
-            cli_renderer.print_error(f"未找到记忆：{tokens[2]}")
+        cli_renderer.print_info(
+            f"已删除记忆：{tokens[2]}" if deleted else f"未找到记忆：{tokens[2]}"
+        )
         return True
 
     cli_renderer.print_error("用法: /memory [add <name> <type> <text> | search <query> | delete <name>]")
