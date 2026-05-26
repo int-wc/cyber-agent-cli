@@ -5572,6 +5572,8 @@ def serve_webhook_gateway(
     )
     server = create_webhook_http_server(host, port, gateway)
     actual_host, actual_port = server.server_address[:2]
+    from ..logging import log_info
+    log_info("webhook", f"服务启动 {actual_host}:{actual_port}，{len(routes)} 条路由")
     resolved_renderer.print_info(
         f"Webhook 服务已启动：{actual_host}:{actual_port}"
     )

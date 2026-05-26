@@ -4,6 +4,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
+# 服务商默认模型。可通过 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖。
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
     "deepseek": "deepseek-v4-pro",
@@ -120,10 +121,15 @@ class Settings(BaseSettings):
             normalized_model_name = self.gateway_default_model.strip()
             if not normalized_model_name:
                 normalized_service_name = self.normalize_service_name(service_name)
-                normalized_model_name = DEFAULT_MODELS.get(
-                    normalized_service_name,
-                    DEFAULT_MODELS["openai"],
-                )
+                # 支持 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖
+                import os
+                env_key = f"GATEWAY_DEFAULT_MODEL_{normalized_service_name.upper()}"
+                normalized_model_name = os.getenv(env_key, "").strip()
+                if not normalized_model_name:
+                    normalized_model_name = DEFAULT_MODELS.get(
+                        normalized_service_name,
+                        DEFAULT_MODELS["openai"],
+                    )
         if not normalized_model_name:
             raise ValueError("模型名称不能为空。")
         return normalized_model_name
