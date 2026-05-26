@@ -223,6 +223,10 @@ class CapabilityRegistry:
         self._capabilities: dict[str, GeneratedCapability] = {}
         self._refresh_callback = None
         self._llm: Any | None = None
+        # 缓存：避免每次构建 prompt/工具集都重新 exec Python 代码
+        self._skill_prompt_mtime_cache: dict[str, float] = {}
+        self._dynamic_tools_cache: list[BaseTool] | None = None
+        self._dynamic_tools_version: int = 0
         self._load_capabilities()
 
     def update_llm_config(
@@ -303,7 +307,13 @@ class CapabilityRegistry:
         return "\n\n".join(part for part in parts if part.strip())
 
     def get_dynamic_tools(self) -> list[BaseTool]:
-        """返回当前所有启用的动态工具与 capability 管理工具。"""
+        """返回当前所有启用的动态工具与 capability 管理工具，结果按能力版本缓存。"""
+        current_version = sum(
+            cap.revision for cap in self._capabilities.values() if cap.enabled and cap.register_as_tool
+        )
+        if self._dynamic_tools_cache is not None and self._dynamic_tools_version == current_version:
+            return self._dynamic_tools_cache
+
         tools: list[BaseTool] = [
             self._create_generated_capability_tool(),
             self._create_revise_capability_tool(),
@@ -315,6 +325,9 @@ class CapabilityRegistry:
             if not capability.enabled or not capability.register_as_tool:
                 continue
             tools.append(self._build_runtime_tool(capability))
+
+        self._dynamic_tools_cache = tools
+        self._dynamic_tools_version = current_version
         return tools
 
     def create_or_update_capability(
@@ -490,7 +503,9 @@ class CapabilityRegistry:
         return capability
 
     def _trigger_refresh(self) -> None:
-        """在 capability 集合变更后刷新当前 runner。"""
+        """在 capability 集合变更后刷新当前 runner 并清空缓存。"""
+        self._dynamic_tools_cache = None
+        self._dynamic_tools_version = 0
         if self._refresh_callback is not None:
             self._refresh_callback()
 
@@ -846,7 +861,7 @@ JSON 字段要求：
         )
 
     def _refresh_skill_prompt_from_artifacts(self, capability: GeneratedCapability) -> str:
-        """从真实代码文件重新提取 skill 提示词，便于人工修改后自动生效。"""
+        """从真实代码文件重新提取 skill 提示词，仅在文件修改后才重新 exec。"""
         if capability.kind != "skill" or not capability.entrypoint_path:
             return capability.system_prompt
 
@@ -854,11 +869,21 @@ JSON 字段要求：
         if not entrypoint_path.exists():
             return capability.system_prompt
 
+        try:
+            current_mtime = entrypoint_path.stat().st_mtime
+        except OSError:
+            return capability.system_prompt
+
+        cached_mtime = self._skill_prompt_mtime_cache.get(capability.name)
+        if cached_mtime is not None and cached_mtime >= current_mtime and capability.system_prompt:
+            return capability.system_prompt
+
         prompt_result = self._execute_generated_capability(entrypoint_path, mode="prompt")
         if prompt_result.returncode != 0:
             return capability.system_prompt
 
         capability.system_prompt = prompt_result.stdout.strip()
+        self._skill_prompt_mtime_cache[capability.name] = current_mtime
         return capability.system_prompt
 
     def _audit_capability(

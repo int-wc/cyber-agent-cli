@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 from dataclasses import dataclass
@@ -40,11 +41,11 @@ DEFAULT_USER_AGENT = (
 MAX_SEARCH_QUERY_LENGTH = 300
 PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 3
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
-PLAYWRIGHT_WAIT_MILLISECONDS = 800
-PLAYWRIGHT_VISIT_WAIT_MILLISECONDS = 200
+PLAYWRIGHT_WAIT_MILLISECONDS = 300
+PLAYWRIGHT_VISIT_WAIT_MILLISECONDS = 150
 PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS = 6000
-PLAYWRIGHT_VISIT_TIMEOUT_MILLISECONDS = 4000
-PLAYWRIGHT_TYPE_DELAY_MILLISECONDS = 80
+PLAYWRIGHT_VISIT_TIMEOUT_MILLISECONDS = 3000
+PLAYWRIGHT_TYPE_DELAY_MILLISECONDS = 0
 PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS = 4000
 PLAYWRIGHT_SCROLL_STEP_PIXELS = 960
 PLAYWRIGHT_PAGE_TEXT_MAX_CHARS = 2400
@@ -124,6 +125,9 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "请输入验证码",
             "请完成验证",
         ),
+        post_submit_wait_milliseconds=400,
+        settle_wait_milliseconds=300,
+        auto_scroll_rounds=1,
     ),
     SearchEngineSpec(
         name="google",
@@ -150,6 +154,9 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         blocked_title_markers=("unusual traffic", "before you continue"),
         blocked_url_markers=("/sorry/",),
         blocked_text_markers=("unusual traffic", "before you continue", "our systems have detected"),
+        post_submit_wait_milliseconds=400,
+        settle_wait_milliseconds=300,
+        auto_scroll_rounds=1,
     ),
     SearchEngineSpec(
         name="baidu",
@@ -175,9 +182,9 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         blocked_text_markers=("百度安全验证", "安全验证", "请输入验证码"),
         result_ready_timeout_milliseconds=9000,
         load_state_timeout_milliseconds=9000,
-        post_submit_wait_milliseconds=1600,
-        settle_wait_milliseconds=800,
-        auto_scroll_rounds=4,
+        post_submit_wait_milliseconds=800,
+        settle_wait_milliseconds=400,
+        auto_scroll_rounds=2,
         wait_for_full_page_load=True,
         blocked_title_markers=("百度安全验证", "安全验证"),
     ),
@@ -381,18 +388,12 @@ def _click_first_available(page: Any, selectors: tuple[str, ...]) -> bool:
 
 
 def _type_query_like_human(input_locator: Any, query: str) -> None:
-    """模拟真人逐字输入关键词。"""
+    """在搜索框中填入关键词（直接 fill，比逐字输入更快更稳定）。"""
     input_locator.click(timeout=2000)
     try:
-        input_locator.fill("", timeout=1000)
+        input_locator.fill(query, timeout=3000)
     except Exception:
-        pass
-    try:
-        input_locator.type(query, delay=PLAYWRIGHT_TYPE_DELAY_MILLISECONDS)
-        return
-    except Exception:
-        pass
-    input_locator.fill(query)
+        input_locator.fill(query)
 
 
 def _submit_search(page: Any, input_locator: Any, engine_spec: SearchEngineSpec) -> None:
@@ -951,13 +952,56 @@ def enrich_results_with_page_visits(
     return visit_notes
 
 
+def _should_skip_model_relevance(
+    results: list[SearchResult],
+    capability_registry: CapabilityRegistry | None,
+) -> bool:
+    """当未提供 registry 且规则评分明确时跳过模型评估以节省时间。"""
+    if capability_registry is not None:
+        return False
+    if not results:
+        return True
+    visited_results = [r for r in results if r.visited]
+    if not visited_results:
+        return False
+    high_count = sum(1 for r in visited_results if r.relevance_score >= PLAYWRIGHT_RELEVANCE_HIGH_SCORE)
+    return high_count >= len(visited_results)
+
+
+def _search_engine_in_thread(
+    engine_spec: SearchEngineSpec,
+    query: str,
+    result_limit: int,
+    execution_controller: ExecutionController | None,
+    playwright: Any,
+) -> tuple[list[SearchResult], str | None]:
+    """在独立线程中搜索单个搜索引擎，各线程持有独立的浏览器上下文。"""
+    if execution_controller is not None:
+        execution_controller.ensure_not_cancelled()
+
+    browser = playwright.chromium.launch(headless=not settings.search_show_browser)
+    browser_context = browser.new_context(
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 1366, "height": 900},
+    )
+    page = browser_context.new_page()
+    try:
+        return _search_with_single_engine(
+            page, engine_spec, query, result_limit, execution_controller,
+        )
+    finally:
+        page.close()
+        browser_context.close()
+        browser.close()
+
+
 def search_with_playwright(
     query: str,
     result_limit: int,
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
-    """使用 Playwright 按真人搜索流程执行浏览器搜索。"""
+    """使用 Playwright 并行搜索多个引擎，合并结果后按相关性排序。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
         return [], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]
 
@@ -969,39 +1013,73 @@ def search_with_playwright(
         )
     ]
     with sync_playwright() as playwright:
+        engine_results_map: dict[str, tuple[list[SearchResult], str | None]] = {}
+
+        if len(PLAYWRIGHT_SEARCH_ENGINES) == 0:
+            return [], notes
+        if len(PLAYWRIGHT_SEARCH_ENGINES) == 1:
+            # 单个引擎直接执行，避免不必要的线程开销
+            for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
+                try:
+                    engine_results_map[engine_spec.name] = _search_engine_in_thread(
+                        engine_spec, query, result_limit, execution_controller, playwright,
+                    )
+                except PlaywrightError as exc:
+                    engine_results_map[engine_spec.name] = ([], str(exc))
+        else:
+            # 多个引擎并行搜索
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(PLAYWRIGHT_SEARCH_ENGINES),
+            ) as executor:
+                future_to_engine = {
+                    executor.submit(
+                        _search_engine_in_thread,
+                        engine_spec,
+                        query,
+                        result_limit,
+                        execution_controller,
+                        playwright,
+                    ): engine_spec.name
+                    for engine_spec in PLAYWRIGHT_SEARCH_ENGINES
+                }
+                for future in concurrent.futures.as_completed(future_to_engine):
+                    engine_name = future_to_engine[future]
+                    try:
+                        engine_results_map[engine_name] = future.result()
+                    except ExecutionInterruptedError:
+                        for remaining in future_to_engine:
+                            remaining.cancel()
+                        raise
+                    except PlaywrightError as exc:
+                        engine_results_map[engine_name] = ([], str(exc))
+                    except Exception as exc:
+                        engine_results_map[engine_name] = ([], f"{engine_name} 搜索异常：{exc}")
+
+        # 按配置顺序合并结果
+        raw_results: list[SearchResult] = []
+        for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
+            engine_results, engine_note = engine_results_map.get(
+                engine_spec.name,
+                ([], f"{engine_spec.name} 未返回结果"),
+            )
+            if engine_note:
+                notes.append(engine_note)
+            raw_results.extend(engine_results)
+
+        if not raw_results:
+            return [], notes
+
+        ranked_results = rank_search_results(query, raw_results)[
+            : min(len(raw_results), max(result_limit, PLAYWRIGHT_VISIT_RESULT_LIMIT))
+        ]
+
+        # 页面访问仍串行，但在主浏览器上下文中复用
         browser = playwright.chromium.launch(headless=not settings.search_show_browser)
         browser_context = browser.new_context(
             user_agent=DEFAULT_USER_AGENT,
             viewport={"width": 1366, "height": 900},
         )
-        search_page = browser_context.new_page()
         try:
-            raw_results: list[SearchResult] = []
-            for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
-                try:
-                    engine_results, engine_note = _search_with_single_engine(
-                        search_page,
-                        engine_spec,
-                        query,
-                        result_limit,
-                        execution_controller,
-                    )
-                except ExecutionInterruptedError:
-                    raise
-                except PlaywrightError as exc:
-                    notes.append(f"{engine_spec.name} 搜索失败：{exc}")
-                    continue
-
-                if engine_note:
-                    notes.append(engine_note)
-                raw_results.extend(engine_results)
-                if len(raw_results) >= result_limit * PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER:
-                    break
-
-            ranked_results = rank_search_results(
-                query,
-                raw_results,
-            )[: min(len(raw_results), max(result_limit, PLAYWRIGHT_VISIT_RESULT_LIMIT))]
             notes.extend(
                 enrich_results_with_page_visits(
                     browser_context,
@@ -1011,18 +1089,19 @@ def search_with_playwright(
                     min(PLAYWRIGHT_VISIT_RESULT_LIMIT, len(ranked_results)),
                 )
             )
-            notes.extend(
-                evaluate_results_with_model(
-                    capability_registry,
-                    query,
-                    ranked_results,
-                )
-            )
-            return rerank_results_by_relevance(ranked_results)[:result_limit], notes
         finally:
-            search_page.close()
             browser_context.close()
             browser.close()
+
+    # 规则评分明确且未提供 registry 时跳过模型评估以节省时间
+    if _should_skip_model_relevance(ranked_results, capability_registry):
+        notes.append("规则评分置信度足够，已跳过模型相关性评估。")
+    else:
+        notes.extend(
+            evaluate_results_with_model(capability_registry, query, ranked_results)
+        )
+
+    return rerank_results_by_relevance(ranked_results)[:result_limit], notes
 
 
 def render_search_results(

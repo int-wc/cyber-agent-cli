@@ -6,7 +6,6 @@ import httpx
 from cyber_agent.config import settings
 from cyber_agent.tools.search import (
     PLAYWRIGHT_SEARCH_ENGINES,
-    PLAYWRIGHT_TYPE_DELAY_MILLISECONDS,
     SearchResult,
     _annotate_result_relevance,
     _page_looks_blocked,
@@ -431,7 +430,7 @@ class SearchToolTestCase(unittest.TestCase):
 
         self.assertIsNone(note)
         self.assertEqual(page.goto_urls, ["https://www.bing.com/"])
-        self.assertIn(("type", "openai agent", PLAYWRIGHT_TYPE_DELAY_MILLISECONDS), page.input_actions)
+        self.assertIn(("fill", "openai agent"), page.input_actions)
         self.assertIn(("press", "Enter"), page.input_actions)
         self.assertGreaterEqual(len(page.scroll_actions), 1)
         self.assertEqual(results[0].title, "Example Result")
@@ -520,14 +519,13 @@ class SearchToolTestCase(unittest.TestCase):
             return_value=manager,
         ), patch(
             "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
-            (),
+            (PLAYWRIGHT_SEARCH_ENGINES[0],),
         ), patch(
             "cyber_agent.tools.search.enrich_results_with_page_visits",
             return_value=[],
         ), patch.object(settings, "search_show_browser", True):
             results, notes = search_with_playwright("example", 3)
 
-        self.assertEqual(results, [])
         self.assertIn("浏览器模式：可见窗口", notes)
         self.assertEqual(chromium.launch_kwargs, {"headless": False})
 
