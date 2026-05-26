@@ -341,6 +341,72 @@ def _handle_allow_path(
     return True
 
 
+def _handle_memory(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """管理跨会话持久化记忆。"""
+    from ..memory import (
+        delete_memory,
+        load_all_memories,
+        save_memory,
+        search_memories,
+    )
+
+    if len(tokens) < 2:
+        entries = load_all_memories()
+        if not entries:
+            cli_renderer.print_info("当前没有已保存的记忆。使用 /memory add 添加。")
+            return True
+        rows = [(e.name, f"[{e.memory_type}] {e.description}") for e in entries]
+        cli_renderer.print_status(rows, title="持久化记忆")
+        return True
+
+    sub_cmd = tokens[1]
+    if sub_cmd == "add" and len(tokens) >= 4:
+        mem_name = tokens[2]
+        mem_type = tokens[3]
+        # 正文从原始输入提取
+        add_prefix = "/memory add"
+        body_parts = raw_input[len(add_prefix):].strip().split(maxsplit=2)
+        body = body_parts[2] if len(body_parts) >= 3 else ""
+        description = body[:120] if body else mem_name
+        try:
+            file_path = save_memory(mem_name, description, body, memory_type=mem_type)
+            cli_renderer.print_info(f"已保存记忆：{mem_name} → {file_path}")
+        except Exception as exc:
+            cli_renderer.print_error(f"保存失败：{exc}")
+        return True
+
+    if sub_cmd == "search" and len(tokens) >= 3:
+        query = " ".join(tokens[2:])
+        results = search_memories(query)
+        if not results:
+            cli_renderer.print_info(f"未找到与 `{query}` 相关的记忆。")
+            return True
+        rows = [
+            (r.entry.name,
+             f"[{r.entry.memory_type}] {r.entry.description}\n{r.excerpt}")
+            for r in results
+        ]
+        cli_renderer.print_status(rows, title=f"记忆检索: {query}")
+        return True
+
+    if sub_cmd == "delete" and len(tokens) >= 3:
+        deleted = delete_memory(tokens[2])
+        if deleted:
+            cli_renderer.print_info(f"已删除记忆：{tokens[2]}")
+        else:
+            cli_renderer.print_error(f"未找到记忆：{tokens[2]}")
+        return True
+
+    cli_renderer.print_error("用法: /memory [add <name> <type> <text> | search <query> | delete <name>]")
+    return True
+
+
 def _handle_clear(
     runner: AgentRunner,
     runtime_context: dict[str, object],
@@ -420,6 +486,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/model": _handle_model,
     "/allow-path": _handle_allow_path,
     "/clear": _handle_clear,
+    "/memory": _handle_memory,
     "/mode": _handle_mode,
     "/approval": _handle_approval,
 }

@@ -472,9 +472,18 @@ class AgentRunner:
     def _build_tool_registry(self) -> dict[str, BaseTool]:
         return {tool.name: tool for tool in self.tools}
 
+    def _build_memory_prompt(self) -> str:
+        """注入跨会话持久化记忆到系统提示词。"""
+        from ..memory import build_memory_system_prompt
+        return build_memory_system_prompt()
+
     def _compose_system_prompt(self) -> str:
         """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
         prompt_parts = [self.system_prompt]
+        # 注入跨会话持久化记忆
+        memory_prompt = self._build_memory_prompt().strip()
+        if memory_prompt:
+            prompt_parts.append(memory_prompt)
         if self.capability_registry is not None:
             skill_prompt = self.capability_registry.build_skill_prompt(
                 file_skills=self.file_skills
