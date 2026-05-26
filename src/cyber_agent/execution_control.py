@@ -5,6 +5,8 @@ import signal
 import subprocess
 import threading
 
+from .logging import log_info
+
 DEFAULT_STOP_MESSAGE = "当前任务已被 /stop 中断。"
 
 
@@ -84,6 +86,7 @@ class ExecutionController:
 
     def request_stop(self, reason: str = "用户输入 /stop") -> bool:
         """请求中断当前任务，并尝试终止所有已登记的外部进程。"""
+        log_info("execution_control", f"请求中断任务：{reason}")
         with self._lock:
             was_running = self._is_running
             self._cancel_event.set()

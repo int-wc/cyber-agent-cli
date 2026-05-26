@@ -409,8 +409,9 @@ def ensure_runtime_capabilities(
         from ..mcp_client import load_mcp_client as _load_mcp
 
         mcp_client = _load_mcp()
-    except Exception:
-        pass
+    except Exception as exc:
+        from ..logging import log_warning
+        log_warning("cli.app", f"MCP 客户端加载失败，MCP 工具不可用：{exc}")
 
     tools = tool_support["get_default_tools"](
         runtime_context["mode"],

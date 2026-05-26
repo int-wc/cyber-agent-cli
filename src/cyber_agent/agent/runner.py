@@ -12,6 +12,12 @@ from langchain_core.tools import BaseTool
 from .._lazy_imports import load_chat_openai
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
+from ..logging import (
+    log_context_compression,
+    log_error,
+    log_model_call,
+    log_tool_execution,
+)
 from ..openai_compat import (
     ensure_deepseek_reasoning_content_compat,
     prepare_messages_for_openai_compatible_service,
@@ -624,6 +630,16 @@ class AgentRunner:
                 messages_to_summarize,
             )
         self.compressed_message_count = compression_boundary
+        log_context_compression(
+            before_chars=context_char_count,
+            after_chars=self._estimate_context_char_count(self.history),
+            compressed_count=len(messages_to_summarize),
+            method=(
+                "local"
+                if self._estimate_context_token_count(summarizer_messages) > self.max_context_tokens
+                else "model"
+            ),
+        )
 
     def _shrink_model_messages_to_token_budget(
         self,
@@ -738,7 +754,14 @@ class AgentRunner:
                     and should_retry_model_stream_start_error(exc)
                 )
                 if not can_retry:
+                    log_model_call(
+                        service=self.service,
+                        model=self.model_name,
+                        success=False,
+                        error=str(exc),
+                    )
                     raise
+                log_error("agent.runner", f"模型流中断，第 {attempt_index} 次重试：{exc}")
                 time.sleep(MODEL_STREAM_START_RETRY_DELAY_SECONDS)
                 continue
 
@@ -763,6 +786,14 @@ class AgentRunner:
                     "usage": usage,
                 },
             )
+
+        log_model_call(
+            service=self.service,
+            model=self.model_name,
+            char_count=len(accumulated_text),
+            token_count=usage.get("total_tokens", 0) if usage else 0,
+            success=True,
+        )
 
         return AIMessage(
             content=accumulated_chunk.content,
@@ -837,14 +868,24 @@ class AgentRunner:
 
         try:
             self.execution_controller.ensure_not_cancelled()
+            tool_start = time.monotonic()
             tool_result = tool.invoke(normalize_tool_args(tool_call))
+            tool_elapsed = (time.monotonic() - tool_start) * 1000
             normalized_result = str(tool_result)
+            log_tool_execution(
+                tool_name,
+                elapsed_ms=tool_elapsed,
+                success=True,
+                result_len=len(normalized_result),
+            )
         except ExecutionInterruptedError:
             raise
         except ValueError as exc:
             normalized_result = f"❌ 工具参数错误：{exc}"
+            log_tool_execution(tool_name, success=False, error=str(exc))
         except Exception as exc:
             normalized_result = f"❌ 工具执行异常：{exc}"
+            log_tool_execution(tool_name, success=False, error=str(exc))
 
         if event_handler is not None:
             event_handler(

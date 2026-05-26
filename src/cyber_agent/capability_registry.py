@@ -17,6 +17,7 @@ from langchain_core.tools import BaseTool, tool
 from ._lazy_imports import load_chat_openai
 from .config import settings
 from .execution_control import ExecutionController, ExecutionInterruptedError
+from .logging import log_capability_operation, log_error
 from .openai_compat import ensure_deepseek_reasoning_content_compat
 from .tools.metadata import attach_tool_risk
 from .tools.system import _run_process_with_controller
@@ -496,6 +497,12 @@ class CapabilityRegistry:
         self._capabilities[normalized_name] = capability
         self._save_capability(capability)
         self._trigger_refresh()
+        log_capability_operation(
+            "create_or_update",
+            normalized_name,
+            kind=normalized_kind,
+            audit_score=capability.audit_score,
+        )
         return capability
 
     def mark_capability_satisfied(self, name: str, *, notes: str = "") -> GeneratedCapability:
