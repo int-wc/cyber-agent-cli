@@ -341,6 +341,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         with (
             patch.object(settings, "gateway_default_service", "deepseek"),
+            patch.object(settings, "gateway_default_model", ""),
             patch.object(settings, "deepseek_model", "deepseek-chat"),
             patch.object(settings, "gateway_base_url", "http://127.0.0.1:8317/v1"),
             patch.object(settings, "deepseek_base_url", None),
@@ -355,7 +356,8 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("模型服务：deepseek", result.output)
-        self.assertIn("模型名称：deepseek-chat", result.output)
+        # gateway_default_model 置空后，回退到 DEFAULT_MODELS["deepseek"]
+        self.assertIn("模型名称：deepseek-v4-pro", result.output)
 
     def test_ui_tui_mode_can_launch_tui_entry(self) -> None:
         """
