@@ -141,21 +141,29 @@ def _load_tool_support():
 def _load_session_store_support():
     """按需加载历史会话存储，避免帮助和版本命令导入 LangChain 消息类型。"""
     from ..session_store import (
+        clear_interrupt_checkpoint,
         create_session_id,
         export_session_history,
         get_session_storage_dir,
+        has_interrupt_checkpoint,
         list_stored_sessions,
+        load_interrupt_checkpoint,
         load_session_history,
+        save_interrupt_checkpoint,
         save_session_history,
         search_stored_sessions,
     )
 
     return {
+        "clear_interrupt_checkpoint": clear_interrupt_checkpoint,
         "create_session_id": create_session_id,
         "export_session_history": export_session_history,
         "get_session_storage_dir": get_session_storage_dir,
+        "has_interrupt_checkpoint": has_interrupt_checkpoint,
         "list_stored_sessions": list_stored_sessions,
+        "load_interrupt_checkpoint": load_interrupt_checkpoint,
         "load_session_history": load_session_history,
+        "save_interrupt_checkpoint": save_interrupt_checkpoint,
         "save_session_history": save_session_history,
         "search_stored_sessions": search_stored_sessions,
     }
@@ -820,6 +828,94 @@ def persist_runtime_session(
     return session_path
 
 
+def _save_interrupt_checkpoint(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+) -> None:
+    """会话异常中断时保存续传快照，下次启动可恢复。"""
+    try:
+        session_store = _load_session_store_support()
+        session_store["save_interrupt_checkpoint"](
+            str(runtime_context["session_id"]),
+            runner.get_history_snapshot(),
+            mode=runner.mode.value,
+            approval_policy=runtime_context["approval_policy"].value,
+        )
+    except Exception:
+        pass  # 快照保存失败不应影响主流程的错误提示
+
+
+def _resolve_resume_session(
+    runtime_context: dict[str, object],
+) -> tuple[str, list[BaseMessage], str, str] | None:
+    """检查是否存在可续传的中断快照，返回 (session_id, messages, mode, approval_policy) 或 None。"""
+    session_store = _load_session_store_support()
+    checkpoint = session_store["load_interrupt_checkpoint"]()
+    if checkpoint is None:
+        return None
+
+    try:
+        raw_messages = checkpoint.get("messages", [])
+        if not isinstance(raw_messages, list) or not raw_messages:
+            return None
+        from langchain_core.messages import messages_from_dict
+        messages = messages_from_dict(raw_messages)
+    except Exception:
+        return None
+
+    session_id = str(checkpoint.get("session_id", ""))
+    mode = str(checkpoint.get("mode", "standard"))
+    approval_policy = str(checkpoint.get("approval_policy", "prompt"))
+    return session_id, messages, mode, approval_policy
+
+
+def _has_pending_checkpoint() -> bool:
+    """是否存在待恢复的中断快照。"""
+    session_store = _load_session_store_support()
+    return session_store["has_interrupt_checkpoint"]()
+
+
+def _try_auto_resume(runtime_context: dict[str, object]) -> None:
+    """尝试从最近的中断快照恢复会话并进入交互循环。"""
+    result = _resolve_resume_session(runtime_context)
+    if result is None:
+        renderer.print_info("未检测到可恢复的中断会话。")
+        renderer.print_info("正在初始化新会话...")
+        run_chat_loop(None, runtime_context)
+        return
+
+    session_id, messages, saved_mode, saved_policy = result
+    from ..agent.approval import parse_approval_policy
+    from ..agent.mode import parse_agent_mode
+
+    try:
+        target_mode = parse_agent_mode(saved_mode)
+        target_policy = parse_approval_policy(saved_policy)
+    except ValueError:
+        renderer.print_error("快照中的模式或审批策略无效，无法恢复。")
+        return
+
+    runner = create_runner(runtime_context)
+    runner.switch_mode(target_mode)
+    try:
+        runner.restore_history(messages)
+    except ValueError as exc:
+        renderer.print_error(f"快照恢复失败：{exc}")
+        return
+
+    runtime_context["approval_policy"] = target_policy
+    sync_runtime_context_from_runner(runtime_context, runner)
+    start_new_runtime_session(runtime_context, source_session_id=session_id)
+    session_store = _load_session_store_support()
+    session_store["clear_interrupt_checkpoint"]()
+
+    renderer.print_info(
+        f"已恢复中断会话 {session_id}，"
+        f"模式={saved_mode}，消息数={len(messages)}。"
+    )
+    run_chat_loop(runner, runtime_context, show_banner=True)
+
+
 def _format_context_message(message: BaseMessage, index: int) -> str:
     """将消息压缩为适合终端浏览的一行上下文摘要。"""
     AIMessage, HumanMessage, SystemMessage, ToolMessage = _load_message_type_support()
@@ -1430,10 +1526,11 @@ def run_chat_loop(
             persist_runtime_session(runner, runtime_context)
         except ExecutionInterruptedError as exc:
             persist_runtime_session(runner, runtime_context)
+            _save_interrupt_checkpoint(runner, runtime_context)
             renderer.print_info(str(exc))
         except Exception as exc:
             persist_runtime_session(runner, runtime_context)
-            # TODO(联调补全): 后续可按网络、工具、模型错误分别渲染更具体的提示。
+            _save_interrupt_checkpoint(runner, runtime_context)
             renderer.print_error(f"运行失败：{exc}")
 
 
@@ -1504,6 +1601,11 @@ def main_callback(
         "--skill-dir",
         help="额外 skill 目录，可重复传入以加载多个目录下的 SKILL.md。",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="检测并恢复上次中断的会话。",
+    ),
 ) -> None:
     """默认无子命令时直接进入交互式对话。"""
     ctx.ensure_object(dict)
@@ -1523,6 +1625,15 @@ def main_callback(
         raise typer.BadParameter(str(exc)) from exc
     if ctx.invoked_subcommand is None:
         runtime_context = get_or_build_runtime_context(ctx)
+        if resume:
+            _try_auto_resume(runtime_context)
+            return
+        # 检测到中断快照时自动提示
+        if _has_pending_checkpoint():
+            renderer.print_info(
+                "检测到上次会话异常中断的快照。使用 --resume 恢复，"
+                "或 /history load 选择其他会话。"
+            )
         renderer.print_info("正在初始化会话，首次模型调用时会按需加载工具。")
         run_chat_loop(
             None,

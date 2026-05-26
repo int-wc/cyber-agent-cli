@@ -434,3 +434,64 @@ def export_session_history(
 
     resolved_target_path.write_text(exported_content, encoding="utf-8")
     return resolved_target_path
+
+
+# ── 中断续传 ──
+
+CHECKPOINT_FILENAME = "_checkpoint.json"
+
+
+def save_interrupt_checkpoint(
+    session_id: str,
+    messages: list[BaseMessage],
+    *,
+    mode: str,
+    approval_policy: str,
+    base_dir: Path | None = None,
+) -> Path:
+    """会话异常中断时保存快照，供下次启动自动续传。"""
+    storage_dir = get_session_storage_dir(base_dir)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = storage_dir / CHECKPOINT_FILENAME
+    payload = {
+        "session_id": session_id,
+        "mode": mode,
+        "approval_policy": approval_policy,
+        "turn_count": sum(isinstance(m, HumanMessage) for m in messages),
+        "message_count": len(messages),
+        "interrupted_at": datetime.now().astimezone().isoformat(),
+        "messages": messages_to_dict(messages),
+    }
+    checkpoint_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return checkpoint_path
+
+
+def load_interrupt_checkpoint(
+    base_dir: Path | None = None,
+) -> dict[str, object] | None:
+    """读取中断快照，不存在则返回 None。"""
+    checkpoint_path = get_session_storage_dir(base_dir) / CHECKPOINT_FILENAME
+    if not checkpoint_path.exists():
+        return None
+    try:
+        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict) or "messages" not in payload:
+        return None
+    return payload
+
+
+def clear_interrupt_checkpoint(base_dir: Path | None = None) -> None:
+    """成功恢复后清除中断快照，避免重复提示。"""
+    checkpoint_path = get_session_storage_dir(base_dir) / CHECKPOINT_FILENAME
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+
+
+def has_interrupt_checkpoint(base_dir: Path | None = None) -> bool:
+    """快速检查是否存在中断快照。"""
+    return get_session_storage_dir(base_dir).joinpath(CHECKPOINT_FILENAME).exists()
