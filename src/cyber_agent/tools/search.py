@@ -85,7 +85,7 @@ window.navigator.permissions.query = (parameters) => (
     originalQuery(parameters)
 );
 """
-SEARCH_TIME_BUDGET_SECONDS = 5.5
+SEARCH_TIME_BUDGET_SECONDS = 5.8
 MAX_SEARCH_QUERY_LENGTH = 300
 PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 4
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
@@ -1150,6 +1150,67 @@ def _setup_speed_optimizations(page: Any) -> None:
         pass  # 低版本 Playwright 可能不支持 route
 
 
+def _build_query_variants(query: str, target_count: int) -> list[str]:
+    """从原始查询生成多组相关查询变体，覆盖不同角度获取更多样化结果。"""
+    variants = [query]
+    eng_words = re.findall(r"[a-zA-Z]{3,}", query)
+    cn_words = re.findall(r"[一-鿿]{2,4}", query)
+
+    if eng_words:
+        # 扩展关键词组合
+        if len(eng_words) >= 3:
+            variants.append(" ".join(eng_words[:3]) + " details")
+            variants.append(" ".join(eng_words[:2]) + " analysis report")
+        elif len(eng_words) >= 2:
+            variants.append(" ".join(eng_words) + " overview")
+        variants.append(query + " in-depth results")
+    if cn_words:
+        variants.append(" ".join(cn_words[:3]) if len(cn_words) >= 3 else " ".join(cn_words))
+        if eng_words:
+            variants.append(" ".join(cn_words[:2]) + " " + " ".join(eng_words[:2]))
+    if target_count >= 30:
+        if eng_words:
+            variants.append(" ".join(eng_words[:2]) + " news latest")
+        if cn_words:
+            variants.append(" ".join(cn_words[:2]) + " 最新进展")
+        variants.append(query + " OR " + query.replace(" ", "+"))
+
+    # 去重并限制
+    unique = []
+    seen = set()
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    return unique[:10]
+
+
+def _extract_results_via_js(page: Any) -> list[dict[str, str]]:
+    """通过 JavaScript 直接从 DOM 提取搜索结果，比 Playwright locator 更快更稳定。"""
+    try:
+        return page.evaluate("""() => {
+            const items = [], seen = new Set();
+            const add = (title, url, snippet) => {
+                if (!url || !url.startsWith('http') || seen.has(url)) return;
+                if (!title || title.length < 3) return;
+                seen.add(url);
+                items.push({title: title.trim().substring(0,120), url: url, snippet: (snippet||'').trim().substring(0,200)});
+            };
+            document.querySelectorAll('li.b_algo').forEach(li => {
+                const link = li.querySelector('h2 a');
+                const snip = li.querySelector('.b_caption p, .b_snippet');
+                if (link) add(link.textContent, link.href, snip ? snip.textContent : '');
+            });
+            document.querySelectorAll('.news-card a[href], .b_news a[href]').forEach(a => {
+                const label = a.querySelector('[aria-label]');
+                add(label ? label.textContent : a.textContent, a.href, '');
+            });
+            return items;
+        }""")
+    except Exception:
+        return []
+
+
 def _search_bing_multiquery(
     page: Any,
     engine_spec: SearchEngineSpec,
@@ -1157,49 +1218,47 @@ def _search_bing_multiquery(
     result_limit: int,
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
-    """快速多查询搜索：在同一浏览器中依次搜索主查询+变体查询，
-    合并去重以突破单次搜索 10 条限制。每页耗时 ~2s。"""
+    """快速多查询搜索：同一浏览器依次搜索多个查询变体，
+    采用 JS 直接提取 DOM 结果 + 资源拦截加速，合并去重突破单次 10 条限制。"""
     import time as time_mod
 
     deadline = time_mod.monotonic() + SEARCH_TIME_BUDGET_SECONDS
     raw_results: list[SearchResult] = []
     seen_urls: set[str] = set()
+    query_variants = _build_query_variants(query, result_limit)
 
-    # 主查询 + 变体查询，通过不同词获取不同结果
-    query_variants = [query]
-    # 从查询中拆出英文关键词做变体
-    eng_words = re.findall(r"[a-zA-Z]{3,}", query)
-    if eng_words:
-        query_variants.append(query + ' ' + ' '.join(eng_words[:3]))
-    query_variants.append(query + ' results details')
-
-    for variant in query_variants[:4]:  # 最多 4 个变体
+    for variant in query_variants:
         remaining = deadline - time_mod.monotonic()
         if remaining <= 1.0 or len(raw_results) >= result_limit:
             break
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()
 
-        search_url = f"https://www.bing.com/search?q={variant}&form=QBLH"
+        search_url = f"https://www.bing.com/search?q={variant}&count=50&form=QBLH"
         try:
             page.goto(
                 search_url,
                 wait_until="domcontentloaded",
                 timeout=int(max(2.0, remaining) * 1000),
             )
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(150)
 
             if _page_looks_blocked(page, engine_spec):
                 continue
 
-            page_results = _extract_results_from_page(
-                page, engine_spec, variant, result_limit, execution_controller,
-            )
+            page_results = _extract_results_via_js(page)
             for r in page_results:
-                dedup_url = r.url.rstrip("/")
-                if dedup_url not in seen_urls:
+                dedup_url = str(r.get("url", "")).rstrip("/")
+                if dedup_url and dedup_url not in seen_urls:
                     seen_urls.add(dedup_url)
-                    raw_results.append(r)
+                    result = SearchResult(
+                        title=str(r.get("title", "")),
+                        url=dedup_url,
+                        snippet=str(r.get("snippet", "")),
+                        source_engine=engine_spec.name,
+                    )
+                    _annotate_result_relevance(variant, result)
+                    raw_results.append(result)
 
         except Exception:
             continue

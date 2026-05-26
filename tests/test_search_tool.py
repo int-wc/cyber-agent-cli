@@ -263,6 +263,9 @@ class FakeSearchPage:
         )
         return locator_map
 
+    def route(self, pattern: str, handler) -> None:
+        return None  # no-op for speed optimization tests
+
     def goto(self, url: str, **kwargs) -> None:
         self.goto_urls.append(url)
         self.url = url
@@ -276,6 +279,16 @@ class FakeSearchPage:
 
     def evaluate(self, script: str):
         self.evaluate_calls.append(script)
+        # 返回模拟的 JS 提取结果
+        if "li.b_algo" in script and "querySelectorAll" in script:
+            results = []
+            link = self._locator_map.get(
+                "li.b_algo h2 a",
+                FakeLocatorCollection([FakeLocator(text="Example Result", attrs={"href": "https://example.com/article"})])
+            ).first
+            if hasattr(link, 'text') and hasattr(link, 'attrs'):
+                results.append({"title": link.text, "url": link.attrs.get("href", ""), "snippet": "Example summary."})
+            return results
         return None
 
     def title(self) -> str:
