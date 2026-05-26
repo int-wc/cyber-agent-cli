@@ -220,13 +220,16 @@ class FakeSearchPage:
                     "textarea[name='wd']": FakeLocatorCollection([input_locator]),
                     "input[name='wd']": FakeLocatorCollection([input_locator]),
                     "#content_left": FakeLocatorCollection([FakeLocator(text="results ready")]),
-                    "#content_left > div.result, #content_left > div.result-op": FakeLocatorCollection(
+                    "#content_left > div.result, #content_left > div.result-op, div.result": FakeLocatorCollection(
                         [baidu_result_card]
                     ),
-                    "#content_left > div.result h3 a, #content_left > div.result-op h3 a": FakeLocatorCollection(
+                    "#content_left > div.result h3 a, #content_left > div.result-op h3 a, div.result h3 a": FakeLocatorCollection(
                         [baidu_result_link]
                     ),
                     "#content_left > div.result .c-abstract, #content_left > div.result-op .c-abstract": (
+                        FakeLocatorCollection([FakeLocator(text="Example baidu summary.")])
+                    ),
+                    "div.result .c-abstract": (
                         FakeLocatorCollection([FakeLocator(text="Example baidu summary.")])
                     ),
                 }
@@ -419,10 +422,26 @@ class SearchToolTestCase(unittest.TestCase):
 
     def test_single_engine_search_uses_homepage_and_types_query(self) -> None:
         """
-        测试：浏览器搜索应先打开首页，再在输入框中逐字输入关键词并提交，而不是直接拼搜索 URL。
+        测试：当搜索引擎未配置 search_url_template 时，应回退到首页模拟输入流程。
         """
+        from cyber_agent.tools.search import SearchEngineSpec
+
         page = FakeSearchPage()
-        engine_spec = PLAYWRIGHT_SEARCH_ENGINES[0]
+        # 构造无快速通道的引擎规格，确保走首页输入流程
+        engine_spec = SearchEngineSpec(
+            name="bing",
+            homepage_url="https://www.bing.com/",
+            search_input_selectors=("textarea[name='q']", "input[name='q']"),
+            result_ready_selectors=("#b_results", "li.b_algo"),
+            result_selector="li.b_algo",
+            link_selector="li.b_algo h2 a",
+            title_selector="li.b_algo h2 a",
+            snippet_selectors=("li.b_algo .b_caption p", "li.b_algo .b_snippet"),
+            card_link_selectors=("h2 a",),
+            card_title_selectors=("h2 a",),
+            card_snippet_selectors=(".b_caption p", ".b_snippet"),
+            search_button_selectors=("button#search_icon", "input#sb_form_go"),
+        )
 
         results, note = _search_with_single_engine(
             page,

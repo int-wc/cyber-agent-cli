@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import random
 import re
@@ -142,6 +141,8 @@ class SearchEngineSpec:
     blocked_title_markers: tuple[str, ...] = ()
     blocked_url_markers: tuple[str, ...] = ()
     blocked_text_markers: tuple[str, ...] = ()
+    search_url_template: str = ""
+    homepage_goto_timeout_milliseconds: int = PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS
     result_ready_timeout_milliseconds: int = PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS
     load_state_timeout_milliseconds: int = PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS
     post_submit_wait_milliseconds: int = PLAYWRIGHT_WAIT_MILLISECONDS
@@ -154,6 +155,8 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="bing",
         homepage_url="https://www.bing.com/",
+        # 直接构造搜索 URL 作为快速通道，免去首页导航和输入交互
+        search_url_template="https://www.bing.com/search?q={query}&form=QBLH",
         search_input_selectors=("textarea[name='q']", "input[name='q']"),
         result_ready_selectors=("#b_results", "li.b_algo"),
         result_selector="li.b_algo",
@@ -182,6 +185,7 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "验证你是人类",
             "are you a robot",
         ),
+        homepage_goto_timeout_milliseconds=5000,
         post_submit_wait_milliseconds=200,
         settle_wait_milliseconds=150,
         auto_scroll_rounds=1,
@@ -189,8 +193,11 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="google",
         homepage_url="https://www.google.com/",
-        search_input_selectors=("textarea[name='q']", "textarea[name='q'][title='搜索']", "input[name='q']"),
-        result_ready_selectors=("#search", "#rso", "div.g"),
+        search_input_selectors=(
+            "textarea[name='q']", "textarea[name='q'][title='搜索']",
+            "input[name='q']", "input[aria-label='搜索']", "input[type='text']",
+        ),
+        result_ready_selectors=("#search", "#rso", "#res", "div.g", "div[data-sokoban-container]"),
         result_selector="div.g",
         link_selector="div.g a[href]:has(h3)",
         title_selector="div.g a[href]:has(h3) h3",
@@ -218,40 +225,49 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "unusual traffic", "before you continue", "our systems have detected",
             "automated queries", "automated requests", "suspicious",
         ),
-        post_submit_wait_milliseconds=200,
-        settle_wait_milliseconds=150,
+        homepage_goto_timeout_milliseconds=6000,
+        result_ready_timeout_milliseconds=8000,
+        load_state_timeout_milliseconds=5000,
+        post_submit_wait_milliseconds=300,
+        settle_wait_milliseconds=200,
         auto_scroll_rounds=1,
     ),
     SearchEngineSpec(
         name="baidu",
         homepage_url="https://www.baidu.com/",
-        search_input_selectors=("textarea[name='wd']", "input[name='wd']", "input#kw"),
+        search_input_selectors=(
+            "textarea[name='wd']", "input[name='wd']", "input#kw",
+            "input#index-kw", "input.s_ipt",
+        ),
         result_ready_selectors=(
             "#content_left",
             "#content_left > div.result",
             "#content_left > div.result-op",
             "#results",
+            "div.result",
         ),
-        result_selector="#content_left > div.result, #content_left > div.result-op",
-        link_selector="#content_left > div.result h3 a, #content_left > div.result-op h3 a",
-        title_selector="#content_left > div.result h3 a, #content_left > div.result-op h3 a",
+        result_selector="#content_left > div.result, #content_left > div.result-op, div.result",
+        link_selector="#content_left > div.result h3 a, #content_left > div.result-op h3 a, div.result h3 a",
+        title_selector="#content_left > div.result h3 a, #content_left > div.result-op h3 a, div.result h3 a",
         snippet_selectors=(
             "#content_left > div.result .c-abstract, #content_left > div.result-op .c-abstract",
             "#content_left > div.result .content-right_8Zs40, #content_left > div.result-op .content-right_8Zs40",
             "#content_left > div.result .c-span-last, #content_left > div.result-op .c-span-last",
+            "div.result .c-abstract",
         ),
         card_link_selectors=("h3 a",),
         card_title_selectors=("h3 a",),
         card_snippet_selectors=(".c-abstract", ".content-right_8Zs40", ".c-span-last"),
-        search_button_selectors=("input#su", "button#su"),
+        search_button_selectors=("input#su", "button#su", "input[type='submit']"),
         blocked_title_markers=("百度安全验证", "安全验证", "百度防护", "验证"),
         blocked_text_markers=(
             "百度安全验证", "安全验证", "请输入验证码",
             "访问验证", "行为验证", "网络不给力",
             "您的网络存在异常", "请完成下方验证",
         ),
-        result_ready_timeout_milliseconds=6000,
-        load_state_timeout_milliseconds=6000,
+        homepage_goto_timeout_milliseconds=6000,
+        result_ready_timeout_milliseconds=8000,
+        load_state_timeout_milliseconds=5000,
         post_submit_wait_milliseconds=400,
         settle_wait_milliseconds=200,
         auto_scroll_rounds=1,
@@ -271,7 +287,14 @@ def _pick_random_viewport() -> dict[str, int]:
 
 
 def _random_jitter(base_ms: int, pct: float = 0.3) -> int:
-    """在基准值上下 pct 范围内添加随机抖动，避免机器人般精确的定时模式。"""
+    """在基准值上添加正向随机抖动，避免机器人般精确的定时模式。
+    超时类参数只增不减，确保不会因抖动导致过早超时。"""
+    delta = max(1, int(base_ms * pct))
+    return base_ms + random.randint(0, delta)
+
+
+def _random_jitter_bidir(base_ms: int, pct: float = 0.3) -> int:
+    """双向随机抖动，用于非超时的行为延迟。"""
     delta = max(1, int(base_ms * pct))
     return max(0, base_ms + random.randint(-delta, delta))
 
@@ -825,26 +848,53 @@ def _search_with_single_engine(
     result_limit: int,
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
-    """使用单个搜索引擎执行真人式浏览器搜索，所有延迟均添加随机抖动。"""
+    """使用单个搜索引擎执行浏览器搜索。
+    优先使用直接搜索 URL（跳过首页导航与输入交互），
+    失败时回退到首页模拟输入流程。"""
+    if execution_controller is not None:
+        execution_controller.ensure_not_cancelled()
+
+    goto_timeout = engine_spec.homepage_goto_timeout_milliseconds
+
+    # 快速通道：直接构造搜索 URL 免去首页导航和模拟输入
+    if engine_spec.search_url_template:
+        search_url = engine_spec.search_url_template.format(query=query)
+        try:
+            page.goto(search_url, wait_until="domcontentloaded", timeout=goto_timeout)
+            page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
+
+            if not _page_looks_blocked(page, engine_spec):
+                if _wait_for_results_to_settle(page, engine_spec, execution_controller):
+                    return _extract_results_from_page(page, engine_spec, query, result_limit, execution_controller), None
+        except Exception:
+            pass  # 快速通道失败，回退到首页输入流程
+
+    # 标准流程：从首页导航并模拟输入
     if execution_controller is not None:
         execution_controller.ensure_not_cancelled()
 
     page.goto(
         engine_spec.homepage_url,
         wait_until="domcontentloaded",
-        timeout=_random_jitter(PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS),
+        timeout=goto_timeout,
     )
-    page.wait_for_timeout(_random_jitter(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
+    page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
+
+    # 处理同意弹窗或拦截页
     if engine_spec.consent_button_selectors:
         _click_first_available(page, engine_spec.consent_button_selectors)
-        page.wait_for_timeout(_random_jitter(200, pct=0.5))
+        page.wait_for_timeout(_random_jitter_bidir(300, pct=0.5))
+
+    # 若首页就是拦截页，提前退出
+    if _page_looks_blocked(page, engine_spec):
+        return [], f"{engine_spec.name} 首页被拦截，可能是反爬虫验证。"
 
     search_input = _wait_for_first_visible_locator(page, engine_spec.search_input_selectors)
     if search_input is None:
         return [], f"{engine_spec.name} 未找到搜索输入框。"
 
     _type_query_like_human(search_input, query)
-    page.wait_for_timeout(_random_jitter(200, pct=0.5))
+    page.wait_for_timeout(_random_jitter_bidir(200, pct=0.5))
     _submit_search(page, search_input, engine_spec)
     if not _wait_for_results_to_settle(page, engine_spec, execution_controller):
         if _page_looks_blocked(page, engine_spec):
@@ -856,6 +906,17 @@ def _search_with_single_engine(
         blocked_title = _normalize_whitespace(page.title()) or str(getattr(page, "url", ""))
         return [], f"{engine_spec.name} 返回验证或拦截页面：{blocked_title}"
 
+    return _extract_results_from_page(page, engine_spec, query, result_limit, execution_controller), None
+
+
+def _extract_results_from_page(
+    page: Any,
+    engine_spec: SearchEngineSpec,
+    query: str,
+    result_limit: int,
+    execution_controller: ExecutionController | None,
+) -> list[SearchResult]:
+    """从当前搜索引擎页面提取已加载的结果卡片。"""
     results: list[SearchResult] = []
     inspect_count = max(result_limit * PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER, result_limit)
     result_cards = page.locator(engine_spec.result_selector)
@@ -863,28 +924,19 @@ def _search_with_single_engine(
     fallback_title_count = _count_locators(page.locator(engine_spec.title_selector))
     available_result_count = max(result_card_count, fallback_title_count)
     if available_result_count <= 0:
-        return [], f"{engine_spec.name} 未解析到可用结果。"
+        return []
 
     for index in range(min(available_result_count, inspect_count)):
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()
 
         result_card = result_cards.nth(index) if index < result_card_count else None
-        parsed_result = _extract_result_from_card(
-            page,
-            result_card,
-            engine_spec,
-            index,
-        )
+        parsed_result = _extract_result_from_card(page, result_card, engine_spec, index)
         if parsed_result is None:
             continue
-
         results.append(parsed_result)
         _annotate_result_relevance(query, results[-1])
-
-    if not results:
-        return [], f"{engine_spec.name} 结果页存在，但没有抽取到标题和链接。"
-    return results, None
+    return results
 
 
 def _build_query_terms(query: str) -> list[str]:
@@ -1037,22 +1089,6 @@ def enrich_results_with_page_visits(
     return visit_notes
 
 
-def _should_skip_model_relevance(
-    results: list[SearchResult],
-    capability_registry: CapabilityRegistry | None,
-) -> bool:
-    """当未提供 registry 且规则评分明确时跳过模型评估以节省时间。"""
-    if capability_registry is not None:
-        return False
-    if not results:
-        return True
-    visited_results = [r for r in results if r.visited]
-    if not visited_results:
-        return False
-    high_count = sum(1 for r in visited_results if r.relevance_score >= PLAYWRIGHT_RELEVANCE_HIGH_SCORE)
-    return high_count >= len(visited_results)
-
-
 def _create_stealth_browser_context(playwright: Any) -> tuple[Any, Any]:
     """创建带反检测能力的浏览器和上下文。"""
     browser = playwright.chromium.launch(
@@ -1070,32 +1106,35 @@ def _create_stealth_browser_context(playwright: Any) -> tuple[Any, Any]:
         },
         permissions=["geolocation"],
     )
-    # 注入反检测脚本到每个新页面
     browser_context.add_init_script(_STEALTH_SCRIPT)
     return browser, browser_context
 
 
-def _search_engine_in_thread(
+def _search_engine_in_isolated_context(
     engine_spec: SearchEngineSpec,
     query: str,
     result_limit: int,
     execution_controller: ExecutionController | None,
-    playwright: Any,
 ) -> tuple[list[SearchResult], str | None]:
-    """在独立线程中搜索单个搜索引擎，各线程持有独立的反检测浏览器上下文。"""
+    """在独立线程中搜索单个引擎，各自持有独立的 sync_playwright 上下文。
+    Playwright 的 sync API 依赖 greenlet，不能跨线程共享 playwright 对象。"""
+    if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
+        return [], "Playwright 不可用"
+
     if execution_controller is not None:
         execution_controller.ensure_not_cancelled()
 
-    browser, browser_context = _create_stealth_browser_context(playwright)
-    page = browser_context.new_page()
-    try:
-        return _search_with_single_engine(
-            page, engine_spec, query, result_limit, execution_controller,
-        )
-    finally:
-        page.close()
-        browser_context.close()
-        browser.close()
+    with sync_playwright() as pw:
+        browser, browser_context = _create_stealth_browser_context(pw)
+        page = browser_context.new_page()
+        try:
+            return _search_with_single_engine(
+                page, engine_spec, query, result_limit, execution_controller,
+            )
+        finally:
+            page.close()
+            browser_context.close()
+            browser.close()
 
 
 def search_with_playwright(
@@ -1104,8 +1143,9 @@ def search_with_playwright(
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
-    """使用 Playwright 并行搜索多个引擎，合并去重后按相关性排序。
-    默认仅使用搜索摘要评分，不访问页面、不调用模型评估，确保 3 秒内出结果。"""
+    """使用 Playwright 搜索多个引擎，合并去重后按相关性排序。
+    引擎按优先级依次尝试，首个返回足量结果的引擎即终止，不再等待后续引擎。
+    单引擎内部设置较短超时，确保总体耗时可控。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
         return [], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]
 
@@ -1116,66 +1156,37 @@ def search_with_playwright(
             else "浏览器模式：无头窗口"
         )
     ]
-    with sync_playwright() as playwright:
-        engine_results_map: dict[str, tuple[list[SearchResult], str | None]] = {}
+    min_results_for_early_exit = min(max(3, result_limit // 8), 10)
+    raw_results: list[SearchResult] = []
 
-        if len(PLAYWRIGHT_SEARCH_ENGINES) == 0:
-            return [], notes
-        if len(PLAYWRIGHT_SEARCH_ENGINES) == 1:
-            for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
-                try:
-                    engine_results_map[engine_spec.name] = _search_engine_in_thread(
-                        engine_spec, query, result_limit, execution_controller, playwright,
-                    )
-                except PlaywrightError as exc:
-                    engine_results_map[engine_spec.name] = ([], str(exc))
-        else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(PLAYWRIGHT_SEARCH_ENGINES),
-            ) as executor:
-                future_to_engine = {
-                    executor.submit(
-                        _search_engine_in_thread,
-                        engine_spec,
-                        query,
-                        result_limit,
-                        execution_controller,
-                        playwright,
-                    ): engine_spec.name
-                    for engine_spec in PLAYWRIGHT_SEARCH_ENGINES
-                }
-                for future in concurrent.futures.as_completed(future_to_engine):
-                    engine_name = future_to_engine[future]
-                    try:
-                        engine_results_map[engine_name] = future.result()
-                    except ExecutionInterruptedError:
-                        for remaining in future_to_engine:
-                            remaining.cancel()
-                        raise
-                    except PlaywrightError as exc:
-                        engine_results_map[engine_name] = ([], str(exc))
-                    except Exception as exc:
-                        engine_results_map[engine_name] = ([], f"{engine_name} 搜索异常：{exc}")
+    # 引擎按优先级依次尝试，首个拿到足够结果的引擎立即终止
+    for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
+        if execution_controller is not None:
+            execution_controller.ensure_not_cancelled()
 
-        # 按配置顺序合并结果
-        raw_results: list[SearchResult] = []
-        for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
-            engine_results, engine_note = engine_results_map.get(
-                engine_spec.name,
-                ([], f"{engine_spec.name} 未返回结果"),
+        try:
+            engine_results, engine_note = _search_engine_in_isolated_context(
+                engine_spec, query, result_limit, execution_controller,
             )
-            if engine_note:
-                notes.append(engine_note)
-            raw_results.extend(engine_results)
+        except PlaywrightError as exc:
+            engine_results, engine_note = [], str(exc)
+        except Exception as exc:
+            engine_results, engine_note = [], f"{engine_spec.name} 搜索异常：{exc}"
 
-        if not raw_results:
-            return [], notes
+        if engine_note:
+            notes.append(engine_note)
+        raw_results.extend(engine_results)
+
+        # 当前引擎已返回足够结果，跳过后续引擎以节省时间
+        if len(raw_results) >= min_results_for_early_exit:
+            notes.append(f"{engine_spec.name} 已返回 {len(engine_results)} 条结果，跳过其余引擎。")
+            break
+
+    if not raw_results:
+        return [], notes
 
     # 仅依靠摘要进行规则评分与排序，不访问页面、不调用模型
     ranked_results = rank_search_results(query, raw_results)[:result_limit]
-    if len(ranked_results) >= result_limit:
-        notes.append("搜索摘要结果已满足需求，已跳过页面访问和模型评估。")
-
     return rerank_results_by_relevance(ranked_results)[:result_limit], notes
 
 
