@@ -1255,7 +1255,8 @@ def run_agent_turn_with_stop_support(
                 event_handler=render_agent_event,
                 approval_handler=approval_handler,
             )
-        except BaseException as exc:  # noqa: BLE001 - 需跨线程回传真实异常
+        except Exception as exc:
+            # 跨线程回传异常，不捕获 KeyboardInterrupt/SystemExit
             worker_errors.append(exc)
 
     worker_thread = threading.Thread(target=run_agent, daemon=True)

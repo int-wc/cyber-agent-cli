@@ -34,14 +34,6 @@ def agent(state: AgentState, llm: Any, tools: list[BaseTool]) -> dict[str, list[
     return {"messages": [response]}
 
 
-def _normalize_tool_args(tool_call: dict[str, Any]) -> dict[str, Any]:
-    """兼容字典和 JSON 字符串两种工具参数格式。
-    委托给 tools 模块的统一实现。"""
-    from ..tools import normalize_tool_args as _normalize
-
-    return _normalize(tool_call)
-
-
 class _FallbackCompiledGraph:
     """LangGraph 不可用时的最小执行器，保证基础工具链路仍可验证。"""
 
@@ -73,25 +65,10 @@ class _FallbackCompiledGraph:
         )
 
     def _invoke_tool(self, tool_call: dict[str, Any]) -> ToolMessage:
-        """执行单次工具调用，并统一返回 ToolMessage。"""
-        tool_name = str(tool_call.get("name", "")) or "unknown"
-        tool_call_id = str(tool_call.get("id", ""))
-        tool = self._tool_registry.get(tool_name)
-        if tool is None:
-            tool_result = f"❌ 未知工具：{tool_name}"
-        else:
-            try:
-                tool_result = str(tool.invoke(_normalize_tool_args(tool_call)))
-            except ValueError as exc:
-                tool_result = f"❌ 工具参数错误：{exc}"
-            except Exception as exc:  # noqa: BLE001 - 需要把真实工具错误回传到消息链
-                tool_result = f"❌ 工具执行异常：{exc}"
+        """执行单次工具调用，委托到共享执行器。"""
+        from .tool_executor import invoke_tool_simple
 
-        return ToolMessage(
-            content=tool_result,
-            name=tool_name,
-            tool_call_id=tool_call_id,
-        )
+        return invoke_tool_simple(tool_call, self._tool_registry)
 
 
 def create_agent_graph(llm: Any, tools: list[BaseTool]):
