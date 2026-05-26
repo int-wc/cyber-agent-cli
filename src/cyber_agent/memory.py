@@ -59,7 +59,12 @@ def get_memory_dir(base_dir: Path | None = None) -> Path:
 
 
 def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    """从 Markdown 内容中提取 frontmatter 和正文。"""
+    """从 Markdown 内容中提取 frontmatter 和正文。
+
+    支持简单的 YAML 风格嵌套:
+      metadata:
+        type: user_preference
+    """
     match = FRONTMATTER_RE.match(content)
     if not match:
         return {}, content
@@ -67,16 +72,35 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     body = content[match.end():]
     metadata: dict[str, Any] = {}
     current_key = ""
+    in_metadata_block = False
     for line in raw_yaml.splitlines():
         if not line.strip():
             continue
+        # 顶层 key: value
         if ":" in line and not line.startswith(" "):
             key, _, value = line.partition(":")
-            current_key = key.strip()
-            metadata[current_key] = value.strip()
-        elif current_key and line.startswith("  "):
-            # 列表/缩进值
-            pass
+            key = key.strip()
+            value = value.strip()
+            if key == "metadata":
+                in_metadata_block = True
+                if not isinstance(metadata.get("metadata"), dict):
+                    metadata["metadata"] = {}
+                continue
+            current_key = key
+            if in_metadata_block:
+                continue
+            metadata[current_key] = value
+        # 缩进的 metadata 子字段: "  type: value"
+        elif in_metadata_block and line.startswith("  "):
+            stripped = line.strip()
+            if ":" in stripped:
+                sub_key, _, sub_value = stripped.partition(":")
+                if isinstance(metadata.get("metadata"), dict):
+                    metadata["metadata"][sub_key.strip()] = sub_value.strip()
+    # 展平 metadata 子字段到顶层，便于直接访问
+    inner = metadata.pop("metadata", None)
+    if isinstance(inner, dict):
+        metadata.update({k: v for k, v in inner.items()})
     return metadata, body
 
 

@@ -38,6 +38,7 @@ def invoke_tool_simple(
     except ValueError as exc:
         tool_result = f"❌ 工具参数错误：{exc}"
     except Exception as exc:
+        # 需要把真实工具错误回传到消息链，不能因为工具异常中断降级执行器
         tool_result = f"❌ 工具执行异常：{exc}"
 
     return ToolMessage(
