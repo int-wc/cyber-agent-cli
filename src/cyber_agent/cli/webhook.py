@@ -40,6 +40,7 @@ from ..session_store import (
     save_session_history,
     search_stored_sessions,
 )
+from .webhook_crypto import aes_cbc_decrypt, aes_cbc_encrypt, pkcs7_pad, pkcs7_unpad
 from ..tools import (
     describe_allowed_roots,
     describe_command_registry,
@@ -3082,77 +3083,6 @@ def _write_delivery_dead_letter(
     return dead_letter_path
 
 
-def _pkcs7_unpad(payload: bytes, block_size: int) -> bytes:
-    if not payload:
-        raise ValueError("加密数据不能为空。")
-    padding_size = payload[-1]
-    if padding_size < 1 or padding_size > block_size:
-        raise ValueError("加密数据的填充字节非法。")
-    if payload[-padding_size:] != bytes([padding_size]) * padding_size:
-        raise ValueError("加密数据的填充内容非法。")
-    return payload[:-padding_size]
-
-
-def _pkcs7_pad(payload: bytes, block_size: int) -> bytes:
-    padding_size = block_size - (len(payload) % block_size)
-    if padding_size == 0:
-        padding_size = block_size
-    return payload + bytes([padding_size]) * padding_size
-
-
-def _load_optional_aes_cipher() -> tuple[Callable[[bytes, bytes, bytes], bytes], Callable[[bytes, bytes, bytes], bytes]]:
-    """按可用性加载 AES-CBC 加解密实现，避免为 webhook 新增强制依赖。"""
-    try:
-        from Crypto.Cipher import AES  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        try:
-            from cryptography.hazmat.backends import default_backend  # type: ignore[import-not-found]
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # type: ignore[import-not-found]
-        except ModuleNotFoundError as exc:
-            raise ValueError(
-                "当前运行环境缺少 AES 加解密依赖，请安装 pycryptodome 或 cryptography 后再启用官方加密回调。"
-            ) from exc
-
-        def decryptor(key: bytes, iv: bytes, payload: bytes) -> bytes:
-            cipher = Cipher(
-                algorithms.AES(key),
-                modes.CBC(iv),
-                backend=default_backend(),
-            )
-            decrypt_context = cipher.decryptor()
-            return decrypt_context.update(payload) + decrypt_context.finalize()
-
-        def encryptor(key: bytes, iv: bytes, payload: bytes) -> bytes:
-            cipher = Cipher(
-                algorithms.AES(key),
-                modes.CBC(iv),
-                backend=default_backend(),
-            )
-            encrypt_context = cipher.encryptor()
-            return encrypt_context.update(payload) + encrypt_context.finalize()
-
-        return decryptor, encryptor
-
-    def decryptor(key: bytes, iv: bytes, payload: bytes) -> bytes:
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        return cipher.decrypt(payload)
-
-    def encryptor(key: bytes, iv: bytes, payload: bytes) -> bytes:
-        cipher = AES.new(key, AES.MODE_CBC, iv)
-        return cipher.encrypt(payload)
-
-    return decryptor, encryptor
-
-
-def _aes_cbc_decrypt(key: bytes, iv: bytes, payload: bytes) -> bytes:
-    decryptor, _ = _load_optional_aes_cipher()
-    return decryptor(key, iv, payload)
-
-
-def _aes_cbc_encrypt(key: bytes, iv: bytes, payload: bytes) -> bytes:
-    _, encryptor = _load_optional_aes_cipher()
-    return encryptor(key, iv, payload)
-
 
 def create_webhook_approval_handler(
     policy: ApprovalPolicy,
@@ -3338,8 +3268,8 @@ def _decrypt_feishu_payload(
     iv = encrypted_bytes[:16]
     ciphertext = encrypted_bytes[16:]
     hashed_key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
-    decrypted_bytes = _aes_cbc_decrypt(hashed_key, iv, ciphertext)
-    unpadded_bytes = _pkcs7_unpad(decrypted_bytes, 16)
+    decrypted_bytes = aes_cbc_decrypt(hashed_key, iv, ciphertext)
+    unpadded_bytes = pkcs7_unpad(decrypted_bytes, 16)
     return _parse_json_payload(unpadded_bytes)
 
 
@@ -3425,8 +3355,8 @@ def _decrypt_wecom_ciphertext(
 ) -> str:
     encrypted_bytes = base64.b64decode(encrypted_payload)
     aes_key = _normalize_wecom_aes_key(encoding_aes_key)
-    decrypted_bytes = _aes_cbc_decrypt(aes_key, aes_key[:16], encrypted_bytes)
-    unpadded_bytes = _pkcs7_unpad(decrypted_bytes, 32)
+    decrypted_bytes = aes_cbc_decrypt(aes_key, aes_key[:16], encrypted_bytes)
+    unpadded_bytes = pkcs7_unpad(decrypted_bytes, 32)
     if len(unpadded_bytes) < 20:
         raise ValueError("企微解密后的消息体长度不足。")
 
@@ -3456,8 +3386,8 @@ def _encrypt_wecom_plaintext(
         + plaintext_bytes
         + receive_id.encode("utf-8")
     )
-    padded_payload = _pkcs7_pad(raw_payload, 32)
-    encrypted_bytes = _aes_cbc_encrypt(aes_key, aes_key[:16], padded_payload)
+    padded_payload = pkcs7_pad(raw_payload, 32)
+    encrypted_bytes = aes_cbc_encrypt(aes_key, aes_key[:16], padded_payload)
     return base64.b64encode(encrypted_bytes).decode("utf-8")
 
 

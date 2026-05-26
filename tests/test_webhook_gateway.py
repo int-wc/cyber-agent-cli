@@ -29,7 +29,7 @@ from cyber_agent.cli.webhook import (
     WebhookEvent,
     WebhookGateway,
     WebhookRouteConfig,
-    _aes_cbc_encrypt,
+    aes_cbc_encrypt,
     _build_wecom_signature,
     _decrypt_wecom_ciphertext,
     _encrypt_wecom_plaintext,
@@ -341,7 +341,7 @@ def _build_feishu_encrypted_body(
     plaintext = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     iv = bytes(range(16))
     aes_key = hashlib.sha256(encrypt_key.encode("utf-8")).digest()
-    ciphertext = _aes_cbc_encrypt(aes_key, iv, _pad_pkcs7(plaintext, 16))
+    ciphertext = aes_cbc_encrypt(aes_key, iv, _pad_pkcs7(plaintext, 16))
     encrypted_payload = base64.b64encode(iv + ciphertext).decode("utf-8")
     return json.dumps({"encrypt": encrypted_payload}, ensure_ascii=False).encode("utf-8")
 
