@@ -447,6 +447,33 @@ def ensure_runtime_capabilities(
         )
 
 
+def _run_multi_agent_turn(
+    user_input: str,
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+) -> None:
+    """使用多 Agent 编排器执行一轮对话。"""
+    from ..agent.orchestrator import MultiAgentOrchestrator
+
+    renderer.print_turn_start()
+    renderer.print_info("正在启动多 Agent 协作模式...")
+
+    orchestrator = MultiAgentOrchestrator(
+        tools=list(getattr(runner, "tools", [])),
+        execution_controller=runtime_context.get("execution_controller"),
+        service_name=str(runtime_context.get("service_name", "deepseek")),
+        model_name=str(runtime_context.get("model_name", "")),
+        api_key=str(runtime_context.get("api_key", "")),
+        base_url=str(runtime_context.get("base_url", "")) if runtime_context.get("base_url") is not None else None,
+    )
+
+    try:
+        result = orchestrator.run(user_input)
+        renderer.print_chat_message("assistant", result)
+    except Exception as exc:
+        renderer.print_error(f"多 Agent 协作失败：{exc}")
+
+
 def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
     """按运行上下文创建会话运行器。"""
     AgentRunner, _ = _load_agent_runner_support()
@@ -1296,7 +1323,10 @@ def run_chat_loop(
             continue
 
         try:
-            if sys.stdin.isatty() and sys.stdout.isatty():
+            # 多 Agent 模式：使用编排器并行执行
+            if runtime_context.get("multi_agent_enabled") is True:
+                _run_multi_agent_turn(user_input, runner, runtime_context)
+            elif sys.stdin.isatty() and sys.stdout.isatty():
                 run_agent_turn_with_stop_support(
                     runner,
                     user_input,
