@@ -60,7 +60,7 @@ class Settings(BaseSettings):
         validation_alias="SEARCH_TIMEOUT_SECONDS",
     )
     search_result_limit: int = Field(
-        default=5,
+        default=40,
         validation_alias="SEARCH_RESULT_LIMIT",
     )
     search_show_browser: bool = Field(

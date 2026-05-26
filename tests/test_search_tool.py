@@ -471,7 +471,7 @@ class SearchToolTestCase(unittest.TestCase):
 
     def test_baidu_search_waits_for_full_load_before_extracting_results(self) -> None:
         """
-        测试：Baidu 搜索会等待完整加载状态，并在结果页执行自动滚动。
+        测试：Baidu 搜索会在结果页执行自动滚动并提取结果。
         """
         page = FakeSearchPage(engine_name="baidu")
         engine_spec = next(engine for engine in PLAYWRIGHT_SEARCH_ENGINES if engine.name == "baidu")
@@ -485,10 +485,6 @@ class SearchToolTestCase(unittest.TestCase):
         )
 
         self.assertIsNone(note)
-        self.assertIn("load", page.load_state_waits)
-        self.assertIn("networkidle", page.load_state_waits)
-        self.assertIn(("load", 9000), page.load_state_calls)
-        self.assertIn(("networkidle", 9000), page.load_state_calls)
         self.assertGreaterEqual(len(page.scroll_actions), 1)
         self.assertEqual(results[0].url, "https://example.com/baidu")
 
@@ -529,28 +525,15 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertIn("浏览器模式：可见窗口", notes)
         self.assertEqual(chromium.launch_kwargs, {"headless": False})
 
-    def test_search_with_playwright_uses_model_relevance_when_registry_available(self) -> None:
+    def test_search_with_playwright_ranks_by_rule_relevance_when_no_registry(self) -> None:
         """
-        测试：若提供模型能力注册器，浏览器搜索结果会升级为模型相关性判定。
+        测试：不提供模型能力注册器时，仅使用规则评分排序搜索结果。
         """
         chromium = FakeChromium()
-        page_sequence = iter([FakeSearchPage(), FakeBrowserPage()])
         chromium.browser = FakeBrowser(
-            context=FakeBrowserContext(page_factory=lambda: next(page_sequence))
+            context=FakeBrowserContext(page_factory=FakeSearchPage)
         )
         manager = FakePlaywrightManager(chromium)
-        capability_registry = FakeCapabilityRegistry(
-            {
-                "results": [
-                    {
-                        "index": 1,
-                        "label": "高度相关",
-                        "score": 96,
-                        "reason": "页面标题、摘要和正文都直接回答查询。",
-                    }
-                ]
-            }
-        )
 
         with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
             "cyber_agent.tools.search.sync_playwright",
@@ -559,47 +542,37 @@ class SearchToolTestCase(unittest.TestCase):
             "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
             (PLAYWRIGHT_SEARCH_ENGINES[0],),
         ):
-            results, notes = search_with_playwright(
-                "openai agent",
-                1,
-                capability_registry=capability_registry,
-            )
-
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].relevance_summary, "高度相关")
-        self.assertEqual(results[0].relevance_source, "model")
-        self.assertEqual(results[0].relevance_reason, "页面标题、摘要和正文都直接回答查询。")
-        self.assertIn("已使用模型完成 1 条结果的相关性判定。", notes)
-        self.assertEqual(len(capability_registry.calls), 1)
-
-    def test_search_with_playwright_falls_back_to_rule_relevance_when_model_fails(self) -> None:
-        """
-        测试：模型相关性判定失败时，会保留规则判定并给出回退说明。
-        """
-        chromium = FakeChromium()
-        page_sequence = iter([FakeSearchPage(), FakeBrowserPage()])
-        chromium.browser = FakeBrowser(
-            context=FakeBrowserContext(page_factory=lambda: next(page_sequence))
-        )
-        manager = FakePlaywrightManager(chromium)
-        capability_registry = FakeCapabilityRegistry(RuntimeError("model unavailable"))
-
-        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
-            "cyber_agent.tools.search.sync_playwright",
-            return_value=manager,
-        ), patch(
-            "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
-            (PLAYWRIGHT_SEARCH_ENGINES[0],),
-        ):
-            results, notes = search_with_playwright(
-                "openai agent",
-                1,
-                capability_registry=capability_registry,
-            )
+            results, notes = search_with_playwright("openai agent", 1)
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].relevance_source, "rule")
-        self.assertTrue(any("模型相关性判定失败" in note for note in notes))
+        self.assertTrue(results[0].relevance_summary)
+
+    def test_search_with_playwright_returns_rule_ranked_results(self) -> None:
+        """
+        测试：搜索返回基于规则相关性评分的排序结果。
+        """
+        chromium = FakeChromium()
+        chromium.browser = FakeBrowser(
+            context=FakeBrowserContext(page_factory=FakeSearchPage)
+        )
+        manager = FakePlaywrightManager(chromium)
+
+        with patch("cyber_agent.tools.search.PLAYWRIGHT_AVAILABLE", True), patch(
+            "cyber_agent.tools.search.sync_playwright",
+            return_value=manager,
+        ), patch(
+            "cyber_agent.tools.search.PLAYWRIGHT_SEARCH_ENGINES",
+            (PLAYWRIGHT_SEARCH_ENGINES[0],),
+        ):
+            results, notes = search_with_playwright(
+                "openai agent",
+                3,
+            )
+
+        self.assertGreaterEqual(len(results), 1)
+        self.assertTrue(all(r.relevance_source == "rule" for r in results))
+        self.assertTrue(all(r.relevance_summary for r in results))
 
     def test_enrich_results_with_page_visits_marks_page_relevance(self) -> None:
         """

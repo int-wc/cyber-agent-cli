@@ -969,9 +969,12 @@ JSON 字段要求：
         return audit_result
 
     def _build_runtime_tool(self, capability: GeneratedCapability) -> BaseTool:
-        """将 capability 包装成当前 agent 可直接调用的动态工具。"""
+        """将 capability 包装成当前 agent 可直接调用的动态工具。
+        工具函数在每次调用时从 registry 重新获取 capability 对象，
+        确保修订后的路径和描述能即时生效。"""
+        capability_name = capability.name
 
-        @tool(capability.name)
+        @tool(capability_name)
         def generated_capability_tool(
             request: str,
             context: str = "",
@@ -982,11 +985,17 @@ JSON 字段要求：
             """
             if not request.strip():
                 return "❌ request 不能为空。"
-            if not capability.entrypoint_path:
-                return "❌ 当前 capability 缺少可执行代码文件。"
-            entrypoint_path = Path(capability.entrypoint_path).expanduser()
-            if not entrypoint_path.exists():
-                return f"❌ capability 代码文件不存在：{entrypoint_path}"
+
+            current_capability = self._capabilities.get(capability_name)
+            if current_capability is None:
+                return f"❌ 未找到 capability：{capability_name}"
+
+            entrypoint_path = self._resolve_capability_entrypoint(current_capability)
+            if entrypoint_path is None:
+                return (
+                    f"❌ capability `{capability_name}` 缺少可执行代码文件。"
+                    f" 请通过 revise_generated_capability 重新生成。"
+                )
 
             execution_result = self._execute_generated_capability(
                 entrypoint_path,
@@ -1003,6 +1012,35 @@ JSON 字段要求：
 
         generated_capability_tool.description = capability.tool_description
         return attach_tool_risk(generated_capability_tool, "execute")
+
+    def _resolve_capability_entrypoint(
+        self,
+        capability: GeneratedCapability,
+    ) -> Path | None:
+        """解析 capability 的入口文件路径，在存储路径不存在时执行兜底策略。"""
+        if capability.entrypoint_path:
+            saved_path = Path(capability.entrypoint_path)
+            if saved_path.exists():
+                return saved_path
+
+        # 兜底：从 storage_dir 按名称重建路径
+        fallback_path = self.storage_dir / capability.name / "capability.py"
+        if fallback_path.exists():
+            return fallback_path
+
+        # 最后尝试：如果源码还在，可以重新落盘
+        if capability.source_code:
+            artifact_dir = self.storage_dir / capability.name
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            entrypoint = artifact_dir / "capability.py"
+            try:
+                entrypoint.write_text(capability.source_code, encoding="utf-8")
+            except OSError:
+                return None
+            if entrypoint.exists():
+                return entrypoint
+
+        return None
 
     def _create_generated_capability_tool(self) -> BaseTool:
         """创建用于生成 capability 的管理工具。"""

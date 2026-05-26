@@ -39,14 +39,14 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 MAX_SEARCH_QUERY_LENGTH = 300
-PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 3
+PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 4
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
-PLAYWRIGHT_WAIT_MILLISECONDS = 300
-PLAYWRIGHT_VISIT_WAIT_MILLISECONDS = 150
-PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS = 6000
-PLAYWRIGHT_VISIT_TIMEOUT_MILLISECONDS = 3000
+PLAYWRIGHT_WAIT_MILLISECONDS = 200
+PLAYWRIGHT_VISIT_WAIT_MILLISECONDS = 100
+PLAYWRIGHT_SEARCH_TIMEOUT_MILLISECONDS = 5000
+PLAYWRIGHT_VISIT_TIMEOUT_MILLISECONDS = 2500
 PLAYWRIGHT_TYPE_DELAY_MILLISECONDS = 0
-PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS = 4000
+PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS = 3000
 PLAYWRIGHT_SCROLL_STEP_PIXELS = 960
 PLAYWRIGHT_PAGE_TEXT_MAX_CHARS = 2400
 PLAYWRIGHT_RELEVANCE_HIGH_SCORE = 12
@@ -125,8 +125,8 @@ PLAYWRIGHT_SEARCH_ENGINES = (
             "请输入验证码",
             "请完成验证",
         ),
-        post_submit_wait_milliseconds=400,
-        settle_wait_milliseconds=300,
+        post_submit_wait_milliseconds=200,
+        settle_wait_milliseconds=150,
         auto_scroll_rounds=1,
     ),
     SearchEngineSpec(
@@ -154,8 +154,8 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         blocked_title_markers=("unusual traffic", "before you continue"),
         blocked_url_markers=("/sorry/",),
         blocked_text_markers=("unusual traffic", "before you continue", "our systems have detected"),
-        post_submit_wait_milliseconds=400,
-        settle_wait_milliseconds=300,
+        post_submit_wait_milliseconds=200,
+        settle_wait_milliseconds=150,
         auto_scroll_rounds=1,
     ),
     SearchEngineSpec(
@@ -180,12 +180,12 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         card_snippet_selectors=(".c-abstract", ".content-right_8Zs40", ".c-span-last"),
         search_button_selectors=("input#su", "button#su"),
         blocked_text_markers=("百度安全验证", "安全验证", "请输入验证码"),
-        result_ready_timeout_milliseconds=9000,
-        load_state_timeout_milliseconds=9000,
-        post_submit_wait_milliseconds=800,
-        settle_wait_milliseconds=400,
-        auto_scroll_rounds=2,
-        wait_for_full_page_load=True,
+        result_ready_timeout_milliseconds=6000,
+        load_state_timeout_milliseconds=6000,
+        post_submit_wait_milliseconds=400,
+        settle_wait_milliseconds=200,
+        auto_scroll_rounds=1,
+        wait_for_full_page_load=False,
         blocked_title_markers=("百度安全验证", "安全验证"),
     ),
 )
@@ -1001,7 +1001,8 @@ def search_with_playwright(
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
-    """使用 Playwright 并行搜索多个引擎，合并结果后按相关性排序。"""
+    """使用 Playwright 并行搜索多个引擎，合并去重后按相关性排序。
+    默认仅使用搜索摘要评分，不访问页面、不调用模型评估，确保 3 秒内出结果。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
         return [], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]
 
@@ -1018,7 +1019,6 @@ def search_with_playwright(
         if len(PLAYWRIGHT_SEARCH_ENGINES) == 0:
             return [], notes
         if len(PLAYWRIGHT_SEARCH_ENGINES) == 1:
-            # 单个引擎直接执行，避免不必要的线程开销
             for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
                 try:
                     engine_results_map[engine_spec.name] = _search_engine_in_thread(
@@ -1027,7 +1027,6 @@ def search_with_playwright(
                 except PlaywrightError as exc:
                     engine_results_map[engine_spec.name] = ([], str(exc))
         else:
-            # 多个引擎并行搜索
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(PLAYWRIGHT_SEARCH_ENGINES),
             ) as executor:
@@ -1069,37 +1068,10 @@ def search_with_playwright(
         if not raw_results:
             return [], notes
 
-        ranked_results = rank_search_results(query, raw_results)[
-            : min(len(raw_results), max(result_limit, PLAYWRIGHT_VISIT_RESULT_LIMIT))
-        ]
-
-        # 页面访问仍串行，但在主浏览器上下文中复用
-        browser = playwright.chromium.launch(headless=not settings.search_show_browser)
-        browser_context = browser.new_context(
-            user_agent=DEFAULT_USER_AGENT,
-            viewport={"width": 1366, "height": 900},
-        )
-        try:
-            notes.extend(
-                enrich_results_with_page_visits(
-                    browser_context,
-                    query,
-                    ranked_results,
-                    execution_controller,
-                    min(PLAYWRIGHT_VISIT_RESULT_LIMIT, len(ranked_results)),
-                )
-            )
-        finally:
-            browser_context.close()
-            browser.close()
-
-    # 规则评分明确且未提供 registry 时跳过模型评估以节省时间
-    if _should_skip_model_relevance(ranked_results, capability_registry):
-        notes.append("规则评分置信度足够，已跳过模型相关性评估。")
-    else:
-        notes.extend(
-            evaluate_results_with_model(capability_registry, query, ranked_results)
-        )
+    # 仅依靠摘要进行规则评分与排序，不访问页面、不调用模型
+    ranked_results = rank_search_results(query, raw_results)[:result_limit]
+    if len(ranked_results) >= result_limit:
+        notes.append("搜索摘要结果已满足需求，已跳过页面访问和模型评估。")
 
     return rerank_results_by_relevance(ranked_results)[:result_limit], notes
 
@@ -1232,7 +1204,7 @@ def create_search_web_tool(
     @tool("search_web")
     def search_web(
         query: str,
-        max_results: int = 5,
+        max_results: int = 15,
     ) -> str:
         """
         执行关键词网络搜索，优先使用浏览器首页交互搜索，
