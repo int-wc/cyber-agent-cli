@@ -157,7 +157,7 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         name="bing",
         homepage_url="https://www.bing.com/",
         # 直接构造搜索 URL 作为快速通道，免去首页导航和输入交互
-        search_url_template="https://www.bing.com/search?q={query}&form=QBLH",
+        search_url_template="https://www.bing.com/search?q={query}&count=30&form=QBLH",
         search_input_selectors=("textarea[name='q']", "input[name='q']"),
         result_ready_selectors=("#b_results", "li.b_algo"),
         result_selector="li.b_algo",
@@ -876,7 +876,7 @@ def _search_with_single_engine(
 
     page.goto(
         engine_spec.homepage_url,
-        wait_until="domcontentloaded",
+        wait_until="commit",
         timeout=goto_timeout,
     )
     page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
@@ -1138,61 +1138,75 @@ def _search_engine_in_isolated_context(
             browser.close()
 
 
-def _search_bing_paginated(
+def _setup_speed_optimizations(page: Any) -> None:
+    """拦截图片/CSS/字体等无关资源，加速页面加载。"""
+    try:
+        page.route("**/*", lambda route: (
+            route.abort()
+            if route.request.resource_type in {"image", "stylesheet", "font", "media"}
+            else route.continue_()
+        ))
+    except Exception:
+        pass  # 低版本 Playwright 可能不支持 route
+
+
+def _search_bing_multiquery(
     page: Any,
     engine_spec: SearchEngineSpec,
     query: str,
     result_limit: int,
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
-    """对 Bing 执行分页搜索，多页结果合并去重以突破单页 10 条限制。
-    使用 &first=N 参数直接跳转到不同分页，比模拟点击更快。"""
+    """快速多查询搜索：在同一浏览器中依次搜索主查询+变体查询，
+    合并去重以突破单次搜索 10 条限制。每页耗时 ~2s。"""
+    import time as time_mod
+
+    deadline = time_mod.monotonic() + SEARCH_TIME_BUDGET_SECONDS
     raw_results: list[SearchResult] = []
     seen_urls: set[str] = set()
-    pages_needed = max(1, min((result_limit + 9) // 10, 5))
-    page_offsets = [1, 11, 21, 31, 41][:pages_needed]
 
-    for offset in page_offsets:
+    # 主查询 + 变体查询，通过不同词获取不同结果
+    query_variants = [query]
+    # 从查询中拆出英文关键词做变体
+    eng_words = re.findall(r"[a-zA-Z]{3,}", query)
+    if eng_words:
+        query_variants.append(query + ' ' + ' '.join(eng_words[:3]))
+    query_variants.append(query + ' results details')
+
+    for variant in query_variants[:4]:  # 最多 4 个变体
+        remaining = deadline - time_mod.monotonic()
+        if remaining <= 1.0 or len(raw_results) >= result_limit:
+            break
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()
 
-        paginated_url = f"https://www.bing.com/search?q={query}&first={offset}&form=QBLH"
+        search_url = f"https://www.bing.com/search?q={variant}&form=QBLH"
         try:
             page.goto(
-                paginated_url,
+                search_url,
                 wait_until="domcontentloaded",
-                timeout=engine_spec.homepage_goto_timeout_milliseconds,
+                timeout=int(max(2.0, remaining) * 1000),
             )
-            page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
+            page.wait_for_timeout(200)
 
             if _page_looks_blocked(page, engine_spec):
                 continue
 
-            if not _wait_for_results_to_settle(page, engine_spec, execution_controller):
-                continue
-
             page_results = _extract_results_from_page(
-                page, engine_spec, query, result_limit, execution_controller,
+                page, engine_spec, variant, result_limit, execution_controller,
             )
-            new_count = 0
             for r in page_results:
                 dedup_url = r.url.rstrip("/")
                 if dedup_url not in seen_urls:
                     seen_urls.add(dedup_url)
                     raw_results.append(r)
-                    new_count += 1
-
-            if new_count == 0:
-                break  # 无新结果，后续分页不会再有
 
         except Exception:
-            break  # 分页请求失败则停止
+            continue
 
     if not raw_results:
-        return [], f"{engine_spec.name} 分页搜索未返回可用结果。"
+        return [], f"{engine_spec.name} 多查询搜索未返回可用结果。"
     return raw_results, None
-
-
 def search_with_playwright(
     query: str,
     result_limit: int,
@@ -1212,7 +1226,7 @@ def search_with_playwright(
             else "浏览器模式：无头窗口"
         )
     ]
-    min_results_for_early_exit = min(result_limit, 40)
+    min_results_for_early_exit = min(max(5, result_limit // 4), 15)
     raw_results: list[SearchResult] = []
 
     with sync_playwright() as pw:
@@ -1224,9 +1238,8 @@ def search_with_playwright(
                     execution_controller.ensure_not_cancelled()
 
                 try:
-                    # Bing 启用分页采集突破单页 10 条上限
-                    if engine_spec.search_url_template and engine_spec.name == "bing":
-                        engine_results, engine_note = _search_bing_paginated(
+                    if engine_spec.search_url_template:
+                        engine_results, engine_note = _search_bing_multiquery(
                             page, engine_spec, query, result_limit, execution_controller,
                         )
                     else:
