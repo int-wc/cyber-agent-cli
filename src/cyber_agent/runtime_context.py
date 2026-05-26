@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from agent.approval import ApprovalPolicy
-    from agent.mode import AgentMode
-    from capability_registry import CapabilityRegistry
-    from execution_control import ExecutionController
-    from interactive import InteractionUiMode
     from langchain_core.tools import BaseTool
-    from mcp_client import MCPClient
+
+    from .agent.approval import ApprovalPolicy
+    from .agent.mode import AgentMode
+    from .capability_registry import CapabilityRegistry
+    from .cli.interactive import InteractionUiMode
+    from .execution_control import ExecutionController
+    from .mcp_client import MCPClient
 
 
 class RuntimeContext(TypedDict, total=False):

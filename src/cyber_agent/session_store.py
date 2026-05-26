@@ -15,9 +15,23 @@ from langchain_core.messages import (
     messages_to_dict,
 )
 
+import re
+
 SESSION_STORAGE_DIRNAME = ".cyber-agent-cli-sessions"
 DEFAULT_HISTORY_SEARCH_LIMIT = 20
 DEFAULT_HISTORY_SEARCH_EXCERPT_LENGTH = 120
+# 会话 ID 不能包含路径遍历或非法文件系统字符
+_SESSION_ID_FORBIDDEN_RE = re.compile(r"\.\.|[/\\]|[<>:\"|?*\x00-\x1f]")
+
+
+def _validate_session_id(session_id: str) -> str:
+    """校验会话 ID，拒绝包含路径遍历或非法文件系统字符的值。"""
+    normalized = session_id.strip()
+    if not normalized:
+        raise ValueError("会话 ID 不能为空。")
+    if _SESSION_ID_FORBIDDEN_RE.search(normalized):
+        raise ValueError(f"会话 ID 包含非法字符：{session_id}")
+    return normalized
 
 
 @dataclass(slots=True, frozen=True)
@@ -237,9 +251,10 @@ def save_session_history(
     base_dir: Path | None = None,
 ) -> Path:
     """将当前会话历史保存到工作目录下的独立会话文件。"""
+    validated_id = _validate_session_id(session_id)
     storage_dir = get_session_storage_dir(base_dir)
     storage_dir.mkdir(parents=True, exist_ok=True)
-    session_path = storage_dir / f"{session_id}.json"
+    session_path = storage_dir / f"{validated_id}.json"
 
     created_at = ""
     if session_path.exists():
@@ -250,7 +265,7 @@ def save_session_history(
     timestamp = datetime.now().astimezone().isoformat()
     serialized_messages = messages_to_dict(messages)
     payload = {
-        "session_id": session_id,
+        "session_id": validated_id,
         "title": _build_session_title(messages),
         "created_at": created_at or timestamp,
         "updated_at": timestamp,
@@ -279,7 +294,8 @@ def load_session_history(
     base_dir: Path | None = None,
 ) -> StoredSession:
     """读取指定历史会话，并还原为可继续复用的 LangChain 消息列表。"""
-    session_path = get_session_storage_dir(base_dir) / f"{session_id}.json"
+    validated_id = _validate_session_id(session_id)
+    session_path = get_session_storage_dir(base_dir) / f"{validated_id}.json"
     if not session_path.exists():
         raise ValueError(f"未找到历史会话：{session_id}")
 
@@ -409,9 +425,10 @@ def export_session_history(
     base_dir: Path | None = None,
 ) -> Path:
     """将指定历史会话导出为 Markdown 或 JSON 文件。"""
-    stored_session = load_session_history(session_id, base_dir=base_dir)
+    validated_id = _validate_session_id(session_id)
+    stored_session = load_session_history(validated_id, base_dir=base_dir)
     if output_path is None:
-        target_path = get_session_storage_dir(base_dir) / f"{session_id}.md"
+        target_path = get_session_storage_dir(base_dir) / f"{validated_id}.md"
     else:
         target_path = Path(output_path).expanduser()
 
@@ -450,11 +467,12 @@ def save_interrupt_checkpoint(
     base_dir: Path | None = None,
 ) -> Path:
     """会话异常中断时保存快照，供下次启动自动续传。"""
+    validated_id = _validate_session_id(session_id)
     storage_dir = get_session_storage_dir(base_dir)
     storage_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = storage_dir / CHECKPOINT_FILENAME
     payload = {
-        "session_id": session_id,
+        "session_id": validated_id,
         "mode": mode,
         "approval_policy": approval_policy,
         "turn_count": sum(isinstance(m, HumanMessage) for m in messages),

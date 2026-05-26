@@ -30,6 +30,18 @@ from typing import Any
 MEMORY_STORAGE_DIRNAME = ".cyber-agent-memory"
 MEMORY_INDEX_FILENAME = "MEMORY.md"
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# 记忆文件名只允许字母、数字、下划线和短横线，防止路径遍历
+MEMORY_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
+
+
+def _validate_memory_name(name: str) -> str:
+    """校验记忆名称，防止路径遍历和非法文件名。"""
+    normalized = name.strip()
+    if not MEMORY_NAME_RE.fullmatch(normalized):
+        raise ValueError(
+            f"记忆名称无效：{name}。仅允许字母、数字、下划线和短横线，长度 2-64。"
+        )
+    return normalized
 
 
 @dataclass(slots=True)
@@ -127,12 +139,13 @@ def save_memory(
     base_dir: Path | None = None,
 ) -> Path:
     """保存一条记忆到独立文件，并更新索引。"""
+    validated_name = _validate_memory_name(name)
     memory_dir = get_memory_dir(base_dir)
     memory_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{name}.md"
+    filename = f"{validated_name}.md"
     file_path = memory_dir / filename
-    content = _build_frontmatter(name, description, memory_type) + body.rstrip() + "\n"
+    content = _build_frontmatter(validated_name, description, memory_type) + body.rstrip() + "\n"
     file_path.write_text(content, encoding="utf-8")
 
     _update_memory_index(memory_dir)
@@ -155,6 +168,7 @@ def _update_memory_index(memory_dir: Path) -> None:
                 description = body[:120].replace("\n", " ").strip()
             entries.append(f"- [{name}]({md_file.name}) — {description}")
         except (OSError, UnicodeDecodeError):
+            # 单个文件损坏不应中断索引重建，跳过并继续
             continue
 
     index_content = (
@@ -189,6 +203,7 @@ def load_all_memories(base_dir: Path | None = None) -> list[MemoryEntry]:
                 ).isoformat(),
             ))
         except (OSError, UnicodeDecodeError):
+            # 单个记忆文件损坏不中断整体加载
             continue
     return entries
 
@@ -279,8 +294,9 @@ def build_memory_system_prompt(base_dir: Path | None = None) -> str:
 
 def delete_memory(name: str, *, base_dir: Path | None = None) -> bool:
     """删除指定记忆文件，更新索引。"""
+    validated_name = _validate_memory_name(name)
     memory_dir = get_memory_dir(base_dir)
-    file_path = memory_dir / f"{name}.md"
+    file_path = memory_dir / f"{validated_name}.md"
     if not file_path.exists():
         return False
     file_path.unlink()

@@ -256,6 +256,7 @@ def create_run_shell_command_tool(
         except ExecutionInterruptedError:
             raise
         except Exception as exc:
+            # 需要捕获所有工具执行异常，转换为用户可读错误而非崩溃
             return f"❌ 执行命令时发生错误：{exc}"
 
         return _format_completed_process_output(
@@ -311,6 +312,7 @@ def create_run_registered_tool_tool(
         except ExecutionInterruptedError:
             raise
         except Exception as exc:
+            # 需要捕获所有工具执行异常，转换为用户可读错误而非崩溃
             return f"❌ 调用外部工具时发生错误：{exc}"
 
         return _format_completed_process_output(

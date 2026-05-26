@@ -42,9 +42,14 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
             return
 
     try:
+        # 优先尝试进程组终止（子进程由 _build_subprocess_options 的 start_new_session 创建）
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
+    except (ProcessLookupError, OSError):
+        # 进程可能不是进程组 leader，回退到单进程信号
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
     except PermissionError:
         process.kill()
 
