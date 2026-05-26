@@ -450,6 +450,38 @@ def _handle_approval(
     return True
 
 
+def _handle_multi(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """切换多 Agent 并发模式。"""
+    current = runtime_context.get("multi_agent_enabled", False)
+    if len(tokens) == 1:
+        # 查看当前状态
+        cli_renderer.print_info(
+            f"多 Agent 模式：{'已启用' if current else '已禁用'}。"
+            f" 使用 /multi on|off 切换。"
+        )
+        return True
+
+    toggle = tokens[1].lower()
+    if toggle in ("on", "enable", "yes", "true"):
+        runtime_context["multi_agent_enabled"] = True
+        cli_renderer.print_info(
+            "已启用多 Agent 并发模式。任务将自动分解并分配给 checker/reader/"
+            "analyst/runner/builder/decision-maker/reflector/diffuser/jumper 角色并行执行。"
+        )
+    elif toggle in ("off", "disable", "no", "false"):
+        runtime_context["multi_agent_enabled"] = False
+        cli_renderer.print_info("已禁用多 Agent 模式，恢复单 Agent 执行。")
+    else:
+        cli_renderer.print_error(f"无效参数：{tokens[1]}。支持 on/off。")
+    return True
+
+
 # ── 命令注册表 ──
 
 _COMMAND_REGISTRY: dict[str, CommandHandler] = {
@@ -469,6 +501,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/memory": _handle_memory,
     "/mode": _handle_mode,
     "/approval": _handle_approval,
+    "/multi": _handle_multi,
 }
 
 
