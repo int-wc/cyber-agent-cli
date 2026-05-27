@@ -605,6 +605,8 @@ def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
         runtime_context,
         runner,
     )
+    # 同步模型名称以正确计算 token 花费
+    renderer._model_name = str(runtime_context.get("model_name", ""))
     return runner
 
 

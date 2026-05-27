@@ -57,6 +57,31 @@ from .render_panels import (
     build_tools_panel,
 )
 
+# DeepSeek 定价（美元/百万 token）
+# https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+_DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
+    "deepseek-chat": {"input": 0.27, "output": 1.10},
+    "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+}
+_DEFAULT_PRICING = {"input": 0.27, "output": 1.10}
+
+
+def _estimate_cost(
+    input_tokens: int,
+    output_tokens: int,
+    model_name: str = "",
+) -> float:
+    """根据 DeepSeek 定价估算本轮花费（美元）。"""
+    pricing = _DEFAULT_PRICING
+    for key, rates in _DEEPSEEK_PRICING.items():
+        if key in model_name.lower():
+            pricing = rates
+            break
+    return (input_tokens / 1_000_000) * pricing["input"] + (
+        output_tokens / 1_000_000
+    ) * pricing["output"]
+
+
 class CliRenderer:
     """负责将 CLI 运行信息渲染成更适合终端展示的富文本输出。"""
 
@@ -67,6 +92,11 @@ class CliRenderer:
         self._streamed_response_chunks: list[str] = []
         self._reasoning_parts: list[str] = []
         self._reasoning_printed = False
+        # 累计 token 统计
+        self._cumulative_input_tokens = 0
+        self._cumulative_output_tokens = 0
+        self._cumulative_cost = 0.0
+        self._model_name = ""
 
     def print_startup_splash(self) -> None:
         """打印启动页；真实终端播放动画，其余场景回退为静态区块。"""
@@ -100,12 +130,26 @@ class CliRenderer:
         self.console.print(Rule(style="grey50"))
 
     def print_token_usage(self, usage: dict[str, int]) -> None:
-        """打印本轮 token 消耗统计。"""
+        """打印本轮及累计 token 消耗统计（含花费估算）。"""
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+
+        # 累计
+        self._cumulative_input_tokens += input_tokens
+        self._cumulative_output_tokens += output_tokens
+        round_cost = _estimate_cost(
+            input_tokens, output_tokens, self._model_name,
+        )
+        self._cumulative_cost += round_cost
+
         self.console.print(
-            f"  [dim]↑ {input_tokens} tokens  ↓ {output_tokens} tokens  ∑ {total_tokens} tokens[/dim]"
+            f"  [dim]本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
+            f"  │  ${round_cost:.4f}"
+            f"  │  累计 ↑{self._cumulative_input_tokens}"
+            f" ↓{self._cumulative_output_tokens}"
+            f" ∑{self._cumulative_input_tokens + self._cumulative_output_tokens}"
+            f"  │  ${self._cumulative_cost:.4f}[/dim]"
         )
 
     def begin_response_stream(self) -> None:
@@ -142,24 +186,17 @@ class CliRenderer:
             self._reasoning_parts = []
 
     def append_response_token(self, token_text: str) -> None:
-        """将 token 追加到终端。"""
+        """累积响应 token，不逐字打印（最终由 end_response_stream 统一 Markdown 渲染）。"""
         if not self._streaming_response_started:
             self.begin_response_stream()
         self._flush_reasoning_if_needed()
         if not self._streaming_prefix_printed:
             self.console.print(
                 f"[bold {ASSISTANT_BORDER_COLOR}]智能体输出[/bold {ASSISTANT_BORDER_COLOR}]"
-                " › ",
-                end="",
+                " › [dim]接收中...[/dim]",
             )
             self._streaming_prefix_printed = True
         self._streamed_response_chunks.append(token_text)
-        self.console.print(
-            Text(token_text, style=ASSISTANT_TEXT_COLOR),
-            end="",
-            soft_wrap=True,
-            highlight=False,
-        )
 
     def ensure_response_stream_closed(self) -> None:
         """在打印其他区块前确保流式输出已换行结束。"""
@@ -261,17 +298,12 @@ class CliRenderer:
         self.print_renderable(build_tool_result_panel(truncated))
 
     def end_response_stream(self, content: str, has_tool_calls: bool) -> None:
-        """结束一轮流式输出，对最终回复使用 Markdown 渲染。"""
+        """结束一轮流式输出，以 Markdown 渲染最终回复。"""
         if self._streaming_response_started:
             if self._streaming_prefix_printed:
-                if not self._streamed_response_chunks and content:
-                    self.console.print(content, end="", soft_wrap=True, highlight=False)
+                # 替换"接收中..."为换行，然后渲染完整 Markdown
                 self.console.print("")
-                # 流式输出结束后，用 Markdown 重新渲染完整内容
-                if content and not has_tool_calls:
-                    self.console.print()
-                    self.print_markdown(content)
-            elif content and not has_tool_calls:
+            if content and not has_tool_calls:
                 self.print_markdown(content)
         elif content and not has_tool_calls:
             self.print_markdown(content)
