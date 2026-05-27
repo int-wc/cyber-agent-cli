@@ -31,6 +31,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/history show <会话ID>", "查看指定历史会话内容"),
     BuiltinCommandSpec("/history load <会话ID>", "将历史会话加载进当前上下文"),
     BuiltinCommandSpec("/history search <关键词>", "按关键词检索历史会话"),
+    BuiltinCommandSpec("/history recent", "查看当前会话最近 50 条输入"),
     BuiltinCommandSpec("/history export <会话ID> [路径]", "导出历史会话为 Markdown 或 JSON"),
     BuiltinCommandSpec("/memory", "查看跨会话持久化记忆"),
     BuiltinCommandSpec("/memory add <名称> <类型> <内容>", "添加持久化记忆"),

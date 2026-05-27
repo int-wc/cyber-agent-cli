@@ -769,13 +769,18 @@ class AgentRunner:
             success=True,
         )
 
-        return AIMessage(
+        msg = AIMessage(
             content=accumulated_chunk.content,
             additional_kwargs=accumulated_chunk.additional_kwargs,
             response_metadata=accumulated_chunk.response_metadata,
             tool_calls=list(accumulated_chunk.tool_calls),
             invalid_tool_calls=list(accumulated_chunk.invalid_tool_calls),
         )
+        # 保留 usage_metadata（流式最后一块通常包含用量信息）
+        um = getattr(accumulated_chunk, "usage_metadata", None)
+        if um:
+            msg.usage_metadata = um
+        return msg
 
     def _tool_requires_approval(self, tool: BaseTool) -> bool:
         tool_risk = self._get_tool_risk(tool)
@@ -953,7 +958,15 @@ class AgentRunner:
                             )
                         continue
                     raise RuntimeError(EMPTY_FINAL_RESPONSE_ERROR)
-                if event_handler is not None and turn_usage:
+                if event_handler is not None:
+                    if not turn_usage:
+                        # 回退：从响应字符数估算（中文 ~2 字/token）
+                        estimated = max(1, len(final_response) // 2)
+                        turn_usage = {
+                            "input_tokens": 0,
+                            "output_tokens": estimated,
+                            "total_tokens": estimated,
+                        }
                     event_handler(AgentEventType.TURN_END, turn_usage)
                 if event_handler is None and verbose:
                     print(f"最终回复: {final_response}")

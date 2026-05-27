@@ -380,13 +380,24 @@ class CliRenderer:
         """打印普通提示文本；捕获模式下也会按原样保留。"""
         self.print_renderable(content)
 
-    def print_status_line(self) -> None:
-        """打印持续显示的 token/花费状态行（用于输入提示前）。"""
+    def print_status_line(self, recent_inputs: list[str] | None = None) -> None:
+        """打印持续显示的 token/花费状态行 + 最近输入历史。"""
         t = self._cumulative_input_tokens
         o = self._cumulative_output_tokens
         self.console.print(
             f"  [dim]累计 ↑{t} ↓{o} Σ{t+o} │ ¥{self._cumulative_cost:.4f}[/dim]"
         )
+        if recent_inputs:
+            # 显示最近 5 条输入（截断到 40 字）
+            previews = []
+            for inp in recent_inputs[-5:]:
+                short = inp[:40].replace("\n", " ")
+                if len(inp) > 40:
+                    short += "…"
+                previews.append(short)
+            self.console.print(
+                f"  [dim]最近: {' → '.join(previews)}[/dim]"
+            )
 
     def print_error(self, content: str) -> None:
         """打印错误消息，支持 Markdown 渲染。"""

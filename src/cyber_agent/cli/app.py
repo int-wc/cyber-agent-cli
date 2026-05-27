@@ -315,6 +315,7 @@ def build_runtime_context(
         "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
         "multi_agent_enabled": "auto",
+        "_recent_inputs": [],  # 最近 50 条用户输入
     }
 
 
@@ -1403,8 +1404,10 @@ def run_chat_loop(
 
     while True:
         try:
-            # 每次输入前显示累计 token / 花费状态
-            renderer.print_status_line()
+            # 每次输入前显示累计 token / 花费状态 + 最近输入
+            renderer.print_status_line(
+                runtime_context.get("_recent_inputs", [])
+            )
             user_input = prompt_chat_input().strip()
         except (Abort, EOFError, KeyboardInterrupt):
             renderer.print_info("\n👋 再见！")
@@ -1462,6 +1465,12 @@ def run_chat_loop(
                     event_handler=render_agent_event,
                     approval_handler=create_approval_handler(runtime_context),
                 )
+            # 记录最近 50 条用户输入
+            recent = runtime_context.setdefault("_recent_inputs", [])
+            recent.append(user_input)
+            if len(recent) > 50:
+                recent.pop(0)
+
             persist_runtime_session(runner, runtime_context)
         except ExecutionInterruptedError as exc:
             persist_runtime_session(runner, runtime_context)

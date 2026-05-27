@@ -185,6 +185,15 @@ def _handle_history(
         _safe(lambda: export_history_session(session_id, output_path, cli_renderer), cli_renderer)
         return True
 
+    if sub_cmd == "recent":
+        recent = runtime_context.get("_recent_inputs", [])
+        if not recent:
+            cli_renderer.print_info("暂无最近输入记录。")
+            return True
+        lines = [f"  {i+1:2d}. {inp[:100]}" for i, inp in enumerate(recent)]
+        cli_renderer.print_info(f"最近 {len(recent)} 条输入：\n" + "\n".join(lines))
+        return True
+
     cli_renderer.print_error("不支持的 /history 子命令。")
     return True
 
