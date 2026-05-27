@@ -458,12 +458,16 @@ def _handle_multi(
     raw_input: str,
 ) -> bool | None:
     """切换多 Agent 并发模式。"""
-    current = runtime_context.get("multi_agent_enabled", False)
+    current = runtime_context.get("multi_agent_enabled", "auto")
+    state_labels = {
+        True: "强制启用",
+        False: "强制禁用",
+        "auto": "自动判断",
+    }
     if len(tokens) == 1:
-        # 查看当前状态
+        label = state_labels.get(current, str(current))
         cli_renderer.print_info(
-            f"多 Agent 模式：{'已启用' if current else '已禁用'}。"
-            f" 使用 /multi on|off 切换。"
+            f"多 Agent 模式：{label}。使用 /multi on|off|auto 切换。"
         )
         return True
 
@@ -471,14 +475,21 @@ def _handle_multi(
     if toggle in ("on", "enable", "yes", "true"):
         runtime_context["multi_agent_enabled"] = True
         cli_renderer.print_info(
-            "已启用多 Agent 并发模式。任务将自动分解并分配给 checker/reader/"
-            "analyst/runner/builder/decision-maker/reflector/diffuser/jumper 角色并行执行。"
+            "已启用多 Agent 并发模式（强制）。任务将始终分解并分配给 "
+            "checker/reader/analyst/runner/builder/decision-maker/"
+            "reflector/diffuser/jumper 角色并行执行。"
         )
     elif toggle in ("off", "disable", "no", "false"):
         runtime_context["multi_agent_enabled"] = False
-        cli_renderer.print_info("已禁用多 Agent 模式，恢复单 Agent 执行。")
+        cli_renderer.print_info("已禁用多 Agent 模式，始终使用单 Agent 执行。")
+    elif toggle in ("auto", "smart"):
+        runtime_context["multi_agent_enabled"] = "auto"
+        cli_renderer.print_info(
+            "多 Agent 模式设为自动判断。简单任务单 Agent，"
+            "复杂任务自动启用多 Agent 协作。"
+        )
     else:
-        cli_renderer.print_error(f"无效参数：{tokens[1]}。支持 on/off。")
+        cli_renderer.print_error(f"无效参数：{tokens[1]}。支持 on/off/auto。")
     return True
 
 

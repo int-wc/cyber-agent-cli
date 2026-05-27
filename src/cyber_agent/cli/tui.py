@@ -340,8 +340,12 @@ if TEXTUAL_IMPORT_ERROR is None:
                     self.call_from_thread(self._show_token_usage, payload)
                     return
 
-            # 多 Agent 协作模式：使用编排器并行执行
-            if self.runtime_context.get("multi_agent_enabled") is True:
+            # 判断是否使用多 Agent 编排
+            from .app import _detect_task_complexity
+            multi_setting = self.runtime_context.get("multi_agent_enabled", "auto")
+            if multi_setting is True or (
+                multi_setting == "auto" and _detect_task_complexity(user_input)
+            ):
                 self._run_multi_agent_turn(user_input)
                 return
 

@@ -58,6 +58,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/file <路径>", "选择文件并将其内容加载到对话上下文中"),
     BuiltinCommandSpec("/stop", "停止当前正在执行的任务"),
     BuiltinCommandSpec("/clear", "清空当前会话上下文"),
+    BuiltinCommandSpec("/multi", "查看/切换多Agent模式 (on/off/auto)", show_in_banner=True),
     BuiltinCommandSpec("/exit", "退出交互模式", show_in_banner=True),
 )
 

@@ -314,7 +314,7 @@ def build_runtime_context(
         "session_source_id": None,
         "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
-        "multi_agent_enabled": True,
+        "multi_agent_enabled": "auto",
     }
 
 
@@ -446,6 +446,43 @@ def ensure_runtime_capabilities(
         capability_registry.register_refresh_callback(
             lambda: _refresh_runner_capabilities(runtime_context, runner)
         )
+
+
+def _detect_task_complexity(user_input: str) -> bool:
+    """快速判断任务是否需要多 Agent 协作。
+
+    简单任务（问候、单问题、简单指令）走单 Agent；
+    复杂任务（多步骤、对比分析、安全扫描等）自动启用多 Agent。
+    """
+    text = user_input.strip()
+    # 极短输入视为简单
+    if len(text) <= 4:
+        return False
+
+    # 多句/多问号 → 多子任务
+    sentence_seps = len(re.findall(r"[。？！；\n]", text))
+    question_marks = text.count("？") + text.count("?")
+    if question_marks >= 2 or sentence_seps >= 3:
+        return True
+
+    # 复杂度关键词
+    complex_keywords = [
+        "分析", "对比", "比较", "评估", "审计", "扫描",
+        "探索", "搜索.*并", "收集.*并", "总结.*并",
+        "汇总", "综合", "权衡", "排查", "渗透",
+        "漏洞.*(利用|扫描|检测)", "攻击.*(面|路径)",
+        "报告", "总结", "梳理", "整理",
+        "Pwn2Own", "CVE", "CTF", "exploit",
+    ]
+    for kw in complex_keywords:
+        if re.search(kw, text, re.IGNORECASE):
+            return True
+
+    # 超过 100 字的长输入
+    if len(text) > 100:
+        return True
+
+    return False
 
 
 def _run_multi_agent_turn(
@@ -1383,8 +1420,11 @@ def run_chat_loop(
             user_input = "\n".join(file_context_parts)
 
         try:
-            # 多 Agent 模式：使用编排器并行执行
-            if runtime_context.get("multi_agent_enabled") is True:
+            # 判断是否使用多 Agent 编排
+            multi_setting = runtime_context.get("multi_agent_enabled", "auto")
+            if multi_setting is True or (
+                multi_setting == "auto" and _detect_task_complexity(user_input)
+            ):
                 _run_multi_agent_turn(user_input, runner, runtime_context)
             elif sys.stdin.isatty() and sys.stdout.isatty():
                 run_agent_turn_with_stop_support(

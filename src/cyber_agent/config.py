@@ -291,7 +291,6 @@ class Settings(BaseSettings):
             "api_key": resolved_api_key,
             "base_url": resolved_base_url,
             "temperature": 0.7,
-            "max_tokens": 4096,
             "extra_body": extra_body,
         }
         return {key: value for key, value in kwargs.items() if value is not None}
