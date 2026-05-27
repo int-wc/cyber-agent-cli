@@ -16,6 +16,7 @@ from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..logging import log_info, log_error
 from .events import AgentEventType
 from .roles import AgentRole, get_role_label, get_role_prompt
+from .runner import _extract_usage_from_chunk, _accumulate_usage, _estimate_tokens_from_text
 
 
 @dataclass
@@ -68,6 +69,7 @@ class MultiAgentOrchestrator:
         tools: list[BaseTool] | None = None,
         execution_controller: ExecutionController | None = None,
         event_handler: Callable[[str, Any], None] | None = None,
+        user_interaction_handler: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         service_name: str = "deepseek",
         model_name: str | None = None,
         api_key: str | None = None,
@@ -78,6 +80,7 @@ class MultiAgentOrchestrator:
         self._tool_registry: dict[str, BaseTool] = {t.name: t for t in self.tools}
         self.execution_controller = execution_controller
         self.event_handler = event_handler
+        self.user_interaction_handler = user_interaction_handler
         self.service_name = settings.normalize_service_name(service_name)
         self.model_name = settings.get_model_name(
             model_name,
@@ -87,6 +90,9 @@ class MultiAgentOrchestrator:
         self.base_url = settings.resolve_base_url(self.service_name, base_url=base_url)
         self.max_workers = max_workers or settings.multi_agent_max_workers
         self._llm: Any | None = None
+        # 累计 token 统计（供 renderer 读取）
+        self.cumulative_input_tokens = 0
+        self.cumulative_output_tokens = 0
 
 
     # ── LLM 管理 ──
@@ -115,6 +121,28 @@ class MultiAgentOrchestrator:
         if self.event_handler is not None:
             self.event_handler(event_type, payload)
 
+    def _track_llm_usage(self, response: Any) -> None:
+        """从 LLM 响应中提取并累计 token 使用量。"""
+        usage = _extract_usage_from_chunk(response)
+        if usage is None:
+            # 估算：从响应文本估算 token 数
+            content = self._extract_text(response)
+            usage = {
+                "input_tokens": 0,
+                "output_tokens": _estimate_tokens_from_text(content),
+                "total_tokens": _estimate_tokens_from_text(content),
+            }
+        self.cumulative_input_tokens += usage["input_tokens"]
+        self.cumulative_output_tokens += usage["output_tokens"]
+
+    def get_usage_summary(self) -> dict[str, int]:
+        """返回累计 token 使用量，供外部 renderer 读取。"""
+        return {
+            "input_tokens": self.cumulative_input_tokens,
+            "output_tokens": self.cumulative_output_tokens,
+            "total_tokens": self.cumulative_input_tokens + self.cumulative_output_tokens,
+        }
+
 
     # ── 主执行流程 ──
     def run(
@@ -137,6 +165,42 @@ class MultiAgentOrchestrator:
 
         # 阶段 1: 任务规划（决策者角色）
         plan = self._plan_task(user_input)
+
+        # 阶段 1.5: 用户交互确认（如果有处理器）
+        if self.user_interaction_handler is not None:
+            action = self.user_interaction_handler("plan_review", {
+                "plan": {
+                    "reasoning": plan.reasoning,
+                    "subtasks": [
+                        {
+                            "role": t.role.value,
+                            "task_description": t.task_description,
+                            "context": t.context,
+                        }
+                        for t in plan.subtasks
+                    ],
+                },
+            })
+            # 根据用户选择调整子任务
+            if action.get("action") == "cancelled":
+                return "用户取消了多 Agent 协作任务。"
+            if action.get("action") in ("selected", "custom", "other"):
+                selected_keys = set(action.get("selected_keys", []))
+                if selected_keys:
+                    # 仅保留选中的子任务
+                    plan.subtasks = [
+                        t for i, t in enumerate(plan.subtasks)
+                        if t.role.value in selected_keys
+                        or str(i) in selected_keys
+                        or f"{t.role.value}_{i}" in selected_keys
+                    ]
+                if action.get("custom_text"):
+                    # 用户提供了调整说明，追加到第一个子任务上下文
+                    if plan.subtasks:
+                        plan.subtasks[0].context = (
+                            plan.subtasks[0].context + "\n用户补充: " + action["custom_text"]
+                        )
+                    plan.reasoning += f"\n用户调整: {action['custom_text']}"
 
         # 阶段 2: 并发执行子任务
         all_results: list[AgentResult] = []
@@ -236,6 +300,7 @@ class MultiAgentOrchestrator:
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_input),
             ])
+            self._track_llm_usage(response)
             content = self._extract_text(response)
             plan_data = self._parse_json(content)
         except Exception as exc:
@@ -367,6 +432,7 @@ class MultiAgentOrchestrator:
 
                 response = llm_with_tools.invoke(messages)
                 messages.append(response)
+                self._track_llm_usage(response)
 
                 current_text = self._extract_text(response)
                 if current_text.strip():
@@ -544,6 +610,7 @@ class MultiAgentOrchestrator:
                 SystemMessage(content=checker_prompt),
                 HumanMessage(content="请对上述多 Agent 协作结果进行审计。"),
             ])
+            self._track_llm_usage(response)
             output = self._extract_text(response)
             return AgentResult(role=AgentRole.CHECKER, success=True, output=output)
         except Exception as exc:
@@ -602,6 +669,7 @@ class MultiAgentOrchestrator:
                 SystemMessage(content=reflector_prompt),
                 HumanMessage(content="请决定是否继续迭代。"),
             ])
+            self._track_llm_usage(response)
             output = self._extract_text(response)
             return "继续迭代" in output
         except Exception as exc:
@@ -644,6 +712,7 @@ class MultiAgentOrchestrator:
                 SystemMessage(content=replan_prompt),
                 HumanMessage(content="请重新规划子任务。"),
             ])
+            self._track_llm_usage(response)
             content = self._extract_text(response)
             plan_data = self._parse_json(content)
         except Exception as exc:
@@ -718,6 +787,7 @@ class MultiAgentOrchestrator:
                 SystemMessage(content=synthesize_prompt),
                 HumanMessage(content="请综合所有角色输出，生成最终回复。"),
             ])
+            self._track_llm_usage(response)
             return self._extract_text(response)
         except Exception as exc:
             # 降级：直接拼接各角色输出

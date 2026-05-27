@@ -138,6 +138,18 @@ class CliRenderer:
         self.ensure_response_stream_closed()
         self.console.print(Rule(style="grey50"))
 
+    def add_token_usage(self, input_tokens: int, output_tokens: int) -> None:
+        """从外部直接累加 token 使用量（用于多 Agent 编排器等非标准路径）。"""
+        if input_tokens <= 0 and output_tokens <= 0:
+            return
+        self._cumulative_input_tokens += input_tokens
+        self._cumulative_output_tokens += output_tokens
+        self._cumulative_cost = _estimate_cost(
+            self._cumulative_input_tokens,
+            self._cumulative_output_tokens,
+            self._model_name,
+        )
+
     def print_token_usage(self, usage: dict[str, int]) -> None:
         """打印本轮及累计 token 消耗统计（含花费估算）。
 

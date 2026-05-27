@@ -2,10 +2,54 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+import sys
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..agent.runner import AgentRunner
+
+
+def _build_user_interaction_handler(runtime_context: dict[str, object]):
+    """构建用户交互处理器，用于多 Agent 协作中的方案选择和确认。"""
+
+    def handler(stage: str, data: dict[str, Any]) -> dict[str, Any]:
+        if stage != "plan_review":
+            return {"action": "skip"}
+
+        plan = data.get("plan", {})
+        subtasks = plan.get("subtasks", [])
+
+        # 如果没有子任务或非交互终端，跳过交互
+        if not subtasks or not sys.stdin.isatty():
+            return {"action": "skip"}
+
+        from .selection_ui import present_multi_select_menu, SelectableOption
+        from .app import renderer
+
+        reasoning = plan.get("reasoning", "")
+
+        # 展示决策者分析结果
+        renderer.print_info(f"\n[bold cyan]决策者分析:[/] {reasoning[:300]}")
+
+        options = []
+        for i, task in enumerate(subtasks):
+            role = task.get("role", "?")
+            desc = task.get("task_description", "")[:120]
+            options.append(SelectableOption(
+                key=f"{role}_{i}",
+                label=f"[{role}] {desc}",
+                description=f"角色: {role}",
+                metadata={"index": i, "role": role},
+            ))
+
+        # 展示交互式多选菜单
+        result = present_multi_select_menu(
+            options,
+            title="选择要执行的子任务",
+        )
+        return result
+
+    return handler
 
 
 def _detect_task_complexity(user_input: str) -> bool:
@@ -123,6 +167,7 @@ def _run_multi_agent_turn(
         tools=list(getattr(runner, "tools", [])),
         execution_controller=runtime_context.get("execution_controller"),
         event_handler=orchestration_event_handler,
+        user_interaction_handler=_build_user_interaction_handler(runtime_context),
         service_name=str(runtime_context.get("service_name", "deepseek")),
         model_name=str(runtime_context.get("model_name", "")),
         api_key=str(runtime_context.get("api_key", "")),
@@ -132,6 +177,10 @@ def _run_multi_agent_turn(
     try:
         result = orchestrator.run(user_input)
         renderer.print_markdown(result)
+        # 将编排器累计的 token 使用量同步到渲染器
+        usage = orchestrator.get_usage_summary()
+        if usage["total_tokens"] > 0:
+            renderer.add_token_usage(usage["input_tokens"], usage["output_tokens"])
     except Exception as exc:
         renderer.print_error(f"多 Agent 协作失败：{exc}")
 

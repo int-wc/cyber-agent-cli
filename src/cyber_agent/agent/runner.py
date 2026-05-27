@@ -126,26 +126,63 @@ def should_retry_model_stream_start_error(error: Exception) -> bool:
 
 
 def _extract_usage_from_chunk(accumulated_chunk: AIMessageChunk) -> dict[str, int] | None:
-    """从累积的消息块中提取 token 使用统计。"""
+    """从累积的消息块中提取 token 使用统计。兼容多种 API 格式。"""
+    # 方式1：usage_metadata（langchain-openai 新版）
     usage_metadata = getattr(accumulated_chunk, "usage_metadata", None)
-    if usage_metadata and isinstance(usage_metadata, dict):
-        return {
-            "input_tokens": int(usage_metadata.get("input_tokens", 0)),
-            "output_tokens": int(usage_metadata.get("output_tokens", 0)),
-            "total_tokens": int(usage_metadata.get("total_tokens", 0)),
-        }
-    # 回退：从 additional_kwargs 或 response_metadata 中提取
+    if usage_metadata is not None:
+        if isinstance(usage_metadata, dict):
+            return {
+                "input_tokens": int(usage_metadata.get("input_tokens", 0)),
+                "output_tokens": int(usage_metadata.get("output_tokens", 0)),
+                "total_tokens": int(usage_metadata.get("total_tokens", 0)),
+            }
+        # OpenAI Usage 对象（有 prompt_tokens, completion_tokens 属性）
+        if hasattr(usage_metadata, "prompt_tokens"):
+            return {
+                "input_tokens": int(getattr(usage_metadata, "prompt_tokens", 0)),
+                "output_tokens": int(getattr(usage_metadata, "completion_tokens", 0)),
+                "total_tokens": int(getattr(usage_metadata, "total_tokens", 0)),
+            }
+        # 通用对象属性回退
+        for attr_names in (
+            ("input_tokens", "output_tokens", "total_tokens"),
+            ("prompt_tokens", "completion_tokens", "total_tokens"),
+        ):
+            if hasattr(usage_metadata, attr_names[0]):
+                return {
+                    "input_tokens": int(getattr(usage_metadata, attr_names[0], 0)),
+                    "output_tokens": int(getattr(usage_metadata, attr_names[1], 0)),
+                    "total_tokens": int(getattr(usage_metadata, attr_names[2], 0)),
+                }
+    # 方式2：从 additional_kwargs 或 response_metadata 中提取
     for source in (
         accumulated_chunk.additional_kwargs,
         accumulated_chunk.response_metadata,
     ):
-        usage = source.get("usage") if isinstance(source, dict) else None
+        if not isinstance(source, dict):
+            continue
+        # 直接嵌套的 usage 字典
+        usage = source.get("usage")
         if usage and isinstance(usage, dict):
             return {
                 "input_tokens": int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
                 "output_tokens": int(usage.get("completion_tokens", usage.get("output_tokens", 0))),
                 "total_tokens": int(usage.get("total_tokens", 0)),
             }
+        # usage 可能也在顶层（某些代理网关格式）
+        if "prompt_tokens" in source:
+            return {
+                "input_tokens": int(source.get("prompt_tokens", 0)),
+                "output_tokens": int(source.get("completion_tokens", 0)),
+                "total_tokens": int(source.get("total_tokens", 0)),
+            }
+    # 方式3：直接从 AIMessageChunk 顶层属性提取
+    if hasattr(accumulated_chunk, "input_tokens"):
+        return {
+            "input_tokens": int(getattr(accumulated_chunk, "input_tokens", 0)),
+            "output_tokens": int(getattr(accumulated_chunk, "output_tokens", 0)),
+            "total_tokens": int(getattr(accumulated_chunk, "total_tokens", 0)),
+        }
     return None
 
 
@@ -461,6 +498,18 @@ class AgentRunner:
     def _compose_system_prompt(self) -> str:
         """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
         prompt_parts = [self.system_prompt]
+        # 注入 CLAUDE.md（从工作目录及父目录查找）
+        try:
+            from ..claude_md import build_claude_md_prompt
+            claude_md_prompt = build_claude_md_prompt().strip()
+            if claude_md_prompt:
+                prompt_parts.append(
+                    "以下是项目中的 CLAUDE.md 指令文件，"
+                    "这些指令对 AI 的行为有约束力，请严格遵循：\n\n"
+                    + claude_md_prompt
+                )
+        except Exception:
+            pass  # CLAUDE.md 读取失败不阻塞启动
         # 注入跨会话持久化记忆
         memory_prompt = self._build_memory_prompt().strip()
         if memory_prompt:

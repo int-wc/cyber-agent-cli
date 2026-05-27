@@ -246,19 +246,32 @@ def _handle_config(
         print_local_config,
     )
 
-    if len(tokens) < 2 or (len(tokens) == 2 and tokens[1] == "allow-path"):
+    if len(tokens) < 2:
         print_local_config(runtime_context, cli_renderer)
         return True
 
     if tokens[1] == "allow-path":
-        if len(tokens) >= 3 and tokens[2] == "add":
+        # /config allow-path → 显示配置
+        if len(tokens) == 2:
+            print_local_config(runtime_context, cli_renderer)
+            return True
+
+        # /config allow-path add <路径> → 显式添加
+        if tokens[2] == "add":
             raw_path = _extract_arg(raw_input, "/config allow-path add ")
             if not raw_path:
                 cli_renderer.print_error("请提供要保存的目录路径。")
                 return True
             _safe(lambda: add_persisted_allowed_path(raw_path, runner, runtime_context, cli_renderer), cli_renderer)
             return True
-        cli_renderer.print_error("不支持的 /config allow-path 子命令。")
+
+        # /config allow-path <路径> → 简写形式，等同 add
+        # 从原始输入提取 "allow-path " 之后的内容作为路径
+        raw_path = _extract_arg(raw_input, "/config allow-path ")
+        if raw_path:
+            _safe(lambda: add_persisted_allowed_path(raw_path, runner, runtime_context, cli_renderer), cli_renderer)
+            return True
+        cli_renderer.print_error("请提供要保存的目录路径，如 /config allow-path add /path 或 /config allow-path /path。")
         return True
 
     cli_renderer.print_error("不支持的 /config 子命令。")

@@ -27,6 +27,7 @@ from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..local_config import (
     add_allow_path_to_local_config,
     get_local_config_path,
+    load_config_with_fallback,
     load_local_cli_config,
     merge_allow_paths,
 )
@@ -270,7 +271,7 @@ def build_runtime_context(
     skill_dirs: list[str] | None = None,
 ) -> dict[str, object]:
     """统一构建 CLI 运行上下文，避免多处分散解析。"""
-    local_config = load_local_cli_config()
+    local_config = load_config_with_fallback()
     persisted_allowed_paths = list(local_config.allow_paths)
     cli_allowed_paths = [Path(path).expanduser() for path in (allow_paths or [])]
     extra_allowed_paths = merge_allow_paths(

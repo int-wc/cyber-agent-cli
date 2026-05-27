@@ -31,11 +31,51 @@ def normalize_allowed_roots(allowed_roots: list[Path | str]) -> list[Path]:
 def get_local_config_path(base_dir: Path | None = None) -> Path:
     """
     返回当前工作目录对应的本地配置文件路径。
-    当前仓库暂无统一的全局配置体系，因此先采用工作目录级配置，
-    避免不同项目之间相互污染授权目录。
+    优先查找当前目录及父目录中已存在的配置文件；
+    若都不存在，则在当前工作目录下创建。
     """
     resolved_base_dir = (base_dir or Path.cwd()).resolve()
     return resolved_base_dir / LOCAL_CONFIG_FILENAME
+
+
+def find_local_config_file(base_dir: Path | None = None) -> Path | None:
+    """在当前目录及父目录中查找已存在的本地配置文件。"""
+    current = (base_dir or Path.cwd()).resolve()
+    for _ in range(10):  # 最多向上搜索 10 层
+        candidate = current / LOCAL_CONFIG_FILENAME
+        if candidate.exists():
+            return candidate
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def get_global_config_path() -> Path:
+    """返回用户家目录下的全局配置文件路径。"""
+    return Path.home() / LOCAL_CONFIG_FILENAME
+
+
+def load_config_with_fallback(base_dir: Path | None = None) -> LocalCliConfig:
+    """按优先级加载配置：本地目录 → 父目录回溯 → 全局配置 → 空配置。"""
+    # 1. 当前目录的直接配置
+    local_path = get_local_config_path(base_dir)
+    if local_path.exists():
+        return load_local_cli_config(base_dir)
+
+    # 2. 父目录回溯
+    found = find_local_config_file(base_dir)
+    if found is not None:
+        return load_local_cli_config(found.parent)
+
+    # 3. 全局配置
+    global_path = get_global_config_path()
+    if global_path.exists():
+        return load_local_cli_config(global_path.parent)
+
+    # 4. 空配置
+    return LocalCliConfig(allow_paths=[])
 
 
 def _normalize_allow_paths(raw_value: Any) -> list[Path]:
