@@ -95,10 +95,13 @@ class CliRenderer:
         self._streamed_response_chunks: list[str] = []
         self._reasoning_parts: list[str] = []
         self._reasoning_printed = False
-        # 累计 token 统计
+        # 累计 token 统计（以 API 返回精确值为准）
         self._cumulative_input_tokens = 0
         self._cumulative_output_tokens = 0
         self._cumulative_cost = 0.0
+        # 上轮开始前的基线（用于避免 live 估算与 API 精确值重复计数）
+        self._turn_baseline_input = 0
+        self._turn_baseline_output = 0
         self._model_name = ""
         # 实时 token 计数器
         self._live: Live | None = None
@@ -135,21 +138,40 @@ class CliRenderer:
         self.console.print(Rule(style="grey50"))
 
     def print_token_usage(self, usage: dict[str, int]) -> None:
-        """打印本轮及累计 token 消耗统计（含花费估算）。"""
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        """打印本轮及累计 token 消耗统计（含花费估算）。
 
-        # 累计
-        self._cumulative_input_tokens += input_tokens
-        self._cumulative_output_tokens += output_tokens
-        round_cost = _estimate_cost(
-            input_tokens, output_tokens, self._model_name,
+        API 返回的 usage 已包含所有工具调用轮次的输入/输出。
+        本轮开始前 live 计数器可能已估算部分 token，此处重置到基线再累加 API 精确值。
+        """
+        api_input = usage.get("input_tokens", 0)
+        api_output = usage.get("output_tokens", 0)
+        api_total = usage.get("total_tokens", api_input + api_output)
+
+        # 以 API 精确值为准：有数据的维度用 API，缺失的保留 live 估算
+        if api_input > 0:
+            self._cumulative_input_tokens = (
+                self._turn_baseline_input + api_input
+            )
+        if api_output > 0:
+            self._cumulative_output_tokens = (
+                self._turn_baseline_output + api_output
+            )
+
+        # 重新计算累计花费
+        self._cumulative_cost = _estimate_cost(
+            self._cumulative_input_tokens,
+            self._cumulative_output_tokens,
+            self._model_name,
         )
-        self._cumulative_cost += round_cost
+
+        # 本轮花费
+        round_input = self._cumulative_input_tokens - self._turn_baseline_input
+        round_output = self._cumulative_output_tokens - self._turn_baseline_output
+        round_cost = _estimate_cost(round_input, round_output, self._model_name)
 
         self.console.print(
-            f"  [dim]本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
+            f"  [dim]本轮 ↑{round_input} ↓{round_output}"
+            f" ∑{round_input + round_output}"
             f"  │  ¥{round_cost:.4f}"
             f"  │  累计 ↑{self._cumulative_input_tokens}"
             f" ↓{self._cumulative_output_tokens}"
@@ -179,6 +201,9 @@ class CliRenderer:
         self._streamed_response_chunks = []
         self._reasoning_parts = []
         self._reasoning_printed = False
+        # 记录本轮基线，防止 live 估算与 API 精确值重复计数
+        self._turn_baseline_input = self._cumulative_input_tokens
+        self._turn_baseline_output = self._cumulative_output_tokens
         # 启动实时 token 计数
         self._live = Live(
             self._build_token_status_line(),
@@ -316,9 +341,18 @@ class CliRenderer:
         """打印工具调用事件面板。"""
         self.print_renderable(build_tool_call_panel(tool_calls))
 
+    def add_tool_result_tokens(self, content: str) -> None:
+        """将工具结果内容估算为输入 token 并计入累计（供 live 状态栏实时更新）。"""
+        est_input = max(1, len(content) // 3)
+        self._cumulative_input_tokens += est_input
+        if self._live is not None:
+            self._live.update(self._build_token_status_line(), refresh=True)
+
     def print_tool_result(self, content: str) -> None:
         """打印工具执行结果，使用 Markdown 渲染。"""
         self.ensure_response_stream_closed()
+        # 工具结果计入输入 token 估算
+        self.add_tool_result_tokens(content)
         # 截取前 4000 字符以防工具结果过长导致渲染卡顿
         truncated = content[:4000]
         if len(content) > 4000:

@@ -149,6 +149,14 @@ def _extract_usage_from_chunk(accumulated_chunk: AIMessageChunk) -> dict[str, in
     return None
 
 
+def _estimate_tokens_from_text(text: str) -> int:
+    """从文本字符数估算 token 数（中文 ~2 字/token，英文 ~4 字/token）。"""
+    if not text:
+        return 0
+    # 简单混合估算：取中值 ~3 字/token
+    return max(1, len(text) // 3)
+
+
 def _accumulate_usage(
     current: dict[str, int] | None,
     incoming: dict[str, int] | None,
@@ -912,6 +920,24 @@ class AgentRunner:
                 ai_message = self._stream_model_response(event_handler)
                 self.history.append(ai_message)
                 round_usage = _extract_usage_from_chunk(ai_message)
+                if round_usage is None:
+                    # API 未返回精确用量，从本轮消息历史估算
+                    input_chars = sum(
+                        len(extract_text_content(msg.content))
+                        for msg in self._build_model_messages()
+                    )
+                    output_chars = len(extract_text_content(ai_message.content))
+                    if ai_message.tool_calls:
+                        output_chars += len(json.dumps(
+                            ai_message.tool_calls, ensure_ascii=False,
+                        ))
+                    est_input = max(1, input_chars // 3)
+                    est_output = max(1, output_chars // 3)
+                    round_usage = {
+                        "input_tokens": est_input,
+                        "output_tokens": est_output,
+                        "total_tokens": est_input + est_output,
+                    }
                 turn_usage = _accumulate_usage(turn_usage, round_usage)
 
                 if ai_message.tool_calls:
@@ -959,13 +985,11 @@ class AgentRunner:
                         continue
                     raise RuntimeError(EMPTY_FINAL_RESPONSE_ERROR)
                 if event_handler is not None:
-                    if not turn_usage:
-                        # 回退：从响应字符数估算（中文 ~2 字/token）
-                        estimated = max(1, len(final_response) // 2)
+                    if turn_usage is None:
                         turn_usage = {
                             "input_tokens": 0,
-                            "output_tokens": estimated,
-                            "total_tokens": estimated,
+                            "output_tokens": max(1, len(final_response) // 3),
+                            "total_tokens": max(1, len(final_response) // 3),
                         }
                     event_handler(AgentEventType.TURN_END, turn_usage)
                 if event_handler is None and verbose:
