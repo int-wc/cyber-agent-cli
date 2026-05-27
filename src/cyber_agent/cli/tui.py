@@ -570,10 +570,10 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._add_message(
                 "system",
                 f"本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
-                f" │ ${cost:.4f}"
+                f" │ ¥{cost:.4f}"
                 f" │ 累计 ↑{self._cumulative_input_tokens}"
                 f" ↓{self._cumulative_output_tokens} ∑{cum_total}"
-                f" │ ${self._cumulative_cost:.4f}",
+                f" │ ¥{self._cumulative_cost:.4f}",
             )
 
         def _add_renderable(self, renderable: RenderableType) -> RenderableBlock:

@@ -57,13 +57,19 @@ from .render_panels import (
     build_tools_panel,
 )
 
-# DeepSeek 定价（美元/百万 token）
+# DeepSeek 定价（人民币 元/百万 token，缓存未命中）
 # https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+# deepseek-v4-pro 当前为 2.5 折优惠价（至 2026/05/31），之后调整为原价 1/4
 _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
-    "deepseek-chat": {"input": 0.27, "output": 1.10},
-    "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+    "deepseek-v4-pro":   {"input": 3.0, "output": 6.0},      # 原价，当前 2.5 折
+    "deepseek-v4-flash": {"input": 1.0, "output": 2.0},
+    # 兼容旧模型名（将逐步弃用，映射到 v4-flash）
+    "deepseek-chat":     {"input": 1.0, "output": 2.0},
+    "deepseek-reasoner": {"input": 1.0, "output": 2.0},
 }
-_DEFAULT_PRICING = {"input": 0.27, "output": 1.10}
+_DEFAULT_PRICING = {"input": 1.0, "output": 2.0}
+# v4-pro 当前促销折扣
+_V4_PRO_DISCOUNT = 0.25  # 2.5 折
 
 
 def _estimate_cost(
@@ -71,15 +77,20 @@ def _estimate_cost(
     output_tokens: int,
     model_name: str = "",
 ) -> float:
-    """根据 DeepSeek 定价估算本轮花费（美元）。"""
+    """根据 DeepSeek 定价估算本轮花费（人民币 元）。"""
+    model_lower = model_name.lower()
     pricing = _DEFAULT_PRICING
     for key, rates in _DEEPSEEK_PRICING.items():
-        if key in model_name.lower():
+        if key in model_lower:
             pricing = rates
             break
-    return (input_tokens / 1_000_000) * pricing["input"] + (
+    base_cost = (input_tokens / 1_000_000) * pricing["input"] + (
         output_tokens / 1_000_000
     ) * pricing["output"]
+    # v4-pro 当前 2.5 折优惠
+    if "v4-pro" in model_lower:
+        base_cost *= _V4_PRO_DISCOUNT
+    return base_cost
 
 
 class CliRenderer:
@@ -145,11 +156,11 @@ class CliRenderer:
 
         self.console.print(
             f"  [dim]本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
-            f"  │  ${round_cost:.4f}"
+            f"  │  ¥{round_cost:.4f}"
             f"  │  累计 ↑{self._cumulative_input_tokens}"
             f" ↓{self._cumulative_output_tokens}"
             f" ∑{self._cumulative_input_tokens + self._cumulative_output_tokens}"
-            f"  │  ${self._cumulative_cost:.4f}[/dim]"
+            f"  │  ¥{self._cumulative_cost:.4f}[/dim]"
         )
 
     def begin_response_stream(self) -> None:
