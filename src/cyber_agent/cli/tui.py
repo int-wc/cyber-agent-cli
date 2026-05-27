@@ -166,6 +166,14 @@ if TEXTUAL_IMPORT_ERROR is None:
             margin: 1 0 0 0;
         }}
 
+        #token-status {{
+            color: {TEXT_MUTED};
+            height: 1;
+            margin: 0;
+            padding: 0 2;
+            background: #1e293b;
+        }}
+
         ChatMessage {{
             margin: 0 0 1 0;
         }}
@@ -221,6 +229,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 yield Static(self._build_composer_title(), id="composer-title")
                 yield self._build_input_widget()
                 yield Static(id="command-hint")
+            yield Static(id="token-status")
             with Container(id="startup-view"):
                 yield Static(id="startup-panel")
 
@@ -567,6 +576,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             )
             self._cumulative_cost += cost
             cum_total = self._cumulative_input_tokens + self._cumulative_output_tokens
+            self._update_token_status()
             self._add_message(
                 "system",
                 f"本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
@@ -575,6 +585,18 @@ if TEXTUAL_IMPORT_ERROR is None:
                 f" ↓{self._cumulative_output_tokens} ∑{cum_total}"
                 f" │ ¥{self._cumulative_cost:.4f}",
             )
+
+        def _update_token_status(self) -> None:
+            """更新底部持久状态栏。"""
+            try:
+                status = self.query_one("#token-status", Static)
+                t = self._cumulative_input_tokens
+                o = self._cumulative_output_tokens
+                status.update(
+                    f" 累计 ↑{t} ↓{o} Σ{t+o} │ ¥{self._cumulative_cost:.4f}"
+                )
+            except Exception:
+                pass
 
         def _add_renderable(self, renderable: RenderableType) -> RenderableBlock:
             block = RenderableBlock(renderable)
@@ -610,6 +632,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.query_one("#chat-input", Input).focus()
             if show_welcome:
                 self._add_renderable(self._build_welcome_panel())
+            self._update_token_status()
 
         def _set_assistant_content(self, content: str) -> None:
             if self._active_assistant_message is None:

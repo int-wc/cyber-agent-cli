@@ -1403,6 +1403,8 @@ def run_chat_loop(
 
     while True:
         try:
+            # 每次输入前显示累计 token / 花费状态
+            renderer.print_status_line()
             user_input = prompt_chat_input().strip()
         except (Abort, EOFError, KeyboardInterrupt):
             renderer.print_info("\n👋 再见！")

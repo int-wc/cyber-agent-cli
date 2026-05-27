@@ -100,6 +100,8 @@ class CliRenderer:
         self._cumulative_output_tokens = 0
         self._cumulative_cost = 0.0
         self._model_name = ""
+        # 实时 token 计数器
+        self._live: Live | None = None
 
     def print_startup_splash(self) -> None:
         """打印启动页；真实终端播放动画，其余场景回退为静态区块。"""
@@ -155,14 +157,36 @@ class CliRenderer:
             f"  │  ¥{self._cumulative_cost:.4f}[/dim]"
         )
 
+    def _build_token_status_line(self) -> Text:
+        """构建实时 token 状态行。"""
+        # 估算当前输出 token 数（中文 ~1.5 字/token, 英文 ~4 字/token）
+        chars = sum(len(c) for c in self._streamed_response_chunks)
+        est_output = max(1, chars // 2)
+        total_in = self._cumulative_input_tokens
+        total_out = self._cumulative_output_tokens + est_output
+        total = total_in + total_out
+        cost = _estimate_cost(total_in, total_out, self._model_name)
+        return Text(
+            f" 累计 ↑{total_in} ↓{total_out} Σ{total} │ ¥{cost:.4f}",
+            style="dim",
+        )
+
     def begin_response_stream(self) -> None:
-        """开始一轮模型 token 流。"""
+        """开始一轮模型 token 流，启动实时计数器。"""
         self.ensure_response_stream_closed()
         self._streaming_response_started = True
         self._streaming_prefix_printed = False
         self._streamed_response_chunks = []
         self._reasoning_parts = []
         self._reasoning_printed = False
+        # 启动实时 token 计数
+        self._live = Live(
+            self._build_token_status_line(),
+            console=self.console,
+            auto_refresh=False,
+            transient=True,
+        )
+        self._live.start()
 
     def append_reasoning_token(self, token_text: str) -> None:
         """追加思考过程文本，在首次响应正文前展示为折叠思考块。"""
@@ -189,7 +213,7 @@ class CliRenderer:
             self._reasoning_parts = []
 
     def append_response_token(self, token_text: str) -> None:
-        """累积响应 token，不逐字打印（最终由 end_response_stream 统一 Markdown 渲染）。"""
+        """累积响应 token，刷新实时计数器。"""
         if not self._streaming_response_started:
             self.begin_response_stream()
         self._flush_reasoning_if_needed()
@@ -200,10 +224,20 @@ class CliRenderer:
             )
             self._streaming_prefix_printed = True
         self._streamed_response_chunks.append(token_text)
+        # 刷新实时 token 计数
+        if self._live is not None:
+            self._live.update(self._build_token_status_line(), refresh=True)
+
+    def _stop_live(self) -> None:
+        """停止实时 token 计数器。"""
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
 
     def ensure_response_stream_closed(self) -> None:
         """在打印其他区块前确保流式输出已换行结束。"""
         if self._streaming_response_started:
+            self._stop_live()
             if self._streaming_prefix_printed:
                 self.console.print("")
             self._streaming_response_started = False
@@ -345,6 +379,14 @@ class CliRenderer:
     def print_info(self, content: str) -> None:
         """打印普通提示文本；捕获模式下也会按原样保留。"""
         self.print_renderable(content)
+
+    def print_status_line(self) -> None:
+        """打印持续显示的 token/花费状态行（用于输入提示前）。"""
+        t = self._cumulative_input_tokens
+        o = self._cumulative_output_tokens
+        self.console.print(
+            f"  [dim]累计 ↑{t} ↓{o} Σ{t+o} │ ¥{self._cumulative_cost:.4f}[/dim]"
+        )
 
     def print_error(self, content: str) -> None:
         """打印错误消息，支持 Markdown 渲染。"""
