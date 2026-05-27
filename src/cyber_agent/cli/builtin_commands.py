@@ -65,10 +65,10 @@ def _extract_arg(raw_input: str, prefix: str) -> str:
 
 
 def _safe(fn, cli_renderer: CliRenderer) -> None:
-    """执行可能抛出 ValueError 的操作，自动捕获并渲染错误。"""
+    """执行可能出错的操作，自动捕获并渲染错误。"""
     try:
         fn()
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         cli_renderer.print_error(str(exc))
 
 

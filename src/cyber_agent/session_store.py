@@ -29,9 +29,23 @@ def _validate_session_id(session_id: str) -> str:
     normalized = session_id.strip()
     if not normalized:
         raise ValueError("会话 ID 不能为空。")
+    if len(normalized) > 128:
+        raise ValueError("会话 ID 过长（最大 128 字符）。")
     if _SESSION_ID_FORBIDDEN_RE.search(normalized):
         raise ValueError(f"会话 ID 包含非法字符：{session_id}")
     return normalized
+
+
+def _cleanup_stale_tmp_files(storage_dir: Path) -> None:
+    """清理因崩溃等原因残留的 .tmp 临时文件。"""
+    try:
+        for tmp_file in storage_dir.glob("*.tmp"):
+            try:
+                tmp_file.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,6 +202,12 @@ def _load_session_payload(
         if strict:
             raise ValueError(f"历史会话文件不是合法 JSON：{session_path}") from exc
         return None
+    except OSError as exc:
+        if strict:
+            raise ValueError(
+                f"无法读取历史会话文件：{session_path} ({exc})"
+            ) from exc
+        return None
 
     if not isinstance(raw_data, dict):
         if strict:
@@ -230,6 +250,14 @@ def _list_session_payloads(
     for session_path in storage_dir.glob("*.json"):
         raw_data = _load_session_payload(session_path, strict=False)
         if raw_data is None:
+            try:
+                from cyber_agent.logging import log_warning
+                log_warning(
+                    "session_store",
+                    f"跳过无法读取的会话文件：{session_path.name}",
+                )
+            except ImportError:
+                pass
             continue
         session_id = str(raw_data.get("session_id") or session_path.stem)
         session_items.append((_build_summary(raw_data, session_id), raw_data))
@@ -276,10 +304,15 @@ def save_session_history(
         "message_count": len(messages),
         "messages": serialized_messages,
     }
-    session_path.write_text(
+    # 原子写入：先写临时文件再 rename，避免崩溃导致文件损坏
+    tmp_path = session_path.with_suffix(session_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    tmp_path.replace(session_path)
+    # 清理可能残留的其他 .tmp 文件
+    _cleanup_stale_tmp_files(storage_dir)
     return session_path
 
 
@@ -480,10 +513,13 @@ def save_interrupt_checkpoint(
         "interrupted_at": datetime.now().astimezone().isoformat(),
         "messages": messages_to_dict(messages),
     }
-    checkpoint_path.write_text(
+    # 原子写入
+    tmp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    tmp_path.replace(checkpoint_path)
     return checkpoint_path
 
 

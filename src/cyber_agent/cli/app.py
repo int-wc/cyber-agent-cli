@@ -938,6 +938,18 @@ def start_new_runtime_session(
     return session_id
 
 
+def _try_persist(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+) -> None:
+    """安全保存会话，失败时仅记录日志不影响主流程。"""
+    try:
+        persist_runtime_session(runner, runtime_context)
+    except Exception as exc:
+        from ..logging import log_warning
+        log_warning("app", f"会话持久化失败：{exc}")
+
+
 def persist_runtime_session(
     runner: AgentRunner,
     runtime_context: dict[str, object],
@@ -972,8 +984,9 @@ def _save_interrupt_checkpoint(
             mode=runner.mode.value,
             approval_policy=runtime_context["approval_policy"].value,
         )
-    except Exception:
-        pass  # 快照保存失败不应影响主流程的错误提示
+    except Exception as exc:
+        from ..logging import log_warning
+        log_warning("app", f"中断快照保存失败：{exc}")
 
 
 def _resolve_resume_session(
@@ -991,7 +1004,9 @@ def _resolve_resume_session(
             return None
         from langchain_core.messages import messages_from_dict
         messages = messages_from_dict(raw_messages)
-    except Exception:
+    except Exception as exc:
+        from ..logging import log_warning
+        log_warning("app", f"中断快照消息反序列化失败：{exc}")
         return None
 
     session_id = str(checkpoint.get("session_id", ""))
@@ -1473,13 +1488,13 @@ def run_chat_loop(
             if len(recent) > 50:
                 recent.pop(0)
 
-            persist_runtime_session(runner, runtime_context)
+            _try_persist(runner, runtime_context)
         except ExecutionInterruptedError as exc:
-            persist_runtime_session(runner, runtime_context)
+            _try_persist(runner, runtime_context)
             _save_interrupt_checkpoint(runner, runtime_context)
             renderer.print_info(str(exc))
         except Exception as exc:
-            persist_runtime_session(runner, runtime_context)
+            _try_persist(runner, runtime_context)
             _save_interrupt_checkpoint(runner, runtime_context)
             renderer.print_error(f"运行失败：{exc}")
 

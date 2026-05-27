@@ -590,7 +590,8 @@ class MultiAgentOrchestrator:
             ])
             output = self._extract_text(response)
             return "继续迭代" in output
-        except Exception:
+        except Exception as exc:
+            log_error("orchestrator", f"反思决策失败：{exc}")
             return False
 
     def _replan(
@@ -631,7 +632,8 @@ class MultiAgentOrchestrator:
             ])
             content = self._extract_text(response)
             plan_data = self._parse_json(content)
-        except Exception:
+        except Exception as exc:
+            log_error("orchestrator", f"重规划失败，使用简化回退：{exc}")
             # 简化：只重试失败的角色
             retry_tasks = [
                 AgentTask(

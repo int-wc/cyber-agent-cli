@@ -363,6 +363,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 multi_setting == "auto" and _detect_task_complexity(user_input)
             ):
                 self._run_multi_agent_turn(user_input)
+                persist_runtime_session(self.runner, self.runtime_context)
                 return
 
             try:
