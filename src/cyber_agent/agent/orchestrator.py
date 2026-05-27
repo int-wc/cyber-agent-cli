@@ -143,14 +143,27 @@ class MultiAgentOrchestrator:
             results = self._execute_plan(plan)
             all_results.extend(results)
 
-            # 阶段 3: 审计验证
-            checker_result = self._check_results(user_input, plan, results)
-            all_results.append(checker_result)
+            # 阶段 3+4: 审计者与反思者并行执行
+            failed_count = sum(1 for r in results if not r.success)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as exec:
+                checker_future = exec.submit(
+                    self._check_results, user_input, plan, results
+                )
+                if failed_count > 0:
+                    reflect_future = exec.submit(
+                        self._reflect_and_decide, user_input, plan, results
+                    )
+                else:
+                    reflect_future = None
 
-            # 阶段 4: 反思与决策
-            should_continue = self._reflect_and_decide(
-                user_input, plan, results, checker_result
-            )
+                checker_result: AgentResult = checker_future.result()
+                all_results.append(checker_result)
+
+                if reflect_future is not None:
+                    should_continue = reflect_future.result()
+                else:
+                    should_continue = False
+
             if not should_continue:
                 break
 
@@ -501,17 +514,20 @@ class MultiAgentOrchestrator:
         user_input: str,
         plan: OrchestrationPlan,
         results: list[AgentResult],
-        checker_result: AgentResult,
     ) -> bool:
-        """反思者评估是否需要继续迭代。"""
-        if not checker_result.success:
-            return False
-
+        """反思者评估是否需要继续迭代，直接分析原始角色结果。"""
         failed_count = sum(1 for r in results if not r.success)
-        if failed_count == 0:
-            return False  # 全部成功，无需迭代
 
         self._emit("orchestration_reflecting", {"failed_count": failed_count})
+
+        failed_summary = "\n".join(
+            f"- {get_role_label(r.role)}: {r.error[:300]}"
+            for r in results if not r.success
+        )
+        success_summary = "\n".join(
+            f"- {get_role_label(r.role)}: {r.output[:500]}"
+            for r in results if r.success
+        )
 
         reflector_prompt = f"""{get_role_prompt(AgentRole.REFLECTOR)}
 
@@ -521,8 +537,11 @@ class MultiAgentOrchestrator:
 ## 原始任务
 {user_input}
 
-## 审计结果
-{checker_result.output[:3000]}
+## 成功角色输出
+{success_summary[:2000]}
+
+## 失败角色
+{failed_summary or '无'}
 
 共 {len(results)} 个角色结果，{failed_count} 个失败。
 
@@ -537,7 +556,7 @@ class MultiAgentOrchestrator:
                 HumanMessage(content="请决定是否继续迭代。"),
             ])
             output = self._extract_text(response)
-            return "继续迭代" in output and failed_count > 0
+            return "继续迭代" in output
         except Exception:
             return False
 

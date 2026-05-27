@@ -449,37 +449,56 @@ def ensure_runtime_capabilities(
 
 
 def _detect_task_complexity(user_input: str) -> bool:
-    """快速判断任务是否需要多 Agent 协作。
+    """基于结构特征判断任务是否需要多 Agent 协作。
 
-    简单任务（问候、单问题、简单指令）走单 Agent；
-    复杂任务（多步骤、对比分析、安全扫描等）自动启用多 Agent。
+    仅使用抽象结构指标，不依赖特定领域关键词：
+    - 多语句/多问号 → 多个子问题
+    - 并列连接词 → 多项独立操作
+    - 序号/步骤标记 → 多阶段任务
+    - 高信息密度 → 复杂需求
     """
     text = user_input.strip()
-    # 极短输入视为简单
+
+    # 极短输入 → 简单
     if len(text) <= 4:
         return False
 
-    # 多句/多问号 → 多子任务
+    # 多句子分隔符 → 多个独立表达
     sentence_seps = len(re.findall(r"[。？！；\n]", text))
-    question_marks = text.count("？") + text.count("?")
-    if question_marks >= 2 or sentence_seps >= 3:
+    if sentence_seps >= 3:
         return True
 
-    # 复杂度关键词
-    complex_keywords = [
-        "分析", "对比", "比较", "评估", "审计", "扫描",
-        "探索", "搜索.*并", "收集.*并", "总结.*并",
-        "汇总", "综合", "权衡", "排查", "渗透",
-        "漏洞.*(利用|扫描|检测)", "攻击.*(面|路径)",
-        "报告", "总结", "梳理", "整理",
-        "Pwn2Own", "CVE", "CTF", "exploit",
+    # 多个问号 → 多个并列问题
+    question_marks = text.count("？") + text.count("?")
+    if question_marks >= 2:
+        return True
+
+    # 并列/递进/时序连接词 → 多项操作组合
+    coordination_markers = [
+        r"并且", r"同时", r"以及", r"还有", r"另外", r"并(?!不)",
+        r"然后", r"之后", r"接着", r"先.*再", r"首先.*然后",
+        r"第一步", r"第二步", r"第三步",
+        r"第\s*\d+\s*步", r"\d+\s*[\.、）\)]\s*\S",
+        r"一方面.*另一方面",
     ]
-    for kw in complex_keywords:
-        if re.search(kw, text, re.IGNORECASE):
+    for marker in coordination_markers:
+        if re.search(marker, text):
             return True
 
-    # 超过 100 字的长输入
-    if len(text) > 100:
+    # 列举序号（1. 2. 3. 或 1) 2) 或 一、二、）
+    numbered_items = len(re.findall(
+        r"(?:^|\n)\s*(?:\d+[\.\)、]|[一二三四五六七八九十]+[、．])", text
+    ))
+    if numbered_items >= 2:
+        return True
+
+    # 高信息密度：长度 > 150 字 → 很可能包含多个需求
+    if len(text) > 150:
+        return True
+
+    # 中长度 + 多逗号分句 → 复合描述
+    comma_clauses = len(re.findall(r"[，,]", text))
+    if len(text) > 60 and comma_clauses >= 3:
         return True
 
     return False
