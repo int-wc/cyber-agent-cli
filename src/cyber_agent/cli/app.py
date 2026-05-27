@@ -314,6 +314,7 @@ def build_runtime_context(
         "session_source_id": None,
         "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
+        "multi_agent_enabled": True,
     }
 
 
@@ -456,11 +457,50 @@ def _run_multi_agent_turn(
     from ..agent.orchestrator import MultiAgentOrchestrator
 
     renderer.print_turn_start()
-    renderer.print_info("正在启动多 Agent 协作模式...")
+    renderer.print_info("[bold cyan]🚀 正在启动多 Agent 协作模式...[/]")
+
+    # 编排器事件 → 渲染器进度
+    def orchestration_event_handler(event_type: str, payload: object) -> None:
+        if event_type == "orchestration_start":
+            pass  # 已在上面打印
+        elif event_type == "orchestration_planning":
+            renderer.print_orchestration_planning(str(payload.get("input", "")))
+        elif event_type == "orchestration_plan_done":
+            renderer.print_orchestration_plan_done(
+                subtask_count=int(payload.get("subtask_count", 0)),
+                reasoning=str(payload.get("reasoning", "")),
+            )
+        elif event_type == "orchestration_executing":
+            renderer.print_orchestration_executing(
+                int(payload.get("subtask_count", 0))
+            )
+        elif event_type == "subtask_complete":
+            renderer.print_subtask_complete(
+                role=str(payload.get("role", "?")),
+                success=bool(payload.get("success", False)),
+                elapsed_ms=float(payload.get("elapsed_ms", 0)),
+            )
+        elif event_type == "orchestration_checking":
+            renderer.print_orchestration_checking(
+                int(payload.get("result_count", 0))
+            )
+        elif event_type == "orchestration_reflecting":
+            renderer.print_orchestration_reflecting(
+                int(payload.get("failed_count", 0))
+            )
+        elif event_type == "orchestration_iteration":
+            pass  # 静默处理
+        elif event_type == "orchestration_synthesizing":
+            renderer.print_orchestration_synthesize()
+        elif event_type == "orchestration_end":
+            renderer.print_orchestration_done(
+                int(payload.get("total_results", 0))
+            )
 
     orchestrator = MultiAgentOrchestrator(
         tools=list(getattr(runner, "tools", [])),
         execution_controller=runtime_context.get("execution_controller"),
+        event_handler=orchestration_event_handler,
         service_name=str(runtime_context.get("service_name", "deepseek")),
         model_name=str(runtime_context.get("model_name", "")),
         api_key=str(runtime_context.get("api_key", "")),
@@ -1321,6 +1361,23 @@ def run_chat_loop(
             break
         if builtin_result is True:
             continue
+
+        # 注入待处理的文件内容到用户消息
+        pending_files = {
+            k: v for k, v in runtime_context.items()
+            if k.startswith("__pending_file_")
+        }
+        if pending_files:
+            file_context_parts = ["以下是用户通过 /file 命令加载的文件内容：\n"]
+            for key, file_info in pending_files.items():
+                fmt = file_info.get("lang", "")
+                file_context_parts.append(
+                    f"### 文件：{file_info['path']}\n"
+                    f"```{fmt}\n{file_info['content']}\n```\n"
+                )
+                del runtime_context[key]
+            file_context_parts.append(f"---\n用户问题：{user_input}")
+            user_input = "\n".join(file_context_parts)
 
         try:
             # 多 Agent 模式：使用编排器并行执行

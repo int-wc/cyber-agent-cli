@@ -50,6 +50,13 @@ try:
     except ModuleNotFoundError:
         SuggestFromList = None
 
+    try:
+        from textual.widgets import Markdown as TextualMarkdown
+        _TEXTUAL_MARKDOWN_AVAILABLE = True
+    except ImportError:
+        TextualMarkdown = None
+        _TEXTUAL_MARKDOWN_AVAILABLE = False
+
     TEXTUAL_IMPORT_ERROR: ModuleNotFoundError | None = None
 except ModuleNotFoundError as exc:  # pragma: no cover - 运行环境缺依赖时走降级
     TEXTUAL_IMPORT_ERROR = exc
@@ -67,12 +74,19 @@ if TEXTUAL_IMPORT_ERROR is None:
 
 
     class ChatMessage(Static):
-        """用于显示聊天消息的富文本气泡。"""
+        """用于显示聊天消息的富文本气泡，支持可选 Markdown 渲染。"""
 
-        def __init__(self, role: str, content: str | Text) -> None:
+        def __init__(
+            self,
+            role: str,
+            content: str | Text,
+            *,
+            use_markdown: bool = False,
+        ) -> None:
             super().__init__()
             self.role = role
             self._text: str | Text = content
+            self._use_markdown = use_markdown and _TEXTUAL_MARKDOWN_AVAILABLE and role == "assistant"
             self._refresh_renderable()
 
         def set_content(self, content: str | Text) -> None:
@@ -92,6 +106,12 @@ if TEXTUAL_IMPORT_ERROR is None:
             return bool(self._text.strip())
 
         def _refresh_renderable(self) -> None:
+            if self._use_markdown and isinstance(self._text, str) and self._text.strip():
+                try:
+                    self.update(TextualMarkdown(self._text))
+                    return
+                except Exception:
+                    pass
             self.update(build_chat_message_panel(self.role, self._text))
 
 
@@ -320,6 +340,11 @@ if TEXTUAL_IMPORT_ERROR is None:
                     self.call_from_thread(self._show_token_usage, payload)
                     return
 
+            # 多 Agent 协作模式：使用编排器并行执行
+            if self.runtime_context.get("multi_agent_enabled") is True:
+                self._run_multi_agent_turn(user_input)
+                return
+
             try:
                 final_response = self.runner.run(
                     user_input,
@@ -344,6 +369,73 @@ if TEXTUAL_IMPORT_ERROR is None:
                 )
             finally:
                 persist_runtime_session(self.runner, self.runtime_context)
+
+        def _run_multi_agent_turn(self, user_input: str) -> None:
+            """TUI 中执行多 Agent 协作任务，带进度显示。"""
+            from ..agent.orchestrator import MultiAgentOrchestrator
+
+            self.call_from_thread(
+                self._set_assistant_content,
+                "🚀 正在启动多 Agent 协作模式...",
+            )
+
+            def orch_event_handler(event_type: str, payload: object) -> None:
+                if event_type == "orchestration_plan_done":
+                    self.call_from_thread(
+                        self._append_assistant_content,
+                        f"\n\n📋 任务已分解为 {payload.get('subtask_count', 0)} 个子任务",
+                    )
+                elif event_type == "orchestration_executing":
+                    self.call_from_thread(
+                        self._append_assistant_content,
+                        f"\n⚡ 并发执行 {payload.get('subtask_count', 0)} 个子任务...",
+                    )
+                elif event_type == "subtask_complete":
+                    icon = "✓" if payload.get("success") else "✗"
+                    self.call_from_thread(
+                        self._append_assistant_content,
+                        f"\n  {icon} {payload.get('role', '?')}",
+                    )
+                elif event_type == "orchestration_reflecting":
+                    self.call_from_thread(
+                        self._append_assistant_content,
+                        f"\n🪞 反思评估中...",
+                    )
+                elif event_type == "orchestration_end":
+                    self.call_from_thread(
+                        self._append_assistant_content,
+                        "\n\n",
+                    )
+
+            orchestrator = MultiAgentOrchestrator(
+                tools=list(getattr(self.runner, "tools", [])),
+                execution_controller=self.runtime_context.get("execution_controller"),
+                event_handler=orch_event_handler,
+                service_name=str(self.runtime_context.get("service_name", "deepseek")),
+                model_name=str(self.runtime_context.get("model_name", "")),
+                api_key=str(self.runtime_context.get("api_key", "")),
+                base_url=str(self.runtime_context.get("base_url", "")) if self.runtime_context.get("base_url") is not None else None,
+            )
+
+            try:
+                result = orchestrator.run(user_input)
+                if result:
+                    from rich.markdown import Markdown as RichMarkdown
+                    try:
+                        self.call_from_thread(
+                            self._set_assistant_content,
+                            RichMarkdown(result),
+                        )
+                    except Exception:
+                        self.call_from_thread(
+                            self._set_assistant_content,
+                            result,
+                        )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._replace_assistant_with_error,
+                    f"多 Agent 协作失败：{exc}",
+                )
                 self.call_from_thread(self._finish_request)
 
         def _build_input_widget(self) -> Input:
@@ -425,8 +517,10 @@ if TEXTUAL_IMPORT_ERROR is None:
                     hint.append("\n")
             return hint
 
-        def _add_message(self, role: str, content: str | Text) -> ChatMessage:
-            message = ChatMessage(role, content)
+        def _add_message(
+            self, role: str, content: str | Text, *, use_markdown: bool = False,
+        ) -> ChatMessage:
+            message = ChatMessage(role, content, use_markdown=use_markdown)
             chat_view = self.query_one("#chat-view", ScrollableContainer)
             chat_view.mount(message)
             chat_view.scroll_end(animate=False)
@@ -505,10 +599,16 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.query_one("#chat-view", ScrollableContainer).scroll_end(animate=False)
 
         def _ensure_final_assistant_content(self, content: str) -> None:
+            """确保最终输出以 Markdown 渲染。"""
             if self._active_assistant_message is None:
-                self._active_assistant_message = self._add_message("assistant", content)
+                self._active_assistant_message = self._add_message(
+                    "assistant", content, use_markdown=True,
+                )
                 return
             if not self._active_assistant_message.has_content():
+                self._active_assistant_message._use_markdown = (
+                    _TEXTUAL_MARKDOWN_AVAILABLE
+                )
                 self._active_assistant_message.set_content(content)
 
         def _replace_assistant_with_error(self, content: str) -> None:

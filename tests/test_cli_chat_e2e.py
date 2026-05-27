@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from typer.testing import CliRunner
 
 from cyber_agent.cli.app import app
@@ -23,6 +23,25 @@ class FakeChatOpenAI:
     def bind_tools(self, tools, **kwargs):
         self.bound_tools = tools
         return self
+
+    def invoke(self, messages):
+        """模拟 invoke 调用，返回 AIMessage（支持 orchestrator 的工具调用循环）。"""
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "scan_port",
+                        "args": {"target": "127.0.0.1", "port": 80},
+                        "id": "call_scan_port",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        if isinstance(last_message, ToolMessage):
+            return AIMessage(content=f"工具结果回复: {last_message.content}")
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
     def stream(self, messages):
         last_message = messages[-1]
@@ -87,6 +106,30 @@ class ApprovalCliFakeChatOpenAI:
     def bind_tools(self, tools, **kwargs):
         self.bound_tools = tools
         return self
+
+    def invoke(self, messages):
+        """模拟 invoke 调用，返回 AIMessage（支持 orchestrator 的工具调用循环）。"""
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            if self.__class__.target_path is None:
+                raise AssertionError("测试未设置目标写入路径。")
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_text_file",
+                        "args": {
+                            "path": str(self.__class__.target_path),
+                            "content": "auto-approved content",
+                        },
+                        "id": "call_write_file",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        if isinstance(last_message, ToolMessage):
+            return AIMessage(content=f"写入完成。{last_message.content}")
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
     def stream(self, messages):
         last_message = messages[-1]

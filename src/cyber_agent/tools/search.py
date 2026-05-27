@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import random
 import re
+import time as time_mod
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
@@ -85,9 +87,11 @@ window.navigator.permissions.query = (parameters) => (
     originalQuery(parameters)
 );
 """
-SEARCH_TIME_BUDGET_SECONDS = 5.8
+SEARCH_TIME_BUDGET_SECONDS = 6.0
 MAX_SEARCH_QUERY_LENGTH = 300
-PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 4
+SEARCH_MIN_RESULTS = 20
+SEARCH_MAX_RESULTS = 40
+PLAYWRIGHT_SEARCH_RESULT_MULTIPLIER = 6
 PLAYWRIGHT_VISIT_RESULT_LIMIT = 3
 PLAYWRIGHT_WAIT_MILLISECONDS = 200
 PLAYWRIGHT_VISIT_WAIT_MILLISECONDS = 100
@@ -97,6 +101,20 @@ PLAYWRIGHT_TYPE_DELAY_MILLISECONDS = 0
 PLAYWRIGHT_PAGE_LOAD_TIMEOUT_MILLISECONDS = 3000
 PLAYWRIGHT_SCROLL_STEP_PIXELS = 960
 PLAYWRIGHT_PAGE_TEXT_MAX_CHARS = 2400
+PARALLEL_ENGINE_TIMEOUT_SECONDS = 6.0
+
+# 搜索黑名单域名：CSDN 全家桶 —— 结果中自动剔除
+CSDN_DOMAINS = frozenset({
+    "csdn.net", "blog.csdn.net", "www.csdn.net",
+    "bbs.csdn.net", "download.csdn.net", "edu.csdn.net",
+    "live.csdn.net", "ask.csdn.net", "bi.csdn.net",
+    "dev.csdn.net", "gitcode.csdn.net", "inscode.csdn.net",
+    "spider.csdn.net",
+})
+
+# 拉取倍数：原始拉取量为目标量的 N 倍，弥补 CSDN 剔除后的缺口
+# 3.5x + 分页 = 确保剔除 CSDN 后仍 ≥ 20 条
+FETCH_MULTIPLIER_FOR_CSDN_FILTER = 3.5
 PLAYWRIGHT_RELEVANCE_HIGH_SCORE = 12
 PLAYWRIGHT_RELEVANCE_MEDIUM_SCORE = 6
 PLAYWRIGHT_RELEVANCE_LOW_SCORE = 3
@@ -157,7 +175,7 @@ PLAYWRIGHT_SEARCH_ENGINES = (
         name="bing",
         homepage_url="https://www.bing.com/",
         # 直接构造搜索 URL 作为快速通道，免去首页导航和输入交互
-        search_url_template="https://www.bing.com/search?q={query}&count=30&form=QBLH",
+        search_url_template="https://www.bing.com/search?q={query}&count=50&form=QBLH",
         search_input_selectors=("textarea[name='q']", "input[name='q']"),
         result_ready_selectors=("#b_results", "li.b_algo"),
         result_selector="li.b_algo",
@@ -194,6 +212,7 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="google",
         homepage_url="https://www.google.com/",
+        search_url_template="https://www.google.com/search?q={query}&num=30&hl=en&gl=us&pws=0",
         search_input_selectors=(
             "textarea[name='q']", "textarea[name='q'][title='搜索']",
             "input[name='q']", "input[aria-label='搜索']", "input[type='text']",
@@ -236,6 +255,7 @@ PLAYWRIGHT_SEARCH_ENGINES = (
     SearchEngineSpec(
         name="baidu",
         homepage_url="https://www.baidu.com/",
+        search_url_template="https://www.baidu.com/s?wd={query}",
         search_input_selectors=(
             "textarea[name='wd']", "input[name='wd']", "input#kw",
             "input#index-kw", "input.s_ipt",
@@ -864,6 +884,11 @@ def _search_with_single_engine(
             page.goto(search_url, wait_until="domcontentloaded", timeout=goto_timeout)
             page.wait_for_timeout(_random_jitter_bidir(PLAYWRIGHT_WAIT_MILLISECONDS, pct=0.5))
 
+            # 处理可能出现的同意弹窗（Google GDPR 等）
+            if engine_spec.consent_button_selectors:
+                _click_first_available(page, engine_spec.consent_button_selectors)
+                page.wait_for_timeout(_random_jitter_bidir(300, pct=0.5))
+
             if not _page_looks_blocked(page, engine_spec):
                 if _wait_for_results_to_settle(page, engine_spec, execution_controller):
                     return _extract_results_from_page(page, engine_spec, query, result_limit, execution_controller), None
@@ -1095,6 +1120,7 @@ def _create_stealth_browser_context(playwright: Any) -> tuple[Any, Any]:
     browser = playwright.chromium.launch(
         headless=not settings.search_show_browser,
         args=_STEALTH_LAUNCH_ARGS,
+        timeout=PARALLEL_ENGINE_TIMEOUT_SECONDS * 1000,
     )
     browser_context = browser.new_context(
         user_agent=_pick_random_user_agent(),
@@ -1118,24 +1144,200 @@ def _search_engine_in_isolated_context(
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
     """在独立线程中搜索单个引擎，各自持有独立的 sync_playwright 上下文。
-    Playwright 的 sync API 依赖 greenlet，不能跨线程共享 playwright 对象。"""
+    Playwright 的 sync API 依赖 greenlet，不能跨线程共享 playwright 对象。
+    整体受 PARALLEL_ENGINE_TIMEOUT_SECONDS 保护，防止网络不通时悬挂。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
         return [], "Playwright 不可用"
 
     if execution_controller is not None:
         execution_controller.ensure_not_cancelled()
 
-    with sync_playwright() as pw:
-        browser, browser_context = _create_stealth_browser_context(pw)
-        page = browser_context.new_page()
-        try:
-            return _search_with_single_engine(
-                page, engine_spec, query, result_limit, execution_controller,
+    deadline = time_mod.monotonic() + PARALLEL_ENGINE_TIMEOUT_SECONDS
+
+    try:
+        with sync_playwright() as pw:
+            browser, browser_context = _create_stealth_browser_context(pw)
+            page = browser_context.new_page()
+            try:
+                remaining = deadline - time_mod.monotonic()
+                if remaining <= 0.2:
+                    return [], f"{engine_spec.name} 超时（启动前已超预算）"
+
+                # Bing 使用多查询模式获取更多结果
+                if engine_spec.search_url_template and "bing.com" in engine_spec.search_url_template:
+                    return _search_bing_multiquery(
+                        page, engine_spec, query, result_limit, execution_controller
+                    )
+                return _search_with_single_engine(
+                    page, engine_spec, query, result_limit, execution_controller,
+                )
+            finally:
+                page.close()
+                browser_context.close()
+                browser.close()
+    except Exception as exc:
+        elapsed = time_mod.monotonic() - (deadline - PARALLEL_ENGINE_TIMEOUT_SECONDS)
+        if elapsed > PARALLEL_ENGINE_TIMEOUT_SECONDS:
+            return [], f"{engine_spec.name} 超时（{elapsed:.1f}s）"
+        return [], f"{engine_spec.name} 异常：{exc}"
+
+
+def _search_all_engines_parallel(
+    query: str,
+    result_limit: int,
+    execution_controller: ExecutionController | None,
+) -> list[SearchResult]:
+    """搜索聚合：Bing Chromium 多查询 + 回退链（含百度同页面搜索）。"""
+    if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
+        return []
+
+    all_results: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    per_engine_limit = max(15, result_limit)
+
+    # 仅 Bing（百度作为 _search_bing_multiquery 内回退，复用同一 Chromium）
+    bing_spec = next((e for e in PLAYWRIGHT_SEARCH_ENGINES if "bing.com" in (e.search_url_template or "")), None)
+    if bing_spec:
+        if execution_controller is not None:
+            execution_controller.ensure_not_cancelled()
+        bing_results, _note = _search_engine_in_isolated_context(
+            bing_spec, query, per_engine_limit, execution_controller,
+        )
+        for r in bing_results:
+            dedup_url = r.url.rstrip("/")
+            if dedup_url and dedup_url not in seen_urls:
+                seen_urls.add(dedup_url)
+                if not r.source_engine:
+                    r.source_engine = bing_spec.name
+                all_results.append(r)
+
+    return all_results
+
+
+def _generate_role_based_queries(query: str, num_variants: int = 6) -> list[tuple[str, str]]:
+    """从不同角色视角生成搜索查询变体，用于多 Agent 并发搜索。
+    生成更多角度以弥补 CSDN 剔除后的结果缺口。
+    返回 [(角色标签, 查询字符串), ...] 列表。"""
+    variants: list[tuple[str, str]] = [("原始查询", query)]
+
+    eng_words = re.findall(r"[a-zA-Z]{3,}", query)
+    cn_words = re.findall(r"[一-鿿]{2,6}", query)
+
+    # 扩散者角度：广度探索 (多方向)
+    if eng_words:
+        variants.append(("扩散者·广度", " ".join(eng_words[:4]) + " overview summary"))
+        if len(eng_words) >= 2:
+            variants.append(("扩散者·关联", " ".join(eng_words[:2]) + " related topics"))
+            variants.append(("扩散者·同义", " ".join(eng_words[:3]) + " roundup recap"))
+    if cn_words:
+        variants.append(("扩散者·中文", " ".join(cn_words[:4]) if len(cn_words) >= 2 else query + " 相关"))
+        if len(cn_words) >= 3:
+            variants.append(("扩散者·中文2", " ".join(cn_words[:2]) + " 盘点 总结"))
+
+    # 分析者角度：深度挖掘
+    if eng_words:
+        variants.append(("分析者·深度", " ".join(eng_words[:2]) + " analysis in-depth details"))
+        variants.append(("分析者·技术", " ".join(eng_words[:2]) + " technical breakdown exploit"))
+        if "2025" in query or "2026" in query:
+            variants.append(("分析者·对比", query + " vs previous year comparison"))
+            variants.append(("分析者·趋势", " ".join(eng_words[:3]) + " trends report"))
+    if cn_words:
+        variants.append(("分析者·解析", " ".join(cn_words[:3]) + " 深度分析 详解" if len(cn_words) >= 2 else query + " 详解"))
+
+    # 阅读者角度：资讯聚合 (多个来源方向)
+    if eng_words:
+        variants.append(("阅读者·资讯", " ".join(eng_words[:3]) + " latest news highlights" if len(eng_words) >= 3 else query + " news"))
+        variants.append(("阅读者·媒体", " ".join(eng_words[:2]) + " report coverage review"))
+    if cn_words:
+        variants.append(("阅读者·报道", " ".join(cn_words[:3]) + " 最新报道 汇总" if len(cn_words) >= 2 else query + " 报道"))
+        variants.append(("阅读者·中文资讯", " ".join(cn_words[:2]) + " 最新消息 动态"))
+
+    # 迁跃者角度：跨领域联想
+    if eng_words and len(eng_words) >= 2:
+        variants.append(("迁跃者·跨界", " ".join(eng_words[:2]) + " technology impact innovation"))
+        variants.append(("迁跃者·前瞻", " ".join(eng_words[:2]) + " future implications predictions"))
+
+    # 审计者角度：权威来源
+    if eng_words:
+        variants.append(("审计者·权威", " ".join(eng_words[:2]) + " official report research"))
+        variants.append(("审计者·数据", " ".join(eng_words[:3]) + " statistics results winners"))
+
+    # 去重并限制数量
+    seen: set[str] = {query.lower()}
+    deduped: list[tuple[str, str]] = [variants[0]]
+    for role_label, vq in variants[1:]:
+        key = vq.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            deduped.append((role_label, vq))
+        if len(deduped) >= num_variants:
+            break
+
+    return deduped
+
+
+def _search_all_variants_parallel(
+    query: str,
+    result_limit: int,
+    execution_controller: ExecutionController | None,
+    num_variants: int = 5,
+) -> list[SearchResult]:
+    """多 Agent 并发搜索：生成多角度查询变体，并行搜索所有引擎。
+    对应角色：扩散者(查询生成) + 执行者×N(并行搜索) + 审计者(去重合并)。"""
+    if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
+        return []
+
+    all_results: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    # 每个引擎拉取足够结果，Bing 内部多查询展开补偿 CSDN 过滤
+    per_query_limit = max(20, result_limit)
+    max_workers = len(PLAYWRIGHT_SEARCH_ENGINES)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        future_map: dict[concurrent.futures.Future, tuple[str, str]] = {}
+
+        # 三引擎均用原始查询各 1 路，共 3 个 chromium 实例
+        # Bing: 内部多查询展开（10 变体），Google/Baidu: 直接搜索 URL 快速通道
+        for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
+            if execution_controller is not None:
+                execution_controller.ensure_not_cancelled()
+            future = executor.submit(
+                _search_engine_in_isolated_context,
+                engine_spec, query, per_query_limit, execution_controller,
             )
-        finally:
-            page.close()
-            browser_context.close()
-            browser.close()
+            future_map[future] = ("原始查询", engine_spec.name)
+
+        deadline = time_mod.monotonic() + SEARCH_TIME_BUDGET_SECONDS
+        pending = set(future_map.keys())
+
+        while pending:
+            remaining = deadline - time_mod.monotonic()
+            if remaining <= 0.1:
+                break
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=remaining,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                role_label, engine_name = future_map[future]
+                try:
+                    engine_results, _note = future.result(timeout=0.5)
+                except Exception:
+                    continue
+                for r in engine_results:
+                    dedup_url = r.url.rstrip("/")
+                    if dedup_url and dedup_url not in seen_urls:
+                        seen_urls.add(dedup_url)
+                        if not r.source_engine:
+                            r.source_engine = engine_name
+                        all_results.append(r)
+    finally:
+        # 不等待未完成的 futures，直接关闭
+        executor.shutdown(wait=False)
+
+    return all_results
 
 
 def _setup_speed_optimizations(page: Any) -> None:
@@ -1151,13 +1353,15 @@ def _setup_speed_optimizations(page: Any) -> None:
 
 
 def _build_query_variants(query: str, target_count: int) -> list[str]:
-    """从原始查询生成多组相关查询变体，覆盖不同角度获取更多样化结果。"""
+    """从原始查询生成多组查询变体。策略：
+    1. 原始查询 + 修饰词变体（覆盖面）
+    2. 核心词配对变体（不同关键词组合产生不同结果集）"""
     variants = [query]
     eng_words = re.findall(r"[a-zA-Z]{3,}", query)
     cn_words = re.findall(r"[一-鿿]{2,4}", query)
 
+    # 策略 1：修饰词变体
     if eng_words:
-        # 扩展关键词组合
         if len(eng_words) >= 3:
             variants.append(" ".join(eng_words[:3]) + " details")
             variants.append(" ".join(eng_words[:2]) + " analysis report")
@@ -1168,6 +1372,20 @@ def _build_query_variants(query: str, target_count: int) -> list[str]:
         variants.append(" ".join(cn_words[:3]) if len(cn_words) >= 3 else " ".join(cn_words))
         if eng_words:
             variants.append(" ".join(cn_words[:2]) + " " + " ".join(eng_words[:2]))
+
+    # 策略 2：核心词配对
+    all_content_words = eng_words + cn_words
+    if len(all_content_words) >= 3:
+        primary = all_content_words[0]
+        for secondary in all_content_words[1:5]:
+            pair = f"{primary} {secondary}"
+            if pair.lower() != query.lower():
+                variants.append(pair)
+        if len(all_content_words) >= 4:
+            variants.append(" ".join(all_content_words[:2] + [all_content_words[-1]]))
+    if len(all_content_words) == 2:
+        variants.append(" ".join(all_content_words))
+
     if target_count >= 30:
         if eng_words:
             variants.append(" ".join(eng_words[:2]) + " news latest")
@@ -1175,7 +1393,7 @@ def _build_query_variants(query: str, target_count: int) -> list[str]:
             variants.append(" ".join(cn_words[:2]) + " 最新进展")
         variants.append(query + " OR " + query.replace(" ", "+"))
 
-    # 去重并限制
+    # 去重并限制为 10 个
     unique = []
     seen = set()
     for v in variants:
@@ -1218,13 +1436,14 @@ def _search_bing_multiquery(
     result_limit: int,
     execution_controller: ExecutionController | None,
 ) -> tuple[list[SearchResult], str | None]:
-    """快速多查询搜索：同一浏览器依次搜索多个查询变体，
-    采用 JS 直接提取 DOM 结果 + 资源拦截加速，合并去重突破单次 10 条限制。"""
+    """Bing 多查询变体搜索：原始查询生成 10 变体，每个搜 Page 1 后去重。
+    变体间结果去重聚合，不达标时对最佳变体追加 Page 2-5 分页。"""
     import time as time_mod
 
     deadline = time_mod.monotonic() + SEARCH_TIME_BUDGET_SECONDS
     raw_results: list[SearchResult] = []
     seen_urls: set[str] = set()
+    variant_new_counts: dict[str, int] = {}
     query_variants = _build_query_variants(query, result_limit)
 
     for variant in query_variants:
@@ -1235,13 +1454,14 @@ def _search_bing_multiquery(
             execution_controller.ensure_not_cancelled()
 
         search_url = f"https://www.bing.com/search?q={variant}&count=50&form=QBLH"
+        before_count = len(raw_results)
         try:
             page.goto(
                 search_url,
                 wait_until="domcontentloaded",
                 timeout=int(max(2.0, remaining) * 1000),
             )
-            page.wait_for_timeout(150)
+            page.wait_for_timeout(120)
 
             if _page_looks_blocked(page, engine_spec):
                 continue
@@ -1251,30 +1471,173 @@ def _search_bing_multiquery(
                 dedup_url = str(r.get("url", "")).rstrip("/")
                 if dedup_url and dedup_url not in seen_urls:
                     seen_urls.add(dedup_url)
-                    result = SearchResult(
+                    raw_results.append(SearchResult(
                         title=str(r.get("title", "")),
                         url=dedup_url,
                         snippet=str(r.get("snippet", "")),
                         source_engine=engine_spec.name,
-                    )
-                    _annotate_result_relevance(variant, result)
-                    raw_results.append(result)
-
+                    ))
+                    _annotate_result_relevance(variant, raw_results[-1])
+            variant_new_counts[variant] = len(raw_results) - before_count
         except Exception:
+            variant_new_counts[variant] = 0
             continue
+
+    # 回退 1：百度搜索 —— 同一 Chromium 页面，最高多样性，优先执行
+    if len(raw_results) < SEARCH_MIN_RESULTS:
+        remaining = deadline - time_mod.monotonic()
+        if remaining > 1.5:
+            if execution_controller is not None:
+                execution_controller.ensure_not_cancelled()
+            _baidu_spec = next((e for e in PLAYWRIGHT_SEARCH_ENGINES if "baidu" in e.name), None)
+            try:
+                page.goto(
+                    f"https://www.baidu.com/s?wd={query}",
+                    wait_until="domcontentloaded",
+                    timeout=int(max(1.5, remaining) * 1000),
+                )
+                page.wait_for_timeout(200)
+                if _baidu_spec and _page_looks_blocked(page, _baidu_spec):
+                    pass
+                else:
+                    baidu_results = page.evaluate("""() => {
+                        const items = [], seen = new Set();
+                        const add = (title, url, snippet) => {
+                            if (!url || !url.startsWith('http') || seen.has(url)) return;
+                            if (!title || title.length < 3) return;
+                            seen.add(url);
+                            items.push({title: title.trim().substring(0,120), url: url, snippet: (snippet||'').trim().substring(0,200)});
+                        };
+                        document.querySelectorAll('div.result, div.c-result, #content_left > div').forEach(card => {
+                            const link = card.querySelector('h3 a');
+                            const snip = card.querySelector('.c-abstract, .c-summary, .content-right_8Zs40, .c-span-last');
+                            if (link && link.href) add(link.textContent, link.href, snip ? snip.textContent : '');
+                        });
+                        document.querySelectorAll('.c-container h3 a, #content_left h3 a').forEach(a => {
+                            if (a.href && a.href.startsWith('http')) add(a.textContent, a.href, '');
+                        });
+                        return items;
+                    }""")
+                    for r in baidu_results:
+                        dedup_url = str(r.get("url", "")).rstrip("/")
+                        if dedup_url and dedup_url not in seen_urls:
+                            seen_urls.add(dedup_url)
+                            raw_results.append(SearchResult(
+                                title=str(r.get("title", "")),
+                                url=dedup_url,
+                                snippet=str(r.get("snippet", "")),
+                                source_engine="baidu",
+                            ))
+                            _annotate_result_relevance("baidu:" + query, raw_results[-1])
+            except Exception:
+                pass
+
+    # 回退 2：站点限定搜索
+    SITE_TARGET = 24
+    _SITE_FILTERS = (
+        ("site:github.com", "GitHub"),
+        ("site:medium.com", "Medium"),
+        ("site:stackoverflow.com", "StackOverflow"),
+    )
+    if len(raw_results) < SITE_TARGET:
+        for site_filter, site_label in _SITE_FILTERS:
+            remaining = deadline - time_mod.monotonic()
+            if remaining <= 1.0 or len(raw_results) >= SITE_TARGET:
+                break
+            if execution_controller is not None:
+                execution_controller.ensure_not_cancelled()
+            try:
+                page.goto(
+                    f"https://www.bing.com/search?q={query}+{site_filter}&count=30&form=QBLH",
+                    wait_until="domcontentloaded",
+                    timeout=int(max(2.0, remaining) * 1000),
+                )
+                page.wait_for_timeout(100)
+                if _page_looks_blocked(page, engine_spec):
+                    continue
+                for r in _extract_results_via_js(page):
+                    dedup_url = str(r.get("url", "")).rstrip("/")
+                    if dedup_url and dedup_url not in seen_urls:
+                        seen_urls.add(dedup_url)
+                        raw_results.append(SearchResult(
+                            title=str(r.get("title", "")),
+                            url=dedup_url,
+                            snippet=str(r.get("snippet", "")),
+                            source_engine=engine_spec.name,
+                        ))
+                        _annotate_result_relevance(f"site:{site_label}", raw_results[-1])
+            except Exception:
+                continue
+
+    # 回退 3：分页 —— 对最佳变体追加 Page 2-3
+    MIN_TARGET = 25
+    if len(raw_results) < MIN_TARGET and variant_new_counts:
+        top_variants = sorted(variant_new_counts, key=variant_new_counts.get, reverse=True)[:2]
+        for page_offset in (11, 21):
+            if len(raw_results) >= MIN_TARGET:
+                break
+            for variant in top_variants:
+                remaining = deadline - time_mod.monotonic()
+                if remaining <= 1.0 or len(raw_results) >= MIN_TARGET:
+                    break
+                if execution_controller is not None:
+                    execution_controller.ensure_not_cancelled()
+
+                page_url = f"https://www.bing.com/search?q={variant}&first={page_offset}&count=50&form=QBLH"
+                try:
+                    page.goto(
+                        page_url,
+                        wait_until="domcontentloaded",
+                        timeout=int(max(2.0, remaining) * 1000),
+                    )
+                    page.wait_for_timeout(120)
+
+                    if _page_looks_blocked(page, engine_spec):
+                        continue
+
+                    page_results = _extract_results_via_js(page)
+                    for r in page_results:
+                        dedup_url = str(r.get("url", "")).rstrip("/")
+                        if dedup_url and dedup_url not in seen_urls:
+                            seen_urls.add(dedup_url)
+                            raw_results.append(SearchResult(
+                                title=str(r.get("title", "")),
+                                url=dedup_url,
+                                snippet=str(r.get("snippet", "")),
+                                source_engine=engine_spec.name,
+                            ))
+                            _annotate_result_relevance(variant, raw_results[-1])
+                except Exception:
+                    continue
 
     if not raw_results:
         return [], f"{engine_spec.name} 多查询搜索未返回可用结果。"
     return raw_results, None
+def _is_csdn_url(url: str) -> bool:
+    """判断 URL 是否属于 CSDN 域名。"""
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        return False
+    return any(hostname == d or hostname.endswith("." + d) for d in CSDN_DOMAINS)
+
+
+def _filter_csdn_results(results: list[SearchResult]) -> tuple[list[SearchResult], int]:
+    """从搜索结果中剔除所有 CSDN 域名。返回 (过滤后结果列表, 被剔除数量)。"""
+    filtered = [r for r in results if not _is_csdn_url(r.url)]
+    removed = len(results) - len(filtered)
+    return filtered, removed
+
+
 def search_with_playwright(
     query: str,
     result_limit: int,
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
 ) -> tuple[list[SearchResult], list[str]]:
-    """使用 Playwright 搜索多个引擎，合并去重后按相关性排序。
-    引擎按优先级依次尝试，首个返回足量结果的引擎即终止，不再等待后续引擎。
-    单引擎内部设置较短超时，确保总体耗时可控。"""
+    """多 Agent 并发搜索：从多角色角度生成查询变体，并行搜索多个引擎。
+    扩散者生成查询角度 → 执行者×N 并行搜索 → 审计者去重合并。
+    总耗时控制在 6s 内，目标返回 20-40 条结果。"""
     if not PLAYWRIGHT_AVAILABLE or sync_playwright is None:
         return [], ["当前环境未安装 Playwright，已跳过浏览器搜索。"]
 
@@ -1283,52 +1646,42 @@ def search_with_playwright(
             "浏览器模式：可见窗口"
             if settings.search_show_browser
             else "浏览器模式：无头窗口"
-        )
+        ),
     ]
-    min_results_for_early_exit = min(max(5, result_limit // 4), 15)
-    raw_results: list[SearchResult] = []
 
-    with sync_playwright() as pw:
-        browser, browser_context = _create_stealth_browser_context(pw)
-        page = browser_context.new_page()
-        try:
-            for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
-                if execution_controller is not None:
-                    execution_controller.ensure_not_cancelled()
+    # 超额拉取弥补 CSDN 剔除缺口
+    fetch_limit = max(result_limit + 10, int(result_limit * FETCH_MULTIPLIER_FOR_CSDN_FILTER))
 
-                try:
-                    if engine_spec.search_url_template:
-                        engine_results, engine_note = _search_bing_multiquery(
-                            page, engine_spec, query, result_limit, execution_controller,
-                        )
-                    else:
-                        engine_results, engine_note = _search_with_single_engine(
-                            page, engine_spec, query, result_limit, execution_controller,
-                        )
-                except PlaywrightError as exc:
-                    engine_results, engine_note = [], str(exc)
-                except Exception as exc:
-                    engine_results, engine_note = [], f"{engine_spec.name} 搜索异常：{exc}"
-
-                if engine_note:
-                    notes.append(engine_note)
-                raw_results.extend(engine_results)
-
-                if len(raw_results) >= min_results_for_early_exit:
-                    notes.append(
-                        f"{engine_spec.name} 累计 {len(raw_results)} 条结果，跳过其余引擎。"
-                    )
-                    break
-        finally:
-            page.close()
-            browser_context.close()
-            browser.close()
+    try:
+        notes.append("Bing 多查询变体 + 回退链（含百度同 Chromium 终级回退）")
+        raw_results = _search_all_engines_parallel(
+            query, fetch_limit, execution_controller,
+        )
+    except ExecutionInterruptedError:
+        raise
+    except Exception as exc:
+        raw_results = []
+        notes.append(f"并发搜索异常：{exc}")
 
     if not raw_results:
         return [], notes
 
-    ranked_results = rank_search_results(query, raw_results)[:result_limit]
-    return rerank_results_by_relevance(ranked_results)[:result_limit], notes
+    engine_names = sorted({r.source_engine for r in raw_results if r.source_engine})
+    notes.append(
+        f"命中引擎：{', '.join(engine_names)}，去重后 {len(raw_results)} 条原始结果"
+    )
+
+    # 剔除 CSDN 全家桶
+    filtered_results, csdn_removed = _filter_csdn_results(raw_results)
+    if csdn_removed > 0:
+        notes.append(f"已剔除 CSDN: {csdn_removed} 条，剩余 {len(filtered_results)} 条")
+
+    # 硬上限：最终返回不超过 SEARCH_MAX_RESULTS (40)
+    hard_cap = min(result_limit, SEARCH_MAX_RESULTS)
+    ranked_results = rank_search_results(query, filtered_results)[:hard_cap]
+    final_results = rerank_results_by_relevance(ranked_results)[:hard_cap]
+    notes.append(f"浏览器搜索返回 {len(final_results)} 条结果")
+    return final_results, notes
 
 
 def render_search_results(
@@ -1444,7 +1797,13 @@ def search_with_httpx(
 
         results = parse_duckduckgo_html_results(response.text)[:result_limit]
         if results:
-            return results, notes, request_errors
+            filtered, csdn_removed = _filter_csdn_results(results)
+            if csdn_removed > 0:
+                notes.append(f"已剔除 CSDN: {csdn_removed} 条（HTTP 搜索）")
+            if filtered:
+                return filtered, notes, request_errors
+            notes.append(f"{endpoint} 请求成功，但剔除 CSDN 后无可用结果。")
+            continue
         notes.append(f"{endpoint} 请求成功，但未解析到可用结果。")
 
     return [], notes, request_errors
@@ -1459,11 +1818,11 @@ def create_search_web_tool(
     @tool("search_web")
     def search_web(
         query: str,
-        max_results: int = 15,
+        max_results: int = 30,
     ) -> str:
         """
-        执行关键词网络搜索，优先使用浏览器首页交互搜索，
-        必要时回退到 HTTP HTML 搜索，返回标题、链接和摘要结果。
+        执行关键词网络搜索，并发查询多个搜索引擎（Bing/Google/百度），
+        在 6s 内返回 20-40 条去重结果。失败时回退到 HTTP HTML 搜索。
         """
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()
@@ -1477,36 +1836,25 @@ def create_search_web_tool(
                 f" 当前长度为 {len(normalized_query)}，最大允许 {MAX_SEARCH_QUERY_LENGTH}。"
             )
 
-        safe_result_count = max(1, min(max_results, settings.search_result_limit))
+        # 强制结果数在 20-40 之间
+        safe_result_count = max(SEARCH_MIN_RESULTS, min(max_results, SEARCH_MAX_RESULTS, settings.search_result_limit))
+        # 原始拉取量 = 目标 × 倍数，弥补 CSDN 剔除 + 合并两路来源
+        fetch_count = max(safe_result_count + 15, int(safe_result_count * FETCH_MULTIPLIER_FOR_CSDN_FILTER))
+
+        # 直接走 Playwright 浏览器搜索（DuckDuckGo HTTP 在此环境不可达，跳过）
         try:
             browser_results, browser_notes = search_with_playwright(
-                normalized_query,
-                safe_result_count,
-                execution_controller,
-                capability_registry,
+                normalized_query, fetch_count, execution_controller, capability_registry,
             )
         except ExecutionInterruptedError:
             raise
         except Exception as exc:
             browser_results = []
-            browser_notes = [f"Playwright 搜索失败，已回退到 HTTP 搜索：{exc}"]
+            browser_notes = [f"搜索失败：{exc}"]
 
         if browser_results:
-            return render_search_results(
-                normalized_query,
-                browser_results,
-                browser_notes,
-            )
+            return render_search_results(normalized_query, browser_results, browser_notes)
 
-        httpx_results, httpx_notes, request_errors = search_with_httpx(
-            normalized_query,
-            safe_result_count,
-            execution_controller,
-        )
-        if httpx_results:
-            notes = [*browser_notes, *httpx_notes]
-            return render_search_results(normalized_query, httpx_results, notes)
-
-        return render_search_failure(request_errors, [*browser_notes, *httpx_notes])
+        return render_search_failure([], [*browser_notes, "❌ 浏览器搜索未返回可用结果"])
 
     return attach_tool_risk(search_web, "read")

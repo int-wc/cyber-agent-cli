@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from .._lazy_imports import load_chat_openai, load_llm_for_api, is_anthropic_api
@@ -60,6 +60,8 @@ class MultiAgentOrchestrator:
     5. 如有需要，重新规划并迭代执行
     """
 
+    _MAX_ROLE_TOOL_ITERATIONS = 10
+
     def __init__(
         self,
         *,
@@ -73,6 +75,7 @@ class MultiAgentOrchestrator:
         max_workers: int | None = None,
     ) -> None:
         self.tools = tools or []
+        self._tool_registry: dict[str, BaseTool] = {t.name: t for t in self.tools}
         self.execution_controller = execution_controller
         self.event_handler = event_handler
         self.service_name = settings.normalize_service_name(service_name)
@@ -88,6 +91,7 @@ class MultiAgentOrchestrator:
     def _get_llm(self) -> Any:
         """懒加载模型实例，自动检测 Anthropic/OpenAI API 格式。"""
         if self._llm is None:
+            import warnings
             llm_cls, is_anthropic = load_llm_for_api(self.base_url)
             kwargs = settings.get_chat_openai_kwargs(
                 self.service_name,
@@ -98,7 +102,10 @@ class MultiAgentOrchestrator:
             if is_anthropic:
                 kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
                 kwargs.pop("openai_api_key", None)
-            self._llm = llm_cls(**kwargs)
+            # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*extra_body.*")
+                self._llm = llm_cls(**kwargs)
         return self._llm
 
     def _emit(self, event_type: str, payload: Any) -> None:
@@ -151,17 +158,37 @@ class MultiAgentOrchestrator:
             if iteration < max_iterations:
                 plan = self._replan(user_input, plan, results, checker_result)
 
-        # 阶段 6: 聚合最终输出
+        # 阶段 5: 聚合最终输出
+        self._emit("orchestration_synthesizing", {"result_count": len(all_results)})
         final_result = self._synthesize(user_input, all_results)
-        self._emit("orchestration_end", {"output": final_result})
+        self._emit("orchestration_end", {
+            "output": final_result,
+            "total_results": len(all_results),
+        })
         log_info("orchestrator", f"多 Agent 协作完成，共 {len(all_results)} 个结果。")
         return final_result
+
+    @staticmethod
+    def _build_system_context() -> str:
+        """构建系统上下文信息，注入到各角色的提示中。"""
+        from datetime import datetime, timezone
+        import os
+        now = datetime.now(timezone.utc).astimezone()
+        return (
+            f"当前日期时间: {now.strftime('%Y年%m月%d日 %H:%M')} "
+            f"({now.strftime('%A')}, ISO {now.strftime('%Y-%m-%d')})\n"
+            f"当前工作目录: {os.getcwd()}\n"
+        )
 
     def _plan_task(self, user_input: str) -> OrchestrationPlan:
         """决策者分解任务为子任务。"""
         self._emit("orchestration_planning", {"input": user_input})
 
+        system_context = self._build_system_context()
         system_prompt = f"""{get_role_prompt(AgentRole.DECISION_MAKER)}
+
+## 系统环境
+{system_context}
 
 请将以下用户任务分解为子任务，分配给最合适的角色。
 可用角色：{', '.join(get_role_label(r) for r in AgentRole)}
@@ -211,11 +238,17 @@ class MultiAgentOrchestrator:
         if not subtasks:
             return self._default_plan(user_input)
 
-        return OrchestrationPlan(
+        plan_obj = OrchestrationPlan(
             original_task=user_input,
             subtasks=subtasks,
             reasoning=str(plan_data.get("reasoning", "")),
         )
+        self._emit("orchestration_plan_done", {
+            "subtask_count": len(subtasks),
+            "reasoning": plan_obj.reasoning,
+            "roles": [t.role.value for t in subtasks],
+        })
+        return plan_obj
 
     def _default_plan(self, user_input: str) -> OrchestrationPlan:
         """当模型规划失败时，使用默认任务分解。"""
@@ -271,7 +304,7 @@ class MultiAgentOrchestrator:
         return results
 
     def _run_role_agent(self, task: AgentTask) -> AgentResult:
-        """在独立线程中运行单个角色 Agent。"""
+        """在独立线程中运行单个角色 Agent，支持工具调用循环。"""
         import time as time_mod
 
         if self.execution_controller is not None:
@@ -283,16 +316,43 @@ class MultiAgentOrchestrator:
 
         try:
             system_prompt = self._build_role_system_prompt(task)
-            messages = [
+            messages: list = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=self._build_role_user_message(task)),
             ]
 
-            response = self._get_llm().invoke(messages)
+            # 工具调用循环：最多 _MAX_ROLE_TOOL_ITERATIONS 轮
+            llm_with_tools = self._get_llm().bind_tools(
+                self.tools, parallel_tool_calls=False,
+            )
+            for _ in range(self._MAX_ROLE_TOOL_ITERATIONS):
+                if self.execution_controller is not None:
+                    self.execution_controller.ensure_not_cancelled()
+
+                response = llm_with_tools.invoke(messages)
+                messages.append(response)
+
+                tool_calls = getattr(response, "tool_calls", None) or []
+                if not tool_calls:
+                    # 无工具调用，返回最终文本
+                    output = self._extract_text(response)
+                    elapsed = (time_mod.monotonic() - start) * 1000
+                    log_info("orchestrator", f"{role_label} 完成，耗时 {elapsed:.0f}ms")
+                    return AgentResult(
+                        role=task.role,
+                        success=True,
+                        output=output,
+                        elapsed_ms=elapsed,
+                    )
+
+                # 执行工具调用并追加结果
+                for tc in tool_calls:
+                    tool_msg = self._invoke_role_tool(tc)
+                    messages.append(tool_msg)
+
+            # 达到最大迭代次数，取最后一轮文本
             output = self._extract_text(response)
             elapsed = (time_mod.monotonic() - start) * 1000
-
-            log_info("orchestrator", f"{role_label} 完成，耗时 {elapsed:.0f}ms")
             return AgentResult(
                 role=task.role,
                 success=True,
@@ -312,16 +372,50 @@ class MultiAgentOrchestrator:
                 elapsed_ms=elapsed,
             )
 
+    def _invoke_role_tool(self, tool_call: Any) -> ToolMessage:
+        """执行角色 Agent 发起的单个工具调用。"""
+        tool_name = getattr(tool_call, "name", "") or str(tool_call.get("name", ""))
+        tool_call_id = getattr(tool_call, "id", "") or str(tool_call.get("id", ""))
+        tool_args = getattr(tool_call, "args", {}) or {}
+
+        tool = self._tool_registry.get(tool_name)
+        if tool is None:
+            return ToolMessage(
+                content=f"❌ 未知工具：{tool_name}",
+                name=tool_name or "unknown",
+                tool_call_id=tool_call_id,
+            )
+
+        try:
+            if self.execution_controller is not None:
+                self.execution_controller.ensure_not_cancelled()
+            result = tool.invoke(tool_args)
+            return ToolMessage(
+                content=str(result),
+                name=tool_name,
+                tool_call_id=tool_call_id,
+            )
+        except Exception as exc:
+            return ToolMessage(
+                content=f"❌ 工具执行异常：{exc}",
+                name=tool_name,
+                tool_call_id=tool_call_id,
+            )
+
     def _build_role_system_prompt(self, task: AgentTask) -> str:
-        """构建角色专属系统提示词，注入任务上下文和可用工具信息。"""
+        """构建角色专属系统提示词，注入任务上下文、系统环境和可用工具信息。"""
         role_prompt = get_role_prompt(task.role)
         role_label = get_role_label(task.role)
+        system_context = self._build_system_context()
 
         tool_descriptions = "\n".join(
             f"- {tool.name}: {tool.description[:120]}" for tool in self.tools[:20]
         ) if self.tools else "无额外工具"
 
         return f"""{role_prompt}
+
+## 系统环境
+{system_context}
 
 ## 当前上下文
 你正在参与一个多 Agent 协作任务。你的角色是 {role_label}。
@@ -355,11 +449,14 @@ class MultiAgentOrchestrator:
 
         results_summary = "\n\n".join(
             f"[{get_role_label(r.role)}] {'成功' if r.success else '失败'}: "
-            f"{r.output[:500] if r.output else r.error}"
+            f"{r.output[:2000] if r.output else r.error[:200]}"
             for r in results
         )
 
         checker_prompt = f"""{get_role_prompt(AgentRole.CHECKER)}
+
+## 系统环境
+{self._build_system_context()}
 
 ## 原始任务
 {user_input}
@@ -411,11 +508,14 @@ class MultiAgentOrchestrator:
 
         reflector_prompt = f"""{get_role_prompt(AgentRole.REFLECTOR)}
 
+## 系统环境
+{self._build_system_context()}
+
 ## 原始任务
 {user_input}
 
 ## 审计结果
-{checker_result.output[:800]}
+{checker_result.output[:3000]}
 
 共 {len(results)} 个角色结果，{failed_count} 个失败。
 
@@ -448,6 +548,9 @@ class MultiAgentOrchestrator:
 
         replan_prompt = f"""{get_role_prompt(AgentRole.DECISION_MAKER)}
 
+## 系统环境
+{self._build_system_context()}
+
 ## 原始任务
 {user_input}
 
@@ -458,7 +561,7 @@ class MultiAgentOrchestrator:
 {', '.join(failed_roles) if failed_roles else '无'}
 
 ## 审计意见
-{checker_result.output[:500]}
+{checker_result.output[:3000]}
 
 请重新规划，调整策略以弥补不足。输出 JSON 格式同上。"""
 
@@ -508,7 +611,7 @@ class MultiAgentOrchestrator:
     ) -> str:
         """决策者综合所有结果生成最终输出。"""
         results_text = "\n\n---\n\n".join(
-            f"## {get_role_label(r.role)}\n{r.output[:800]}"
+            f"## {get_role_label(r.role)}\n{r.output}"
             for r in all_results if r.success and r.output
         )
 
@@ -516,6 +619,9 @@ class MultiAgentOrchestrator:
             return "多 Agent 协作未产生有效输出。"
 
         synthesize_prompt = f"""{get_role_prompt(AgentRole.DECISION_MAKER)}
+
+## 系统环境
+{self._build_system_context()}
 
 ## 用户原始请求
 {user_input}

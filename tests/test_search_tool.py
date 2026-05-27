@@ -724,5 +724,170 @@ class SearchToolTestCase(unittest.TestCase):
         self.assertIn("判定依据: 页面内容直接回答了查询问题。", result)
 
 
+class FuckCSDNRegressionTestCase(unittest.TestCase):
+    """FuckCSDN 回归测试 —— 验证 CSDN 剔除逻辑和搜索策略完整性（无需网络）。"""
+
+    def test_csdn_domains_blacklist_has_minimum_coverage(self) -> None:
+        """测试：CSDN 黑名单至少覆盖 10 个子域名。"""
+        from cyber_agent.tools.search import CSDN_DOMAINS
+        self.assertGreaterEqual(len(CSDN_DOMAINS), 10)
+
+    def test_is_csdn_url_detects_all_subdomains(self) -> None:
+        """测试：_is_csdn_url 正确检测所有 CSDN 子域名变体。"""
+        from cyber_agent.tools.search import _is_csdn_url
+
+        csdn_urls = [
+            "https://blog.csdn.net/user/article/123",
+            "https://www.csdn.net/article/456",
+            "https://download.csdn.net/file/789",
+            "https://edu.csdn.net/course/10",
+            "https://bbs.csdn.net/topics/20",
+            "https://gitcode.csdn.net/repo/30",
+            "https://ask.csdn.net/questions/60",
+            "https://dev.csdn.net/developer/70",
+            "https://live.csdn.net/room/50",
+            "https://bi.csdn.net/report/80",
+            "https://inscode.csdn.net/project/40",
+            "https://spider.csdn.net/data/90",
+        ]
+        for url in csdn_urls:
+            self.assertTrue(_is_csdn_url(url), f"应检测为 CSDN: {url}")
+
+    def test_is_csdn_url_does_not_false_positive(self) -> None:
+        """测试：_is_csdn_url 不会误杀正常网站。"""
+        from cyber_agent.tools.search import _is_csdn_url
+
+        non_csdn_urls = [
+            "https://github.com/user/repo",
+            "https://zhuanlan.zhihu.com/p/123",
+            "https://www.freebuf.com/article/1",
+            "https://en.wikipedia.org/wiki/Main_Page",
+            "https://stackoverflow.com/questions/1",
+            "https://www.ithome.com/news/1",
+            "https://www.secrss.com/article/1",
+            "https://cloud.tencent.com/article/1",
+            "https://news.qq.com/article/1",
+            "https://tech.ifeng.com/article/1",
+            "https://www.reddit.com/r/programming",
+            "https://arxiv.org/abs/2501.00001",
+            "https://medium.com/article/1",
+            "https://www.nature.com/article/1",
+            "https://www.bbc.com/news/article",
+        ]
+        for url in non_csdn_urls:
+            self.assertFalse(_is_csdn_url(url), f"不应检测为 CSDN: {url}")
+
+    def test_filter_csdn_results_removes_all_csdn(self) -> None:
+        """测试：_filter_csdn_results 100% 剔除 CSDN 结果。"""
+        from cyber_agent.tools.search import _filter_csdn_results, _is_csdn_url, SearchResult
+
+        results = [
+            SearchResult(title="t1", url="https://blog.csdn.net/1", snippet="", source_engine="test"),
+            SearchResult(title="t2", url="https://github.com/a", snippet="", source_engine="test"),
+            SearchResult(title="t3", url="https://www.csdn.net/2", snippet="", source_engine="test"),
+            SearchResult(title="t4", url="https://stackoverflow.com/q/1", snippet="", source_engine="test"),
+            SearchResult(title="t5", url="https://download.csdn.net/3", snippet="", source_engine="test"),
+        ]
+        filtered, removed = _filter_csdn_results(results)
+        self.assertEqual(removed, 3)
+        self.assertEqual(len(filtered), 2)
+        csdn_residual = sum(1 for r in filtered if _is_csdn_url(r.url))
+        self.assertEqual(csdn_residual, 0, f"CSDN 残留 {csdn_residual} 条")
+
+    def test_filter_csdn_results_preserves_non_csdn(self) -> None:
+        """测试：_filter_csdn_results 保留所有非 CSDN 结果的原始数据。"""
+        from cyber_agent.tools.search import _filter_csdn_results, SearchResult
+
+        original = SearchResult(
+            title="My Result", url="https://example.com/page",
+            snippet="A great page", source_engine="bing",
+        )
+        filtered, _ = _filter_csdn_results([original])
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].title, "My Result")
+        self.assertEqual(filtered[0].url, "https://example.com/page")
+        self.assertEqual(filtered[0].snippet, "A great page")
+
+    def test_build_query_variants_generates_diverse_results(self) -> None:
+        """测试：查询变体生成至少 5 个不重复变体。"""
+        from cyber_agent.tools.search import _build_query_variants
+
+        variants = _build_query_variants("Python programming tutorial guide beginner 2026", 30)
+        self.assertGreaterEqual(len(variants), 5)
+        self.assertLessEqual(len(variants), 10)
+        # 验证所有变体唯一（忽略大小写）
+        lower_variants = [v.lower() for v in variants]
+        self.assertEqual(len(lower_variants), len(set(lower_variants)),
+                         f"变体不唯一: {variants}")
+
+    def test_build_query_variants_includes_keyword_pairs(self) -> None:
+        """测试：变体生成包含关键词配对（不同 2-3 词组合）。"""
+        from cyber_agent.tools.search import _build_query_variants
+
+        variants = _build_query_variants("Python programming tutorial guide beginner", 30)
+        # 应有 "Python programming", "Python tutorial" 等核心词配对
+        has_pair = any("Python" in v and len(v.split()) <= 3 and v != "Python" for v in variants)
+        self.assertTrue(has_pair, f"变体中没有核心词配对: {variants}")
+
+    def test_search_constants_in_range(self) -> None:
+        """测试：搜索常量在合理范围内。"""
+        from cyber_agent.tools.search import (
+            SEARCH_MIN_RESULTS, SEARCH_MAX_RESULTS, SEARCH_TIME_BUDGET_SECONDS,
+            FETCH_MULTIPLIER_FOR_CSDN_FILTER,
+        )
+        self.assertEqual(SEARCH_MIN_RESULTS, 20)
+        self.assertEqual(SEARCH_MAX_RESULTS, 40)
+        self.assertGreaterEqual(SEARCH_TIME_BUDGET_SECONDS, 5.5)
+        self.assertLessEqual(SEARCH_TIME_BUDGET_SECONDS, 7.0)
+        self.assertGreaterEqual(FETCH_MULTIPLIER_FOR_CSDN_FILTER, 2.0)
+
+    def test_search_strategy_has_all_fallbacks(self) -> None:
+        """测试：搜索策略包含所有回退层。"""
+        import inspect
+        from cyber_agent.tools.search import _search_bing_multiquery
+        src = inspect.getsource(_search_bing_multiquery)
+        self.assertIn("baidu.com", src, "缺少百度回退")
+        self.assertIn("site:github", src, "缺少站点限定回退")
+        self.assertIn("page_offset", src, "缺少分页回退")
+
+    def test_tool_factory_creates_search_web(self) -> None:
+        """测试：工具工厂创建正确的 search_web 工具。"""
+        from cyber_agent.tools.search import create_search_web_tool
+        tool = create_search_web_tool()
+        self.assertEqual(tool.name, "search_web")
+        self.assertTrue(hasattr(tool, "args_schema"))
+
+    def test_csdn_filter_in_search_pipeline(self) -> None:
+        """测试：search_with_playwright 包含 CSDN 过滤。"""
+        import inspect
+        from cyber_agent.tools.search import search_with_playwright
+        src = inspect.getsource(search_with_playwright)
+        self.assertIn("_filter_csdn_results", src, "search_with_playwright 未调用 CSDN 过滤")
+
+    def test_monte_carlo_csdn_free_simulation(self) -> None:
+        """蒙特卡洛测试：随机 500 次，验证 CSDN 过滤 100% 有效。"""
+        import random
+        from cyber_agent.tools.search import CSDN_DOMAINS, _filter_csdn_results, _is_csdn_url, SearchResult
+
+        csdn_subs = list(CSDN_DOMAINS - {"csdn.net"})
+        for _ in range(500):
+            n_csdn = random.randint(0, 15)
+            n_other = random.randint(10, 50)
+            results = []
+            for i in range(n_csdn):
+                sub = random.choice(csdn_subs)
+                results.append(SearchResult(
+                    title=f"c{i}", url=f"https://{sub}/p/{i}", snippet="", source_engine="m",
+                ))
+            for i in range(n_other):
+                results.append(SearchResult(
+                    title=f"ok{i}", url=f"https://site{i}.com/p", snippet="", source_engine="m",
+                ))
+            random.shuffle(results)
+            filtered, _ = _filter_csdn_results(results)
+            csdn_left = sum(1 for r in filtered if _is_csdn_url(r.url))
+            self.assertEqual(csdn_left, 0, f"CSDN 残留 {csdn_left} 条")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         validation_alias="SEARCH_ENDPOINT",
     )
     search_timeout_seconds: float = Field(
-        default=10.0,
+        default=6.0,
         validation_alias="SEARCH_TIMEOUT_SECONDS",
     )
     search_result_limit: int = Field(

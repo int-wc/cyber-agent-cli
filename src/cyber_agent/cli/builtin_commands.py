@@ -482,6 +482,75 @@ def _handle_multi(
     return True
 
 
+def _handle_file(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """加载文件内容到当前会话上下文。"""
+    if len(tokens) < 2:
+        cli_renderer.print_error("/file 需要指定文件路径。用法: /file <文件路径>")
+        return True
+
+    file_path_str = _extract_arg(raw_input, "/file")
+    file_path = Path(file_path_str).expanduser().resolve()
+
+    if not file_path.exists():
+        cli_renderer.print_error(f"文件不存在：{file_path}")
+        return True
+
+    if file_path.is_dir():
+        cli_renderer.print_error(f"路径是目录而非文件：{file_path}。请指定具体文件。")
+        return True
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            content = file_path.read_text(encoding="gbk")
+        except Exception as exc:
+            cli_renderer.print_error(f"无法读取文件（编码错误）：{exc}")
+            return True
+    except Exception as exc:
+        cli_renderer.print_error(f"读取文件失败：{exc}")
+        return True
+
+    ext = file_path.suffix.lstrip(".").lower() or "text"
+    lang_map = {
+        "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
+        "jsx": "jsx", "json": "json", "yaml": "yaml", "yml": "yaml",
+        "toml": "toml", "md": "markdown", "sh": "bash", "bash": "bash",
+        "sql": "sql", "html": "html", "css": "css", "rs": "rust",
+        "go": "go", "java": "java", "cpp": "cpp", "c": "c", "h": "c",
+        "rb": "ruby", "php": "php", "swift": "swift", "kt": "kotlin",
+    }
+    lang = lang_map.get(ext, "")
+
+    max_chars = 10000
+    if len(content) > max_chars:
+        truncated = content[:max_chars]
+        note = f"\n\n... (文件已截断，共 {len(content)} 字符，显示前 {max_chars} 字符)"
+        content = truncated + note
+
+    # 将文件内容作为上下文注入到下一轮对话
+    ctx_key = f"__pending_file_{file_path.name}"
+    runtime_context[ctx_key] = {
+        "path": str(file_path),
+        "content": content,
+        "lang": lang,
+    }
+
+    cli_renderer.print_markdown(
+        f"已加载文件 **{file_path.name}**（{len(content)} 字符），"
+        f"内容将在下一轮对话中自动附加。\n\n"
+        f"```{lang}\n{content[:2000]}\n```\n"
+        + (f"\n\n... 预览已截断，共 {len(content)} 字符。" if len(content) > 2000 else "")
+    )
+    return True
+
+
 # ── 命令注册表 ──
 
 _COMMAND_REGISTRY: dict[str, CommandHandler] = {
@@ -502,6 +571,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/mode": _handle_mode,
     "/approval": _handle_approval,
     "/multi": _handle_multi,
+    "/file": _handle_file,
 }
 
 

@@ -55,6 +55,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/approval prompt", "切到交互审批"),
     BuiltinCommandSpec("/approval auto", "切到自动批准"),
     BuiltinCommandSpec("/approval never", "切到全部拒绝"),
+    BuiltinCommandSpec("/file <路径>", "选择文件并将其内容加载到对话上下文中"),
     BuiltinCommandSpec("/stop", "停止当前正在执行的任务"),
     BuiltinCommandSpec("/clear", "清空当前会话上下文"),
     BuiltinCommandSpec("/exit", "退出交互模式", show_in_banner=True),

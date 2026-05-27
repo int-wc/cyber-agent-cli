@@ -19,3 +19,5 @@ Requires-Dist: python-dotenv>=1.0.0
 Requires-Dist: aiofiles>=23.2.0
 Requires-Dist: lark-oapi>=1.5.3
 Requires-Dist: mcp>=1.0.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn[standard]>=0.29.0

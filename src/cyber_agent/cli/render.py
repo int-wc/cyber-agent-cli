@@ -10,6 +10,13 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
+try:
+    from rich.markdown import Markdown
+    _MARKDOWN_AVAILABLE = True
+except ImportError:
+    Markdown = None  # type: ignore[assignment,misc]
+    _MARKDOWN_AVAILABLE = False
+
 from ..agent.approval import ApprovalPolicy, get_approval_policy_label
 from ..agent.mode import AgentMode, get_mode_description, get_mode_label
 from .branding import (
@@ -240,16 +247,16 @@ class CliRenderer:
         self.print_renderable(build_tool_result_panel(content))
 
     def end_response_stream(self, content: str, has_tool_calls: bool) -> None:
-        """结束一轮流式输出，并在需要时回退到统一助手面板。"""
+        """结束一轮流式输出，对最终回复使用 Markdown 渲染。"""
         if self._streaming_response_started:
             if self._streaming_prefix_printed:
                 if not self._streamed_response_chunks and content:
                     self.console.print(content, end="", soft_wrap=True, highlight=False)
                 self.console.print("")
             elif content and not has_tool_calls:
-                self.console.print(build_chat_message_panel("assistant", content))
+                self.print_markdown(content)
         elif content and not has_tool_calls:
-            self.console.print(build_chat_message_panel("assistant", content))
+            self.print_markdown(content)
 
         self._streaming_response_started = False
         self._streaming_prefix_printed = False
@@ -263,6 +270,25 @@ class CliRenderer:
         """打印审批结果面板。"""
         self.print_renderable(build_approval_result_panel(payload))
 
+    def print_markdown(self, content: str) -> None:
+        """以 Markdown 格式渲染文本内容，不可用时回退到纯文本面板。"""
+        self.ensure_response_stream_closed()
+        if not content.strip():
+            return
+        if not _MARKDOWN_AVAILABLE:
+            self.print_chat_message("assistant", content)
+            return
+        try:
+            md = Markdown(
+                content,
+                code_theme="monokai",
+                inline_code_theme="monokai",
+                justify="left",
+            )
+            self.console.print(md)
+        except Exception:
+            self.print_chat_message("assistant", content)
+
     def print_info(self, content: str) -> None:
         """打印普通提示文本；捕获模式下也会按原样保留。"""
         self.print_renderable(content)
@@ -270,3 +296,99 @@ class CliRenderer:
     def print_error(self, content: str) -> None:
         """打印错误消息面板。"""
         self.print_chat_message("error", content)
+
+    # ── 多 Agent 编排器进度渲染 ──
+
+    def print_orchestration_planning(self, user_input: str) -> None:
+        """任务规划阶段 —— 决策者分析并分解任务。"""
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold cyan]🎯 决策者正在分析任务...[/]\n"
+                f"[dim]{user_input[:120]}[/]",
+                title="多 Agent 协作 · 阶段 1/6",
+                border_style="cyan",
+            )
+        )
+
+    def print_orchestration_plan_done(
+        self, subtask_count: int, reasoning: str
+    ) -> None:
+        """任务规划完成 —— 显示分解结果。"""
+        self.console.print(
+            Panel(
+                f"[green]✓ 任务已分解为 {subtask_count} 个子任务[/]\n"
+                f"[dim]{reasoning[:200]}[/]",
+                border_style="green",
+            )
+        )
+
+    def print_orchestration_executing(self, subtask_count: int) -> None:
+        """并发执行阶段 —— 子任务分发给角色 Agent。"""
+        role_icons = {
+            "决策者": "🎯", "审计者": "🔍", "阅读者": "📖",
+            "分析者": "📊", "执行者": "⚡", "构建者": "🔧",
+            "反思者": "🪞", "扩散者": "🌐", "迁跃者": "🚀",
+        }
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold yellow]⚡ 正在并发执行 {subtask_count} 个子任务...[/]",
+                title="多 Agent 协作 · 阶段 2/6",
+                border_style="yellow",
+            )
+        )
+
+    def print_subtask_complete(
+        self, role: str, success: bool, elapsed_ms: float
+    ) -> None:
+        """单个子任务完成。"""
+        icon = "✓" if success else "✗"
+        style = "green" if success else "red"
+        self.console.print(
+            f"  [{style}]{icon} {role}[/] "
+            f"[dim]({elapsed_ms:.0f}ms)[/]"
+        )
+
+    def print_orchestration_checking(self, result_count: int) -> None:
+        """审计验证阶段。"""
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold magenta]🔍 审计者正在验证 {result_count} 个结果...[/]",
+                title="多 Agent 协作 · 阶段 3/6",
+                border_style="magenta",
+            )
+        )
+
+    def print_orchestration_reflecting(self, failed_count: int) -> None:
+        """反思评估阶段。"""
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold blue]🪞 反思者评估中（{failed_count} 个任务需关注）...[/]",
+                title="多 Agent 协作 · 阶段 4/6",
+                border_style="blue",
+            )
+        )
+
+    def print_orchestration_synthesize(self) -> None:
+        """综合产出阶段。"""
+        self.console.print()
+        self.console.print(
+            Panel(
+                "[bold green]📝 决策者正在综合各角色输出...[/]",
+                title="多 Agent 协作 · 阶段 5/6",
+                border_style="green",
+            )
+        )
+
+    def print_orchestration_done(self, total_results: int) -> None:
+        """多 Agent 协作完成。"""
+        self.console.print(
+            Panel(
+                f"[bold green]✅ 多 Agent 协作完成[/] "
+                f"[dim](共 {total_results} 个角色结果)[/]",
+                border_style="green",
+            )
+        )
