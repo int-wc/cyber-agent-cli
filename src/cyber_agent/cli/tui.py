@@ -302,7 +302,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                     content = str(payload.get("content", ""))
                     has_tool_calls = bool(payload.get("has_tool_calls", False))
                     if content and not has_tool_calls:
-                        self.call_from_thread(self._set_assistant_content, content)
+                        self.call_from_thread(
+                            self._ensure_final_assistant_content, content,
+                        )
                         return
                     if has_tool_calls:
                         self.call_from_thread(self._set_assistant_content, "正在调用工具...")
@@ -612,11 +614,11 @@ if TEXTUAL_IMPORT_ERROR is None:
                     "assistant", content, use_markdown=True,
                 )
                 return
-            if not self._active_assistant_message.has_content():
-                self._active_assistant_message._use_markdown = (
-                    _TEXTUAL_MARKDOWN_AVAILABLE
-                )
-                self._active_assistant_message.set_content(content)
+            # 已存在消息（如流式输出），强制启用 Markdown 并替换内容
+            if _TEXTUAL_MARKDOWN_AVAILABLE:
+                self._active_assistant_message._use_markdown = True
+            self._active_assistant_message.set_content(content)
+            self.query_one("#chat-view", ScrollableContainer).scroll_end(animate=False)
 
         def _replace_assistant_with_error(self, content: str) -> None:
             if self._active_assistant_message is None:

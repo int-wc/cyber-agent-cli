@@ -243,8 +243,22 @@ class CliRenderer:
         self.print_renderable(build_tool_call_panel(tool_calls))
 
     def print_tool_result(self, content: str) -> None:
-        """打印工具执行结果面板。"""
-        self.print_renderable(build_tool_result_panel(content))
+        """打印工具执行结果，使用 Markdown 渲染。"""
+        self.ensure_response_stream_closed()
+        # 截取前 4000 字符以防工具结果过长导致渲染卡顿
+        truncated = content[:4000]
+        if len(content) > 4000:
+            truncated += f"\n\n*... 已截断，共 {len(content)} 字符*"
+        if _MARKDOWN_AVAILABLE:
+            try:
+                md = Markdown(truncated, code_theme="monokai", justify="left")
+                self.console.print(
+                    Panel(md, title="工具结果", border_style="green")
+                )
+                return
+            except Exception:
+                pass
+        self.print_renderable(build_tool_result_panel(truncated))
 
     def end_response_stream(self, content: str, has_tool_calls: bool) -> None:
         """结束一轮流式输出，对最终回复使用 Markdown 渲染。"""
@@ -253,6 +267,10 @@ class CliRenderer:
                 if not self._streamed_response_chunks and content:
                     self.console.print(content, end="", soft_wrap=True, highlight=False)
                 self.console.print("")
+                # 流式输出结束后，用 Markdown 重新渲染完整内容
+                if content and not has_tool_calls:
+                    self.console.print()
+                    self.print_markdown(content)
             elif content and not has_tool_calls:
                 self.print_markdown(content)
         elif content and not has_tool_calls:
@@ -294,7 +312,17 @@ class CliRenderer:
         self.print_renderable(content)
 
     def print_error(self, content: str) -> None:
-        """打印错误消息面板。"""
+        """打印错误消息，支持 Markdown 渲染。"""
+        self.ensure_response_stream_closed()
+        if _MARKDOWN_AVAILABLE and content.strip():
+            try:
+                md = Markdown(content, code_theme="monokai", justify="left")
+                self.console.print(
+                    Panel(md, title="错误", border_style="red")
+                )
+                return
+            except Exception:
+                pass
         self.print_chat_message("error", content)
 
     # ── 多 Agent 编排器进度渲染 ──
