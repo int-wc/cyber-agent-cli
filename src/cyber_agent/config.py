@@ -35,6 +35,16 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_DEFAULT_SERVICE",
     )
 
+    # ── Anthropic 兼容 API（DeepSeek / MiMo 等支持 Anthropic 格式的服务商）──
+    anthropic_base_url: str | None = Field(
+        default=None,
+        validation_alias="ANTHROPIC_BASE_URL",
+    )
+    anthropic_auth_token: str | None = Field(
+        default=None,
+        validation_alias="ANTHROPIC_AUTH_TOKEN",
+    )
+
     # ── DeepSeek 专属 ──
     deepseek_api_key: str | None = Field(
         default=None,
@@ -51,6 +61,20 @@ class Settings(BaseSettings):
     deepseek_thinking_mode: str = Field(
         default="enabled",
         validation_alias="DEEPSEEK_THINKING_MODE",
+    )
+
+    # ── MiMo 专属 ──
+    mimo_api_key: str | None = Field(
+        default=None,
+        validation_alias="MIMO_API_KEY",
+    )
+    mimo_model: str = Field(
+        default=DEFAULT_MODELS["mimo"],
+        validation_alias="MIMO_MODEL",
+    )
+    mimo_base_url: str | None = Field(
+        default=None,
+        validation_alias="MIMO_BASE_URL",
     )
 
     # ── 搜索工具 ──
@@ -134,42 +158,57 @@ class Settings(BaseSettings):
     ) -> str:
         """返回当前默认模型名称。
 
-        优先级：显式传入 > GATEWAY_DEFAULT_MODEL > 服务商默认模型。
+        优先级：显式传入 > GATEWAY_DEFAULT_MODEL_<SERVICE> > GATEWAY_DEFAULT_MODEL > 服务商默认。
         """
+        import os
+
         if model_name is not None:
-            normalized_model_name = model_name.strip()
-        else:
-            normalized_model_name = self.gateway_default_model.strip()
-            if not normalized_model_name:
-                normalized_service_name = self.normalize_service_name(service_name)
-                # 支持 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖
-                import os
-                env_key = f"GATEWAY_DEFAULT_MODEL_{normalized_service_name.upper()}"
-                normalized_model_name = os.getenv(env_key, "").strip()
-                if not normalized_model_name:
-                    normalized_model_name = DEFAULT_MODELS.get(
-                        normalized_service_name,
-                        DEFAULT_MODELS["openai"],
-                    )
-        if not normalized_model_name:
+            return model_name.strip()
+        normalized_service_name = self.normalize_service_name(service_name)
+        # 服务商专属模型环境变量
+        env_key = f"GATEWAY_DEFAULT_MODEL_{normalized_service_name.upper()}"
+        env_model = os.getenv(env_key, "").strip()
+        if env_model:
+            return env_model
+        # 全局默认模型
+        global_default = self.gateway_default_model.strip()
+        if global_default:
+            return global_default
+        # 服务商默认模型
+        resolved = DEFAULT_MODELS.get(normalized_service_name, DEFAULT_MODELS.get("openai", ""))
+        if not resolved:
             raise ValueError("模型名称不能为空。")
-        return normalized_model_name
+        return resolved
 
     def get_api_key(
         self,
         service_name: str | None = None,
         api_key: str | None = None,
     ) -> str:
-        """按服务商解析 API Key，兼容旧版仅配置 GATEWAY_API_KEY 的写法。"""
+        """按服务商解析 API Key。
+        优先级：显式传入 > 服务商专属 key > ANTHROPIC_AUTH_TOKEN > gateway_api_key。"""
         if api_key is not None:
-            resolved_api_key = api_key.strip()
-        elif self.normalize_service_name(service_name) == "deepseek":
-            resolved_api_key = (self.deepseek_api_key or self.gateway_api_key).strip()
-        else:
-            resolved_api_key = self.gateway_api_key.strip()
-        if not resolved_api_key:
-            raise ValueError("模型 API Key 不能为空。")
-        return resolved_api_key
+            return api_key.strip()
+        normalized = self.normalize_service_name(service_name)
+        # 服务商专属 key
+        service_keys: dict[str, str | None] = {
+            "deepseek": self.deepseek_api_key,
+            "mimo": self.mimo_api_key,
+        }
+        specific_key = service_keys.get(normalized)
+        if specific_key and specific_key.strip():
+            return specific_key.strip()
+        # Anthropic 兼容 API token（DeepSeek/MiMo 都支持）
+        if self.anthropic_auth_token and self.anthropic_auth_token.strip():
+            return self.anthropic_auth_token.strip()
+        # 默认 gateway key
+        resolved = (self.gateway_api_key or "").strip()
+        if not resolved:
+            raise ValueError(
+                f"服务商 {normalized} 的 API Key 未配置。"
+                f" 请设置 ANTHROPIC_AUTH_TOKEN 或 DEEPSEEK_API_KEY 或 GATEWAY_API_KEY。"
+            )
+        return resolved
 
     def get_default_base_url_for_service(self, service_name: str | None = None) -> str | None:
         """返回统一模型网关基址，切换服务商时只改变 provider 与模型名称。"""
@@ -197,18 +236,26 @@ class Settings(BaseSettings):
     ) -> str | None:
         """解析运行时应使用的模型服务基址。
 
-        `/service` 只负责切换 provider；模型网关入口统一来自 GATEWAY_BASE_URL，
-        避免切换到 deepseek 时误走服务商专属地址或缺失 `/v1` 路径。
-        base_url 参数保留供未来扩展，当前版本固定使用 GATEWAY_BASE_URL。
+        优先级：显式传入 > 服务商专属 URL > GATEWAY_BASE_URL > ANTHROPIC_BASE_URL > 默认网关。
         """
         if base_url is not None and base_url.strip():
-            import warnings
-            warnings.warn(
-                "base_url 参数已被忽略，模型基址固定使用 GATEWAY_BASE_URL。",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        return self.get_default_base_url_for_service(service_name)
+            return base_url.strip()
+        normalized = self.normalize_service_name(service_name)
+        service_urls: dict[str, str | None] = {
+            "deepseek": self.deepseek_base_url,
+            "mimo": self.mimo_base_url,
+        }
+        specific_url = service_urls.get(normalized)
+        if specific_url and specific_url.strip():
+            return specific_url.strip()
+        # 显式配置的网关基址优先
+        gateway_url = (self.gateway_base_url or "").strip()
+        if gateway_url:
+            return gateway_url
+        # Anthropic 兼容 API 兜底
+        if self.anthropic_base_url and self.anthropic_base_url.strip():
+            return self.anthropic_base_url.strip()
+        return DEFAULT_MODEL_GATEWAY_BASE_URL
 
     def get_chat_openai_kwargs(
         self,

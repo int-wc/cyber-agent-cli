@@ -16,6 +16,11 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "DEEPSEEK_MODEL",
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_THINKING_MODE",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "MIMO_API_KEY",
+    "MIMO_MODEL",
+    "MIMO_BASE_URL",
 )
 
 
@@ -105,9 +110,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["extra_body"]["provider"], "deepseek")
         self.assertEqual(kwargs["extra_body"]["thinking"], {"type": "enabled"})
 
-    def test_service_base_url_always_uses_gateway_base_url(self) -> None:
+    def test_service_base_url_uses_service_specific_first(self) -> None:
         """
-        测试：切换服务商时不使用服务商专属基址，只走 GATEWAY_BASE_URL。
+        测试：服务商专属基址优先于通用网关基址。
         """
         with temporary_config_env(
             DEEPSEEK_API_KEY="deepseek-key",
@@ -120,8 +125,8 @@ class SettingsTestCase(unittest.TestCase):
             settings = config_module.Settings(_env_file=None)
 
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
-
-        self.assertEqual(kwargs["base_url"], "https://example.test/v1")
+        # DEEPSEEK_BASE_URL 优先于 GATEWAY_BASE_URL
+        self.assertEqual(kwargs["base_url"], "https://deepseek.example/v1")
 
     def test_deepseek_thinking_mode_can_be_enabled_explicitly(self) -> None:
         """

@@ -632,7 +632,8 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         self.assertEqual(runner.service, "openai")
         self.assertEqual(runner.model_name, "gpt-5.4-mini")
-        self.assertEqual(runner.base_url, "http://127.0.0.1:8317/v1")
+        # 显式传入的 base_url 会被保留
+        self.assertEqual(runner.base_url, "https://example.test/v1")
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[0]["model"], "deepseek-chat")
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[0]["base_url"],
@@ -647,9 +648,10 @@ class AgentRunnerTestCase(unittest.TestCase):
             {"type": "enabled"},
         )
         self.assertEqual(FakeChatOpenAI.init_kwargs_history[-1]["model"], "gpt-5.4-mini")
+        # 显式传入的 base_url 会被用作模型基址
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["base_url"],
-            "http://127.0.0.1:8317/v1",
+            "https://example.test/v1",
         )
         self.assertEqual(
             FakeChatOpenAI.init_kwargs_history[-1]["extra_body"],

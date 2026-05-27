@@ -14,7 +14,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 
-from ._lazy_imports import load_chat_openai
+from ._lazy_imports import load_chat_openai, load_llm_for_api, is_anthropic_api
 from .capability_codegen import (
     CAPABILITY_ENTRYPOINT_FILENAME,
     CAPABILITY_NAME_RE,
@@ -549,21 +549,24 @@ class CapabilityRegistry:
         """懒加载用于生成与审计 capability 的模型实例。"""
         if self._llm is None:
             try:
-                chat_openai_cls = load_chat_openai()
+                llm_cls, is_anthropic = load_llm_for_api(self.base_url)
             except ModuleNotFoundError as exc:
+                missing = "langchain_anthropic" if is_anthropic_api(self.base_url) else "langchain_openai"
                 raise ModuleNotFoundError(
-                    "缺少 `langchain_openai` 依赖，当前环境无法创建 capability 模型客户端。"
+                    f"缺少 `{missing}` 依赖，当前环境无法创建 capability 模型客户端。"
                 ) from exc
-            if self.service_name == "deepseek":
+            if not is_anthropic and self.service_name == "deepseek":
                 ensure_deepseek_reasoning_content_compat()
-            self._llm = chat_openai_cls(
-                **settings.get_chat_openai_kwargs(
-                    self.service_name,
-                    model_name=self.model_name,
-                    api_key=self.api_key,
-                    base_url=self.base_url,
-                )
+            kwargs = settings.get_chat_openai_kwargs(
+                self.service_name,
+                model_name=self.model_name,
+                api_key=self.api_key,
+                base_url=self.base_url,
             )
+            if is_anthropic:
+                kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+                kwargs.pop("openai_api_key", None)
+            self._llm = llm_cls(**kwargs)
         return self._llm
 
     def _ensure_not_cancelled(self) -> None:

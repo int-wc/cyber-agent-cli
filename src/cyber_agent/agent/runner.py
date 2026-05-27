@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
-from .._lazy_imports import load_chat_openai
+from .._lazy_imports import load_chat_openai, load_llm_for_api, is_anthropic_api
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..logging import (
@@ -261,25 +261,32 @@ class AgentRunner:
         self.reset()
 
     def _build_llm(self) -> Any:
-        """按当前运行时服务商与模型配置重建模型实例。"""
+        """按当前运行时服务商与模型配置重建模型实例。
+        自动检测 API 格式：Anthropic 兼容 API 使用 ChatAnthropic，
+        OpenAI 兼容 API 使用 ChatOpenAI。"""
         try:
-            chat_openai_cls = load_chat_openai()
+            llm_cls, is_anthropic = load_llm_for_api(self.base_url)
         except ModuleNotFoundError as exc:
+            missing = "langchain_anthropic" if is_anthropic_api(self.base_url) else "langchain_openai"
             raise ModuleNotFoundError(
-                "缺少 `langchain_openai` 依赖，当前环境无法创建模型客户端。"
+                f"缺少 `{missing}` 依赖，当前环境无法创建模型客户端。"
             ) from exc
-        if self.service == "deepseek" and str(
-            getattr(chat_openai_cls, "__module__", "")
-        ).startswith("langchain_openai."):
-            ensure_deepseek_reasoning_content_compat()
-        return chat_openai_cls(
-            **settings.get_chat_openai_kwargs(
-                self.service,
-                model_name=self.model_name,
-                api_key=self.api_key,
-                base_url=self.base_url,
-            )
+
+        if not is_anthropic and self.service == "deepseek":
+            if str(getattr(llm_cls, "__module__", "")).startswith("langchain_openai."):
+                ensure_deepseek_reasoning_content_compat()
+
+        kwargs = settings.get_chat_openai_kwargs(
+            self.service,
+            model_name=self.model_name,
+            api_key=self.api_key,
+            base_url=self.base_url,
         )
+        if is_anthropic:
+            # ChatAnthropic uses anthropic_api_key instead of api_key
+            kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+            kwargs.pop("openai_api_key", None)
+        return llm_cls(**kwargs)
 
     def _get_llm(self) -> Any:
         """按需构建模型客户端，避免非模型命令在缺依赖环境下提前失败。"""
