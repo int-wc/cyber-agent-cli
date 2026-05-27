@@ -38,7 +38,7 @@ def _detect_task_complexity(user_input: str) -> bool:
         r"并且", r"同时", r"以及", r"还有", r"另外", r"并(?!不)",
         r"然后", r"之后", r"接着", r"先.*再", r"首先.*然后",
         r"第一步", r"第二步", r"第三步",
-        r"第\s*\d+\s*步", r"\d+\s*[\.、）\)]\s*\S",
+        r"第\s*\d+\s*步", r"\d+\s*[\.、）\)]\s*[^\d\s]",
         r"一方面.*另一方面",
     ]
     for marker in coordination_markers:

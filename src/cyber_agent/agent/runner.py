@@ -341,6 +341,8 @@ class AgentRunner:
                 base_url=self.base_url,
             )
 
+
+    # ── 运行时刷新 ──
     def _refresh_runtime_scope(self) -> None:
         """按当前模式与授权配置重建可用工具和访问范围。"""
         get_default_tools, resolve_allowed_roots, resolve_command_registry = (
@@ -358,6 +360,8 @@ class AgentRunner:
             self.execution_controller,
             self.capability_registry,
         )
+
+    # ── 会话重置 ──
 
     def reset(self) -> None:
         """重置会话上下文，便于开始一轮新的交互。"""
@@ -405,6 +409,8 @@ class AgentRunner:
             ],
         }
 
+    # ── 模式切换 ──
+
     def switch_mode(self, mode: AgentMode) -> None:
         """
         切换运行模式时同步刷新系统提示词。
@@ -450,6 +456,8 @@ class AgentRunner:
         from ..memory import build_memory_system_prompt
         return build_memory_system_prompt()
 
+
+    # ── 系统提示拼装 ──
     def _compose_system_prompt(self) -> str:
         """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
         prompt_parts = [self.system_prompt]
@@ -560,6 +568,8 @@ class AgentRunner:
             resolved_boundary += 1
         return resolved_boundary
 
+
+    # ── 上下文压缩 ──
     def _ensure_context_window(self) -> None:
         """在模型调用前按阈值压缩较早消息，避免上下文持续无限增长。"""
         non_system_messages = self.history[1:]
@@ -702,6 +712,8 @@ class AgentRunner:
             ),
         )
 
+
+    # ── 流式模型响应 ──
     def _stream_model_response(
         self,
         event_handler: AgentEventHandler | None,
@@ -799,6 +811,8 @@ class AgentRunner:
         tool_metadata = tool.metadata or {}
         return str(tool_metadata.get("risk", "read"))
 
+
+    # ── 工具调用 ──
     def _invoke_tool(
         self,
         tool_call: dict,
@@ -889,6 +903,8 @@ class AgentRunner:
             tool_call_id=str(tool_call.get("id", "")),
         )
 
+
+    # ── 主执行循环 ──
     def run(
         self,
         user_input: str,

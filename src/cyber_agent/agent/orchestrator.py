@@ -88,6 +88,8 @@ class MultiAgentOrchestrator:
         self.max_workers = max_workers or settings.multi_agent_max_workers
         self._llm: Any | None = None
 
+
+    # ── LLM 管理 ──
     def _get_llm(self) -> Any:
         """懒加载模型实例，自动检测 Anthropic/OpenAI API 格式。"""
         if self._llm is None:
@@ -113,6 +115,8 @@ class MultiAgentOrchestrator:
         if self.event_handler is not None:
             self.event_handler(event_type, payload)
 
+
+    # ── 主执行流程 ──
     def run(
         self,
         user_input: str,
@@ -193,6 +197,8 @@ class MultiAgentOrchestrator:
             f"当前工作目录: {os.getcwd()}\n"
         )
 
+
+    # ── 任务规划 ──
     def _plan_task(self, user_input: str) -> OrchestrationPlan:
         """决策者分解任务为子任务。"""
         self._emit("orchestration_planning", {"input": user_input})
@@ -277,6 +283,8 @@ class MultiAgentOrchestrator:
             reasoning="默认任务分解：执行者直接处理任务，分析者辅助分析。",
         )
 
+
+    # ── 并发执行 ──
     def _execute_plan(self, plan: OrchestrationPlan) -> list[AgentResult]:
         """并发执行所有子任务。"""
         if not plan.subtasks:
@@ -321,6 +329,8 @@ class MultiAgentOrchestrator:
 
         return results
 
+
+    # ── 角色 Agent ──
     def _run_role_agent(self, task: AgentTask) -> AgentResult:
         """在独立线程中运行单个角色 Agent，支持工具调用循环。"""
         import time as time_mod
@@ -491,6 +501,8 @@ class MultiAgentOrchestrator:
             msg += f"\n\n## 附加上下文\n{task.context}"
         return msg
 
+
+    # ── 审计验证 ──
     def _check_results(
         self,
         user_input: str,
@@ -542,6 +554,8 @@ class MultiAgentOrchestrator:
                 error=f"审计失败：{exc}",
             )
 
+
+    # ── 反思与重规划 ──
     def _reflect_and_decide(
         self,
         user_input: str,
@@ -665,6 +679,8 @@ class MultiAgentOrchestrator:
             reasoning=str(plan_data.get("reasoning", "")),
         )
 
+
+    # ── 最终综合 ──
     def _synthesize(
         self,
         user_input: str,
