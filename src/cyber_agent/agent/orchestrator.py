@@ -311,7 +311,12 @@ class MultiAgentOrchestrator:
             self.execution_controller.ensure_not_cancelled()
 
         role_label = get_role_label(task.role)
-        log_info("orchestrator", f"启动 {role_label}({task.role.value})...")
+        log_info(
+            "orchestrator",
+            f"启动 {role_label}({task.role.value})，"
+            f"可用工具 {len(self.tools)} 个："
+            f"{', '.join(t.name for t in self.tools[:8])}",
+        )
         start = time_mod.monotonic()
 
         try:
@@ -347,6 +352,8 @@ class MultiAgentOrchestrator:
 
                 # 执行工具调用并追加结果
                 for tc in tool_calls:
+                    tc_name = getattr(tc, "name", "") or str(tc.get("name", ""))
+                    log_info("orchestrator", f"{role_label} 调用工具：{tc_name}")
                     tool_msg = self._invoke_role_tool(tc)
                     messages.append(tool_msg)
 

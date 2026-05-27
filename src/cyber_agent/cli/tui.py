@@ -373,6 +373,9 @@ if TEXTUAL_IMPORT_ERROR is None:
         def _run_multi_agent_turn(self, user_input: str) -> None:
             """TUI 中执行多 Agent 协作任务，带进度显示。"""
             from ..agent.orchestrator import MultiAgentOrchestrator
+            from .app import ensure_runtime_capabilities
+
+            ensure_runtime_capabilities(self.runtime_context, self.runner)
 
             self.call_from_thread(
                 self._set_assistant_content,

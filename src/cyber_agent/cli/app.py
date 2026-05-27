@@ -456,6 +456,9 @@ def _run_multi_agent_turn(
     """使用多 Agent 编排器执行一轮对话。"""
     from ..agent.orchestrator import MultiAgentOrchestrator
 
+    # 确保工具等能力已延迟加载完成
+    ensure_runtime_capabilities(runtime_context, runner)
+
     renderer.print_turn_start()
     renderer.print_info("[bold cyan]🚀 正在启动多 Agent 协作模式...[/]")
 
