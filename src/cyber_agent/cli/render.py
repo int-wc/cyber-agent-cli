@@ -102,6 +102,7 @@ class CliRenderer:
         # 上轮开始前的基线（用于避免 live 估算与 API 精确值重复计数）
         self._turn_baseline_input = 0
         self._turn_baseline_output = 0
+        self._turn_baseline_set = False  # 每轮只设一次基线
         self._model_name = ""
         # 实时 token 计数器
         self._live: Live | None = None
@@ -156,6 +157,8 @@ class CliRenderer:
             self._cumulative_output_tokens = (
                 self._turn_baseline_output + api_output
             )
+        # 重置基线标记，下轮重新记录
+        self._turn_baseline_set = False
 
         # 重新计算累计花费
         self._cumulative_cost = _estimate_cost(
@@ -201,9 +204,11 @@ class CliRenderer:
         self._streamed_response_chunks = []
         self._reasoning_parts = []
         self._reasoning_printed = False
-        # 记录本轮基线，防止 live 估算与 API 精确值重复计数
-        self._turn_baseline_input = self._cumulative_input_tokens
-        self._turn_baseline_output = self._cumulative_output_tokens
+        # 每轮只设一次基线（多次 _stream_model_response 调用共享同一基线）
+        if not self._turn_baseline_set:
+            self._turn_baseline_input = self._cumulative_input_tokens
+            self._turn_baseline_output = self._cumulative_output_tokens
+            self._turn_baseline_set = True
         # 启动实时 token 计数
         self._live = Live(
             self._build_token_status_line(),
