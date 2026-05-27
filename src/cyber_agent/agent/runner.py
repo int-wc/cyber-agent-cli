@@ -264,6 +264,8 @@ class AgentRunner:
         """按当前运行时服务商与模型配置重建模型实例。
         自动检测 API 格式：Anthropic 兼容 API 使用 ChatAnthropic，
         OpenAI 兼容 API 使用 ChatOpenAI。"""
+        import warnings
+
         try:
             llm_cls, is_anthropic = load_llm_for_api(self.base_url)
         except ModuleNotFoundError as exc:
@@ -286,7 +288,10 @@ class AgentRunner:
             # ChatAnthropic uses anthropic_api_key instead of api_key
             kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
             kwargs.pop("openai_api_key", None)
-        return llm_cls(**kwargs)
+        # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*extra_body.*")
+            return llm_cls(**kwargs)
 
     def _get_llm(self) -> Any:
         """按需构建模型客户端，避免非模型命令在缺依赖环境下提前失败。"""

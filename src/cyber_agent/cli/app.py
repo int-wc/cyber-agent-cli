@@ -568,7 +568,7 @@ def _run_multi_agent_turn(
 
     try:
         result = orchestrator.run(user_input)
-        renderer.print_chat_message("assistant", result)
+        renderer.print_markdown(result)
     except Exception as exc:
         renderer.print_error(f"多 Agent 协作失败：{exc}")
 
