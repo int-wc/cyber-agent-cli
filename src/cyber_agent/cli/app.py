@@ -539,6 +539,8 @@ def _run_multi_agent_turn(
                 role=str(payload.get("role", "?")),
                 success=bool(payload.get("success", False)),
                 elapsed_ms=float(payload.get("elapsed_ms", 0)),
+                output_summary=str(payload.get("output_summary", "")),
+                output_length=int(payload.get("output_length", 0)),
             )
         elif event_type == "orchestration_checking":
             renderer.print_orchestration_checking(

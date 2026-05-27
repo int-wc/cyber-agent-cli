@@ -312,6 +312,11 @@ class MultiAgentOrchestrator:
                     "role": result.role.value,
                     "success": result.success,
                     "elapsed_ms": result.elapsed_ms,
+                    "output_summary": (
+                        result.output[:300] if result.output
+                        else result.error[:200]
+                    ),
+                    "output_length": len(result.output),
                 })
 
         return results
@@ -343,6 +348,9 @@ class MultiAgentOrchestrator:
             llm_with_tools = self._get_llm().bind_tools(
                 self.tools, parallel_tool_calls=False,
             )
+            last_text_response = ""  # 记录最后一轮有文本的响应
+            tool_call_log: list[str] = []  # 工具调用记录
+
             for _ in range(self._MAX_ROLE_TOOL_ITERATIONS):
                 if self.execution_controller is not None:
                     self.execution_controller.ensure_not_cancelled()
@@ -350,12 +358,25 @@ class MultiAgentOrchestrator:
                 response = llm_with_tools.invoke(messages)
                 messages.append(response)
 
+                current_text = self._extract_text(response)
+                if current_text.strip():
+                    last_text_response = current_text
+
                 tool_calls = getattr(response, "tool_calls", None) or []
                 if not tool_calls:
-                    # 无工具调用，返回最终文本
-                    output = self._extract_text(response)
+                    output = current_text.strip() or last_text_response
+                    if not output and tool_call_log:
+                        # 模型未生成文本但执行了工具，从工具日志构建摘要
+                        output = (
+                            f"已执行 {len(tool_call_log)} 个工具调用：\n"
+                            + "\n".join(tool_call_log[-10:])
+                        )
                     elapsed = (time_mod.monotonic() - start) * 1000
-                    log_info("orchestrator", f"{role_label} 完成，耗时 {elapsed:.0f}ms")
+                    log_info(
+                        "orchestrator",
+                        f"{role_label} 完成，输出 {len(output)} 字符，"
+                        f"耗时 {elapsed:.0f}ms",
+                    )
                     return AgentResult(
                         role=task.role,
                         success=True,
@@ -369,9 +390,21 @@ class MultiAgentOrchestrator:
                     log_info("orchestrator", f"{role_label} 调用工具：{tc_name}")
                     tool_msg = self._invoke_role_tool(tc)
                     messages.append(tool_msg)
+                    # 记录工具调用摘要
+                    result_preview = str(tool_msg.content)[:200]
+                    tool_call_log.append(
+                        f"- {tc_name}: {result_preview}..."
+                        if len(str(tool_msg.content)) > 200
+                        else f"- {tc_name}: {result_preview}"
+                    )
 
-            # 达到最大迭代次数，取最后一轮文本
-            output = self._extract_text(response)
+            # 达到最大迭代次数
+            output = last_text_response or self._extract_text(response)
+            if not output.strip() and tool_call_log:
+                output = (
+                    f"已执行 {len(tool_call_log)} 个工具调用（达到最大迭代次数）：\n"
+                    + "\n".join(tool_call_log[-15:])
+                )
             elapsed = (time_mod.monotonic() - start) * 1000
             return AgentResult(
                 role=task.role,

@@ -495,15 +495,23 @@ class CliRenderer:
         )
 
     def print_subtask_complete(
-        self, role: str, success: bool, elapsed_ms: float
+        self,
+        role: str,
+        success: bool,
+        elapsed_ms: float,
+        output_summary: str = "",
+        output_length: int = 0,
     ) -> None:
-        """单个子任务完成。"""
+        """单个子任务完成，显示耗时和输出摘要。"""
         icon = "✓" if success else "✗"
         style = "green" if success else "red"
         self.console.print(
             f"  [{style}]{icon} {role}[/] "
-            f"[dim]({elapsed_ms:.0f}ms)[/]"
+            f"[dim]({elapsed_ms:.0f}ms, {output_length} 字符)[/]"
         )
+        if output_summary.strip():
+            summary_line = output_summary.strip()[:200].replace("\n", " ")
+            self.console.print(f"    [dim]{summary_line}[/]")
 
     def print_orchestration_checking(self, result_count: int) -> None:
         """审计验证阶段。"""
