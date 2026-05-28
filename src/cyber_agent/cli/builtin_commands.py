@@ -448,6 +448,39 @@ def _handle_mode(
     return True
 
 
+def _handle_auto_decision(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """切换多 Agent 自动决策模式。"""
+    current = runtime_context.get("auto_decision", False)
+    state_label = "已启用（思考者自动评估并选择子任务）" if current else "已禁用（展示菜单等待用户选择）"
+
+    if len(tokens) == 1:
+        cli_renderer.print_info(
+            f"自动决策：{state_label}。使用 /auto-decision on|off 切换。"
+        )
+        return True
+
+    toggle = tokens[1].lower()
+    if toggle in ("on", "enable", "yes", "true"):
+        runtime_context["auto_decision"] = True
+        cli_renderer.print_info(
+            "已启用自动决策。多 Agent 模式下将由思考者自动评估并选择子任务，跳过交互菜单。"
+        )
+    elif toggle in ("off", "disable", "no", "false"):
+        runtime_context["auto_decision"] = False
+        cli_renderer.print_info(
+            "已禁用自动决策。多 Agent 模式下将展示菜单等待用户选择子任务。"
+        )
+    else:
+        cli_renderer.print_error(f"无效参数：{tokens[1]}。支持 on/off。")
+    return True
+
+
 def _handle_approval(
     runner: AgentRunner,
     runtime_context: dict[str, object],
@@ -604,6 +637,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/mode": _handle_mode,
     "/approval": _handle_approval,
     "/multi": _handle_multi,
+    "/auto-decision": _handle_auto_decision,
     "/file": _handle_file,
 }
 
