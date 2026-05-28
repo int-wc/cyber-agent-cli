@@ -285,57 +285,23 @@ def _run_multi_agent_turn(
     runner: AgentRunner,
     runtime_context: dict[str, object],
 ) -> None:
-    """使用多 Agent 编排器执行一轮对话。"""
-    from ..agent.orchestrator import MultiAgentOrchestrator
-    from .app import ensure_runtime_capabilities, renderer
+    """多 Agent 模式：决策者规划 → 思考者/用户选择 → runner 顺序执行子任务。
 
-    # 确保工具等能力已延迟加载完成
+    与旧版的关键区别：子任务不再由 orchestrator 的角色 Agent 执行，
+    而是直接交给已验证的 AgentRunner.run() 顺序执行。
+    runner 的单 Agent 工具调用链路是可靠的。
+    """
+    import time as time_mod
+    from ..agent.orchestrator import MultiAgentOrchestrator
+    from .app import ensure_runtime_capabilities, renderer, render_agent_event
+
     ensure_runtime_capabilities(runtime_context, runner)
 
     renderer.print_turn_start()
-    renderer.print_info("[bold cyan]🚀 正在启动多 Agent 协作模式...[/]")
+    renderer.console.print()
+    renderer.console.print("[bold cyan]🚀 正在启动多 Agent 协作模式...[/]")
 
-    # 编排器事件 → 渲染器进度
-    def orchestration_event_handler(event_type: str, payload: object) -> None:
-        if event_type == "orchestration_start":
-            pass  # 已在上面打印
-        elif event_type == "orchestration_planning":
-            renderer.print_orchestration_planning(str(payload.get("input", "")))
-        elif event_type == "orchestration_plan_done":
-            renderer.print_orchestration_plan_done(
-                subtask_count=int(payload.get("subtask_count", 0)),
-                reasoning=str(payload.get("reasoning", "")),
-            )
-        elif event_type == "orchestration_executing":
-            renderer.print_orchestration_executing(
-                int(payload.get("subtask_count", 0))
-            )
-        elif event_type == "subtask_complete":
-            renderer.print_subtask_complete(
-                role=str(payload.get("role", "?")),
-                success=bool(payload.get("success", False)),
-                elapsed_ms=float(payload.get("elapsed_ms", 0)),
-                output_summary=str(payload.get("output_summary", "")),
-                output_length=int(payload.get("output_length", 0)),
-            )
-        elif event_type == "orchestration_checking":
-            renderer.print_orchestration_checking(
-                int(payload.get("result_count", 0))
-            )
-        elif event_type == "orchestration_reflecting":
-            renderer.print_orchestration_reflecting(
-                int(payload.get("failed_count", 0))
-            )
-        elif event_type == "orchestration_iteration":
-            pass  # 静默处理
-        elif event_type == "orchestration_synthesizing":
-            renderer.print_orchestration_synthesize()
-        elif event_type == "orchestration_end":
-            renderer.print_orchestration_done(
-                int(payload.get("total_results", 0))
-            )
-
-    # 根据 --auto-decision 选择交互处理器
+    # ── 阶段 1: 决策者规划 ──
     auto_decision = runtime_context.get("auto_decision", False)
     if auto_decision:
         interaction_handler = _build_auto_decision_handler(runtime_context)
@@ -345,7 +311,6 @@ def _run_multi_agent_turn(
     orchestrator = MultiAgentOrchestrator(
         tools=list(getattr(runner, "tools", [])),
         execution_controller=runtime_context.get("execution_controller"),
-        event_handler=orchestration_event_handler,
         user_interaction_handler=interaction_handler,
         service_name=str(runtime_context.get("service_name", "deepseek")),
         model_name=str(runtime_context.get("model_name", "")),
@@ -353,14 +318,104 @@ def _run_multi_agent_turn(
         base_url=str(runtime_context.get("base_url", "")) if runtime_context.get("base_url") is not None else None,
     )
 
-    try:
-        result = orchestrator.run(user_input)
-        renderer.print_markdown(result)
-        # 将编排器累计的 token 使用量同步到渲染器
-        usage = orchestrator.get_usage_summary()
-        if usage["total_tokens"] > 0:
-            renderer.add_token_usage(usage["input_tokens"], usage["output_tokens"])
-    except Exception as exc:
-        renderer.print_error(f"多 Agent 协作失败：{exc}")
+    # 使用 orchestrator 的 planning 能力
+    renderer.print_orchestration_planning(user_input)
+    plan = orchestrator._plan_task(user_input)
+    renderer.print_orchestration_plan_done(len(plan.subtasks), plan.reasoning)
+
+    # ── 阶段 1.5: 思考者或用户选择 ──
+    if interaction_handler is not None:
+        action = interaction_handler("plan_review", {
+            "plan": {
+                "reasoning": plan.reasoning,
+                "subtasks": [
+                    {"role": t.role.value, "task_description": t.task_description, "context": t.context}
+                    for t in plan.subtasks
+                ],
+            },
+        })
+        if action.get("action") == "cancelled":
+            renderer.console.print("[dim]任务已取消。[/]")
+            return
+        selected_keys = set(action.get("selected_keys", []))
+        if selected_keys:
+            plan.subtasks = [
+                t for i, t in enumerate(plan.subtasks)
+                if t.role.value in selected_keys
+                or str(i) in selected_keys
+                or f"{t.role.value}_{i}" in selected_keys
+            ]
+        # 思考者的补充条件注入到上下文
+        if action.get("custom_text"):
+            plan.reasoning += f"\n补充条件: {action['custom_text']}"
+
+    if not plan.subtasks:
+        renderer.console.print("[dim]没有可执行的子任务。[/]")
+        return
+
+    # ── 阶段 2: runner 顺序执行每个子任务 ──
+    renderer.console.print()
+    renderer.console.print(
+        f"[bold yellow]⚡ 正在顺序执行 {len(plan.subtasks)} 个子任务（通过 AgentRunner）...[/]"
+    )
+
+    results: list[str] = []
+    for i, task in enumerate(plan.subtasks):
+        renderer.console.print(
+            f"  [dim]── 子任务 {i+1}/{len(plan.subtasks)}: {task.task_description[:80]}...[/]"
+        )
+        start = time_mod.monotonic()
+
+        try:
+            # 构建子任务提示词
+            subtask_prompt = (
+                f"请完成以下子任务。这是更大任务的一部分，只做这一件事，完成后给出结果摘要。\n\n"
+                f"子任务: {task.task_description}\n"
+            )
+            if task.context:
+                subtask_prompt += f"\n上下文: {task.context}\n"
+            if plan.reasoning:
+                subtask_prompt += f"\n整体背景: {plan.reasoning[:300]}\n"
+            subtask_prompt += "\n请直接调用工具完成此子任务，给出核心结果。"
+
+            # 使用 runner 直接执行（已验证的工具调用链路）
+            result = runner.run(
+                subtask_prompt,
+                verbose=False,
+                event_handler=None,  # 子任务不逐字输出，减少噪音
+            )
+            elapsed = (time_mod.monotonic() - start) * 1000
+            renderer.console.print(
+                f"  [green]✓ 子任务 {i+1} 完成[/] [dim]({elapsed:.0f}ms, {len(result)} 字符)[/]"
+            )
+            results.append(f"## 子任务 {i+1}: {task.task_description}\n{result}")
+
+        except Exception as exc:
+            elapsed = (time_mod.monotonic() - start) * 1000
+            renderer.console.print(
+                f"  [red]✗ 子任务 {i+1} 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
+            )
+            results.append(f"## 子任务 {i+1}: {task.task_description}\n❌ 失败: {exc}")
+
+    # ── 阶段 3: 聚合输出 ──
+    renderer.print_orchestration_synthesize()
+
+    if not results:
+        renderer.console.print("[dim]无有效结果。[/]")
+        return
+
+    # 简单聚合：拼接各子任务结果
+    aggregated = "\n\n---\n\n".join(results)
+    summary = (
+        f"## 多 Agent 执行完成\n\n"
+        f"共执行 {len(results)} 个子任务。\n\n"
+        f"{aggregated}"
+    )
+    renderer.print_markdown(summary)
+
+    # 同步 token 使用量
+    usage = orchestrator.get_usage_summary()
+    if usage["total_tokens"] > 0:
+        renderer.add_token_usage(usage["input_tokens"], usage["output_tokens"])
 
 
