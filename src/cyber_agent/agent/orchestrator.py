@@ -425,8 +425,9 @@ class MultiAgentOrchestrator:
             )
             last_text_response = ""  # 记录最后一轮有文本的响应
             tool_call_log: list[str] = []  # 工具调用记录
+            first_round_no_tool_retried = False  # 首轮无工具调用时仅重试一次
 
-            for _ in range(self._MAX_ROLE_TOOL_ITERATIONS):
+            for round_idx in range(self._MAX_ROLE_TOOL_ITERATIONS):
                 if self.execution_controller is not None:
                     self.execution_controller.ensure_not_cancelled()
 
@@ -440,6 +441,20 @@ class MultiAgentOrchestrator:
 
                 tool_calls = getattr(response, "tool_calls", None) or []
                 if not tool_calls:
+                    # 首轮无工具调用但确有可用工具时：追加强制指令重试一次
+                    if (
+                        not first_round_no_tool_retried
+                        and not tool_call_log
+                        and self.tools  # 仅当有可用工具时才重试
+                    ):
+                        first_round_no_tool_retried = True
+                        messages.append(
+                            HumanMessage(
+                                content="你还没有调用任何工具。请现在就调用工具完成任务，"
+                                "不要只输出文字描述。直接发起工具调用，不要犹豫。"
+                            )
+                        )
+                        continue
                     output = current_text.strip() or last_text_response
                     if not output and tool_call_log:
                         # 模型未生成文本但执行了工具，从工具日志构建摘要
@@ -554,7 +569,6 @@ class MultiAgentOrchestrator:
 
     def _build_role_system_prompt(self, task: AgentTask) -> str:
         """构建角色专属系统提示词，注入任务上下文、系统环境和可用工具信息。"""
-        role_prompt = get_role_prompt(task.role)
         role_label = get_role_label(task.role)
         system_context = self._build_system_context()
 
@@ -581,24 +595,20 @@ class MultiAgentOrchestrator:
             tool_lines.append(f"- {name}: {desc}{args_info}")
         tool_descriptions = "\n".join(tool_lines) if tool_lines else "无额外工具"
 
-        return f"""{role_prompt}
+        # 工具调用模式：用简短强制的提示词替代角色长描述，避免 LLM 陷入"分析但不行动"
+        return f"""你是 {role_label}。你的唯一工作方式就是**调用工具**——不能只输出文字。
+
+## 可用工具
+{tool_descriptions}
 
 ## 系统环境
 {system_context}
 
-## 当前上下文
-你正在参与一个多 Agent 协作任务。你的角色是 {role_label}。
-当前子任务由决策者分配，你必须**直接调用工具**完成任务，不要只描述需要什么。
-
-## 可用工具（直接调用，不要犹豫）
-{tool_descriptions}
-
-## 执行要求
-- **立即调用工具**完成子任务，不要只说"我需要 xxx 工具"
-- 用中文回复工具执行结果和分析
-- 先给出核心结论，再展开详细内容
-- 工具调用失败时说明错误原因，并尝试替代方案
-- 标注任何不确定的部分"""
+## 规则
+1. 第一条回复就必须包含工具调用，不允许先说"让我试试"
+2. 收到工具结果后立即分析并输出摘要
+3. 用中文回复，先给结论再给细节
+4. 工具调用失败时说明错误并尝试替代"""
 
     def _build_role_user_message(self, task: AgentTask) -> str:
         """构建角色 Agent 的用户消息。"""
