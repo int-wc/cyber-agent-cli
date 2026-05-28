@@ -269,6 +269,7 @@ def build_runtime_context(
     approval_policy: ApprovalPolicy,
     ui_mode: InteractionUiMode,
     skill_dirs: list[str] | None = None,
+    auto_decision: bool = False,
 ) -> dict[str, object]:
     """统一构建 CLI 运行上下文，避免多处分散解析。"""
     local_config = load_config_with_fallback()
@@ -316,6 +317,7 @@ def build_runtime_context(
         "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
         "multi_agent_enabled": "auto",
+        "auto_decision": auto_decision,
         "_recent_inputs": [],  # 最近 50 条用户输入
     }
 
@@ -338,6 +340,7 @@ def get_or_build_runtime_context(ctx: typer.Context) -> dict[str, object]:
         runtime_options["approval_policy"],
         runtime_options["ui_mode"],
         skill_dirs=runtime_options.get("skill_dirs"),
+        auto_decision=runtime_options.get("auto_decision", False),
     )
     ctx.obj["runtime_context"] = runtime_context
     return runtime_context
@@ -1454,6 +1457,11 @@ def main_callback(
         "--resume",
         help="检测并恢复上次中断的会话。",
     ),
+    auto_decision: bool = typer.Option(
+        False,
+        "--auto-decision",
+        help="多 Agent 模式下自动评估并选择子任务，无需手动交互确认。",
+    ),
 ) -> None:
     """默认无子命令时直接进入交互式对话。"""
     ctx.ensure_object(dict)
@@ -1468,6 +1476,7 @@ def main_callback(
             "approval_policy": parsed_approval_policy,
             "ui_mode": parsed_ui_mode,
             "skill_dirs": skill_dir,
+            "auto_decision": auto_decision,
         }
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

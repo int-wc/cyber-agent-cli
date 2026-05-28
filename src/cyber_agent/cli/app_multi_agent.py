@@ -9,6 +9,176 @@ if TYPE_CHECKING:
     from ..agent.runner import AgentRunner
 
 
+def _build_auto_decision_handler(runtime_context: dict[str, object]):
+    """构建自动决策处理器：用思考者(thinker)角色评估计划并自动选择子任务。
+
+    当 --auto-decision 启用时，替代交互式菜单，
+    由思考者分析决策者的计划，自动选出应执行的子任务并补充遗漏条件。
+    """
+    from ..config import settings
+
+    def handler(stage: str, data: dict[str, Any]) -> dict[str, Any]:
+        if stage != "plan_review":
+            return {"action": "skip"}
+
+        plan = data.get("plan", {})
+        subtasks = plan.get("subtasks", [])
+        reasoning = plan.get("reasoning", "")
+
+        if not subtasks:
+            return {"action": "selected", "selected_keys": []}
+
+        from .app import renderer
+
+        renderer.console.print()
+        renderer.console.print(
+            "  [bold magenta]🤔 思考者正在评估子任务计划...[/]"
+        )
+
+        # 构建子任务摘要供思考者分析
+        tasks_text = "\n".join(
+            f"  [{i}] 角色={t.get('role', '?')} | {t.get('task_description', '')[:200]}"
+            for i, t in enumerate(subtasks)
+        )
+
+        # 加载思考者角色提示词
+        from ..agent.roles import get_role_prompt, AgentRole
+        thinker_prompt = get_role_prompt(AgentRole.THINKER)
+
+        system_context = _build_system_context()
+
+        system_prompt = f"""{thinker_prompt}
+
+## 系统环境
+{system_context}
+
+## 决策者分析
+{reasoning[:500]}
+
+## 待评估的子任务
+{tasks_text}
+
+请分析以上子任务，输出 JSON 格式的执行决策。"""
+
+        try:
+            # 使用 orchestration 子模型（较轻量）做思考评估
+            from .._lazy_imports import load_llm_for_api
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            service_name = str(runtime_context.get("service_name", "deepseek"))
+            model_name = settings.subagent_model  # 用子模型，降低成本
+            api_key = str(runtime_context.get("api_key", ""))
+            base_url = str(runtime_context.get("base_url", "")) if runtime_context.get("base_url") is not None else None
+
+            if not base_url:
+                base_url = settings.resolve_base_url(service_name)
+
+            llm_cls, is_anthropic = load_llm_for_api(base_url)
+            import warnings
+            kwargs = settings.get_chat_openai_kwargs(
+                service_name,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
+            )
+            if is_anthropic:
+                kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+                kwargs.pop("openai_api_key", None)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*extra_body.*")
+                llm = llm_cls(**kwargs)
+
+            response = llm.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content="请评估子任务计划并输出 JSON 决策。"),
+            ])
+
+            # 提取文本
+            content = response.content
+            if isinstance(content, list):
+                content = "".join(
+                    item if isinstance(item, str) else str(item.get("text", ""))
+                    for item in content
+                )
+            content = str(content).strip()
+
+            # 解析 JSON
+            import json
+            import re as _re
+            # 去除 markdown 代码围栏
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+            decision = json.loads(content)
+
+        except Exception as exc:
+            from ..logging import log_error
+            log_error("auto_decision", f"思考者评估失败，回退到执行全部子任务：{exc}")
+            renderer.console.print(
+                f"  [dim yellow]思考者评估失败({exc})，默认执行全部子任务。[/]"
+            )
+            return {
+                "action": "selected",
+                "selected_keys": [
+                    f"{t.get('role', 'runner')}_{i}"
+                    for i, t in enumerate(subtasks)
+                ],
+            }
+
+        # 提取决策
+        selected_indices = decision.get("selected_indices", list(range(len(subtasks))))
+        additional_context = decision.get("additional_context", "")
+        concerns = decision.get("concerns", "")
+        think_reasoning = decision.get("reasoning", "")
+
+        # 构建选中的 key 列表
+        selected_keys = [
+            f"{subtasks[i].get('role', 'runner')}_{i}"
+            for i in selected_indices
+            if 0 <= i < len(subtasks)
+        ]
+
+        # 展示思考者的决策
+        renderer.console.print(
+            f"  [dim]思考者决策: {think_reasoning[:200]}[/]"
+        )
+        if additional_context:
+            renderer.console.print(
+                f"  [dim yellow]补充条件: {additional_context[:200]}[/]"
+            )
+        if concerns:
+            renderer.console.print(
+                f"  [dim red]注意: {concerns[:200]}[/]"
+            )
+        renderer.console.print(
+            f"  [dim]已选择 {len(selected_keys)}/{len(subtasks)} 个子任务[/]"
+        )
+
+        return {
+            "action": "selected",
+            "selected_keys": selected_keys,
+            "custom_text": additional_context if additional_context else None,
+        }
+
+    return handler
+
+
+def _build_system_context() -> str:
+    """构建系统上下文信息，供角色提示词使用。"""
+    from datetime import datetime, timezone
+    import os
+    now = datetime.now(timezone.utc).astimezone()
+    return (
+        f"当前日期时间: {now.strftime('%Y年%m月%d日 %H:%M')} "
+        f"({now.strftime('%A')}, ISO {now.strftime('%Y-%m-%d')})\n"
+        f"当前工作目录: {os.getcwd()}\n"
+    )
+
+
 def _build_user_interaction_handler(runtime_context: dict[str, object]):
     """构建用户交互处理器，用于多 Agent 协作中的方案选择和确认。"""
 
@@ -165,11 +335,18 @@ def _run_multi_agent_turn(
                 int(payload.get("total_results", 0))
             )
 
+    # 根据 --auto-decision 选择交互处理器
+    auto_decision = runtime_context.get("auto_decision", False)
+    if auto_decision:
+        interaction_handler = _build_auto_decision_handler(runtime_context)
+    else:
+        interaction_handler = _build_user_interaction_handler(runtime_context)
+
     orchestrator = MultiAgentOrchestrator(
         tools=list(getattr(runner, "tools", [])),
         execution_controller=runtime_context.get("execution_controller"),
         event_handler=orchestration_event_handler,
-        user_interaction_handler=_build_user_interaction_handler(runtime_context),
+        user_interaction_handler=interaction_handler,
         service_name=str(runtime_context.get("service_name", "deepseek")),
         model_name=str(runtime_context.get("model_name", "")),
         api_key=str(runtime_context.get("api_key", "")),

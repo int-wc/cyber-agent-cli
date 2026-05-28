@@ -17,6 +17,7 @@ class AgentRole(StrEnum):
     REFLECTOR = "reflector"
     DIFFUSER = "diffuser"
     JUMPER = "jumper"
+    THINKER = "thinker"
 
 
 # 角色中文标签
@@ -30,6 +31,7 @@ ROLE_LABELS: dict[AgentRole, str] = {
     AgentRole.REFLECTOR: "反思者",
     AgentRole.DIFFUSER: "扩散者",
     AgentRole.JUMPER: "迁跃者",
+    AgentRole.THINKER: "思考者",
 }
 
 # 角色专属系统提示词
@@ -96,6 +98,28 @@ ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
 - 提出创新性和颠覆性的思路
 - 敢于挑战现有假设
 - 在不相关的领域之间建立有意义的连接""",
+
+    AgentRole.THINKER: """你是思考者 (Thinker)。你的职责是评估决策者制定的子任务计划，并自动做出最佳执行决策。
+- 分析每个子任务的目标、前置条件和预期产出
+- 判断哪些子任务是关键路径，哪些可以合并或跳过
+- 识别计划中的遗漏：缺少的前置步骤、隐含假设、边界条件
+- 评估子任务之间的依赖关系，确保执行顺序合理
+- 输出结构化的执行决策：要执行哪些子任务、是否需要补充条件
+
+决策原则：
+1. 优先执行关键路径上的子任务
+2. 如果某个子任务依赖其他子任务的产出，确保依赖项被包含
+3. 如果发现明显遗漏（如缺少文件搜索前未确认目录存在），补充到决策中
+4. 除非子任务明显冗余或不可行，否则默认执行全部
+5. 对不确定的部分标注"需人工确认"
+
+输出必须是 JSON 对象：
+{
+  "reasoning": "决策理由（简要说明为什么选择这些子任务以及补充条件）",
+  "selected_indices": [0, 1, 2],  // 要执行的子任务序号（从0开始）
+  "additional_context": "补充的上下文或条件（如果没有则为空字符串）",
+  "concerns": "不确定或需人工确认的点（如果没有则为空字符串）"
+}""",
 }
 
 
