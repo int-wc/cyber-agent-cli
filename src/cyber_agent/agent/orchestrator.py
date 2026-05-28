@@ -99,7 +99,11 @@ class MultiAgentOrchestrator:
     def _get_llm(self) -> Any:
         """懒加载模型实例。对 DeepSeek Anthropic 端点强制使用 ChatOpenAI 格式，
         因为 Anthropic 格式的 input_schema 可能不被 DeepSeek 正确解析，
-        导致工具调用时 input 始终为空。"""
+        导致工具调用时 input 始终为空。
+
+        同时禁用 thinking 模式，因为 DeepSeek /v1 端点要求多轮对话中
+        将 reasoning_content 回传，而角色 Agent 的工具调用循环无法保证这点。
+        """
         if self._llm is None:
             import warnings
             from .._lazy_imports import load_chat_openai
@@ -118,7 +122,11 @@ class MultiAgentOrchestrator:
                 api_key=self.api_key,
                 base_url=resolved_url,
             )
-            # 始终使用 ChatOpenAI（OpenAI 工具调用格式），DeepSeek 同时支持两种
+            # 禁用 thinking 模式：角色 Agent 不需要深度推理，
+            # 且 /v1 端点的 reasoning_content 回传要求会导致多轮工具调用失败
+            if "extra_body" in kwargs and isinstance(kwargs["extra_body"], dict):
+                kwargs["extra_body"]["thinking"] = {"type": "disabled"}
+
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*extra_body.*")
                 self._llm = load_chat_openai()(**kwargs)
