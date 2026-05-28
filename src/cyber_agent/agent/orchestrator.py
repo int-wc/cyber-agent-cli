@@ -505,12 +505,11 @@ class MultiAgentOrchestrator:
         """执行角色 Agent 发起的单个工具调用。"""
         tool_name = getattr(tool_call, "name", "") or str(tool_call.get("name", ""))
         tool_call_id = getattr(tool_call, "id", "") or str(tool_call.get("id", ""))
-        tool_args = getattr(tool_call, "args", {}) or {}
 
         tool = self._tool_registry.get(tool_name)
         if tool is None:
             return ToolMessage(
-                content=f"❌ 未知工具：{tool_name}",
+                content=f"❌ 未知工具：{tool_name}。可用工具：{', '.join(sorted(self._tool_registry.keys()))}",
                 name=tool_name or "unknown",
                 tool_call_id=tool_call_id,
             )
@@ -518,7 +517,10 @@ class MultiAgentOrchestrator:
         try:
             if self.execution_controller is not None:
                 self.execution_controller.ensure_not_cancelled()
-            result = tool.invoke(tool_args)
+            # 将工具调用参数规范化为 dict，兼容 LLM 返回的 JSON 字符串格式
+            raw_args = getattr(tool_call, "args", {}) or {}
+            normalized_args = self._normalize_tool_args(tool_name, raw_args)
+            result = tool.invoke(normalized_args)
             return ToolMessage(
                 content=str(result),
                 name=tool_name,
@@ -531,15 +533,53 @@ class MultiAgentOrchestrator:
                 tool_call_id=tool_call_id,
             )
 
+    @staticmethod
+    def _normalize_tool_args(tool_name: str, raw_args: Any) -> dict[str, Any]:
+        """将 LLM 返回的工具参数规范化为 dict，兼容 JSON 字符串格式。"""
+        if isinstance(raw_args, dict):
+            return raw_args
+        if isinstance(raw_args, str):
+            stripped = raw_args.strip()
+            if not stripped:
+                return {}
+            try:
+                import json
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"工具 {tool_name} 的参数不是合法 JSON：{exc}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError(f"工具 {tool_name} 的参数必须是 JSON 对象。")
+            return parsed
+        raise ValueError(f"工具 {tool_name} 的参数格式无效，必须为对象或 JSON 字符串。")
+
     def _build_role_system_prompt(self, task: AgentTask) -> str:
         """构建角色专属系统提示词，注入任务上下文、系统环境和可用工具信息。"""
         role_prompt = get_role_prompt(task.role)
         role_label = get_role_label(task.role)
         system_context = self._build_system_context()
 
-        tool_descriptions = "\n".join(
-            f"- {tool.name}: {tool.description[:120]}" for tool in self.tools[:20]
-        ) if self.tools else "无额外工具"
+        # 构建带参数说明的工具描述，让角色知道每个工具的参数签名
+        tool_lines: list[str] = []
+        for tool in self.tools[:20]:
+            name = tool.name
+            desc = tool.description[:150].strip()
+            # 尝试提取 args_schema 中的参数信息
+            args_info = ""
+            try:
+                schema = getattr(tool, "args_schema", None)
+                if schema is not None:
+                    fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None)
+                    if fields:
+                        params = []
+                        for fname, finfo in fields.items():
+                            ftype = getattr(finfo, "annotation", None)
+                            type_name = getattr(ftype, "__name__", str(ftype)) if ftype else "str"
+                            params.append(f"{fname}: {type_name}")
+                        args_info = f"  参数: {', '.join(params)}"
+            except Exception:
+                pass
+            tool_lines.append(f"- {name}: {desc}{args_info}")
+        tool_descriptions = "\n".join(tool_lines) if tool_lines else "无额外工具"
 
         return f"""{role_prompt}
 
@@ -548,21 +588,24 @@ class MultiAgentOrchestrator:
 
 ## 当前上下文
 你正在参与一个多 Agent 协作任务。你的角色是 {role_label}。
-当前子任务由决策者分配，需独立完成并返回结构化输出。
+当前子任务由决策者分配，你必须**直接调用工具**完成任务，不要只描述需要什么。
 
-## 可用工具
+## 可用工具（直接调用，不要犹豫）
 {tool_descriptions}
 
-## 输出要求
-- 用中文回复
-- 先给出核心结论或执行摘要
-- 再展开详细内容
-- 如有工具调用需求，明确说明需要什么
+## 执行要求
+- **立即调用工具**完成子任务，不要只说"我需要 xxx 工具"
+- 用中文回复工具执行结果和分析
+- 先给出核心结论，再展开详细内容
+- 工具调用失败时说明错误原因，并尝试替代方案
 - 标注任何不确定的部分"""
 
     def _build_role_user_message(self, task: AgentTask) -> str:
         """构建角色 Agent 的用户消息。"""
-        msg = f"## 子任务\n{task.task_description}"
+        msg = (
+            f"## 你的子任务（立即执行，直接调用工具）\n{task.task_description}\n\n"
+            f"请直接调用相关工具完成上述任务，不要只说\"需要 xxx 工具\"——现在就调用它。"
+        )
         if task.context:
             msg += f"\n\n## 附加上下文\n{task.context}"
         return msg
