@@ -177,9 +177,9 @@ def create_runtime_session_id(now: datetime | None = None) -> str:
 
 
 def get_runtime_session_storage_dir(base_dir: Path | None = None) -> Path:
-    """轻量计算历史目录路径，真正读写时再加载 session_store。"""
-    resolved_base_dir = (base_dir or Path.cwd()).resolve()
-    return resolved_base_dir / SESSION_STORAGE_DIRNAME
+    """轻量计算历史目录路径，支持任意目录启动时回溯查找。"""
+    from ..local_config import find_data_dir
+    return find_data_dir(SESSION_STORAGE_DIRNAME, base_dir)
 
 
 def _load_doctor_support():

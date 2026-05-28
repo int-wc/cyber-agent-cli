@@ -86,9 +86,9 @@ class StoredSessionSearchResult:
 
 
 def get_session_storage_dir(base_dir: Path | None = None) -> Path:
-    """返回当前工作目录下的历史会话目录。"""
-    resolved_base_dir = (base_dir or Path.cwd()).resolve()
-    return resolved_base_dir / SESSION_STORAGE_DIRNAME
+    """返回历史会话目录，支持从任意目录启动时回溯查找。"""
+    from .local_config import find_data_dir
+    return find_data_dir(SESSION_STORAGE_DIRNAME, base_dir)
 
 
 def create_session_id(now: datetime | None = None) -> str:

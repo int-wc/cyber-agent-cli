@@ -132,6 +132,40 @@ def save_local_cli_config(
     return config_path
 
 
+def find_data_dir(dirname: str, base_dir: Path | None = None) -> Path:
+    """查找数据目录，按优先级回溯：指定目录 → 父目录(10层) → 用户家目录。
+
+    若都不存在，返回指定目录（或当前目录）下的路径，调用方负责 mkdir。
+    当 base_dir 显式传入时，始终优先使用 base_dir 本身，不做父目录回溯，
+    仅在 base_dir 为 None 时才从当前工作目录开始回溯查找。
+    dirname 示例: ".cyber-agent-cli-sessions", ".cyber-agent-cli-capabilities"
+    """
+    # 若调用方显式传入了 base_dir，直接使用该目录（不回溯）
+    if base_dir is not None:
+        return base_dir.resolve() / dirname
+
+    current = Path.cwd().resolve()
+    # 1. 当前目录
+    candidate = current / dirname
+    if candidate.exists():
+        return candidate
+    # 2. 父目录回溯
+    for _ in range(10):
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+        candidate = current / dirname
+        if candidate.exists():
+            return candidate
+    # 3. 用户家目录
+    home_candidate = Path.home() / dirname
+    if home_candidate.exists():
+        return home_candidate
+    # 4. 默认：当前工作目录
+    return Path.cwd().resolve() / dirname
+
+
 def merge_allow_paths(*path_groups: list[Path | str]) -> list[Path]:
     """合并多组允许路径，并按顺序去重。"""
     merged_paths: list[Path | str] = []

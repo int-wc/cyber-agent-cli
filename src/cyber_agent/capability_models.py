@@ -146,9 +146,9 @@ class CapabilityExecutionResult:
 
 
 def get_capability_storage_dir(base_dir: Path | None = None) -> Path:
-    """返回当前工作目录下的 capability 存储目录。"""
-    resolved_base_dir = (base_dir or Path.cwd()).resolve()
-    return resolved_base_dir / CAPABILITY_STORAGE_DIRNAME
+    """返回 capability 存储目录，支持从任意目录启动时回溯查找。"""
+    from .local_config import find_data_dir
+    return find_data_dir(CAPABILITY_STORAGE_DIRNAME, base_dir)
 
 
 def _extract_response_text(raw_content: object) -> str:
