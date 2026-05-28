@@ -645,8 +645,12 @@ class MultiAgentOrchestrator:
     def _build_role_user_message(self, task: AgentTask) -> str:
         """构建角色 Agent 的用户消息。"""
         msg = (
-            f"## 你的子任务（立即执行，直接调用工具）\n{task.task_description}\n\n"
-            f"请直接调用相关工具完成上述任务，不要只说\"需要 xxx 工具\"——现在就调用它。"
+            f"## 你的子任务（立即执行）\n{task.task_description}\n\n"
+            f"**要求**：\n"
+            f"1. 必须立即调用工具，第一轮回复必须是工具调用\n"
+            f"2. 调用时必须提供所有必填参数（如 path、command 等）\n"
+            f"3. 使用参数的具体值（如 path='/home/study/pwn2own'），不要用占位符\n"
+            f"4. 工具调用成功后再用中文总结结果"
         )
         if task.context:
             msg += f"\n\n## 附加上下文\n{task.context}"
