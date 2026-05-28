@@ -498,18 +498,6 @@ class AgentRunner:
     def _compose_system_prompt(self) -> str:
         """按当前模式和已激活 skill 生成模型实际使用的系统提示。"""
         prompt_parts = [self.system_prompt]
-        # 注入 CLAUDE.md（从工作目录及父目录查找）
-        try:
-            from ..claude_md import build_claude_md_prompt
-            claude_md_prompt = build_claude_md_prompt().strip()
-            if claude_md_prompt:
-                prompt_parts.append(
-                    "以下是项目中的 CLAUDE.md 指令文件，"
-                    "这些指令对 AI 的行为有约束力，请严格遵循：\n\n"
-                    + claude_md_prompt
-                )
-        except Exception:
-            pass  # CLAUDE.md 读取失败不阻塞启动
         # 注入跨会话持久化记忆
         memory_prompt = self._build_memory_prompt().strip()
         if memory_prompt:
