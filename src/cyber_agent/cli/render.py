@@ -58,11 +58,11 @@ from .render_panels import (
 )
 
 # DeepSeek 定价（人民币 元/百万 token，缓存未命中）
-# https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+# 参考: https://api-docs.deepseek.com/zh-cn/quick_start/pricing
 _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
-    "deepseek-v4-pro":   {"input": 3.0, "output": 6.0},
-    "deepseek-v4-flash": {"input": 1.0, "output": 2.0},
-    # 兼容旧模型名（将逐步弃用，映射到 v4-flash）
+    "deepseek-v4-pro":   {"input": 1.0, "output": 2.0},
+    "deepseek-v4-flash": {"input": 0.5, "output": 1.0},
+    # 兼容旧模型名
     "deepseek-chat":     {"input": 1.0, "output": 2.0},
     "deepseek-reasoner": {"input": 1.0, "output": 2.0},
 }

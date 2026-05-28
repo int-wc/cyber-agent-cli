@@ -542,11 +542,40 @@ class MultiAgentOrchestrator:
                 tool_call_id=tool_call_id,
             )
         except Exception as exc:
+            # 提取工具的必填参数信息，帮助 LLM 修正下一次调用
+            error_msg = str(exc)
+            required_hint = self._build_tool_required_hint(tool_name)
+            if required_hint and "Field required" in error_msg:
+                error_msg = (
+                    f"参数缺失——调用 {tool_name} 必须提供：{required_hint}。"
+                    f"请用正确的参数重新调用。原始错误：{exc}"
+                )
             return ToolMessage(
-                content=f"❌ 工具执行异常：{exc}",
+                content=f"❌ {error_msg}",
                 name=tool_name,
                 tool_call_id=tool_call_id,
             )
+
+    def _build_tool_required_hint(self, tool_name: str) -> str:
+        """提取工具的必填参数列表，用于错误提示。"""
+        tool = self._tool_registry.get(tool_name)
+        if tool is None:
+            return ""
+        try:
+            schema = getattr(tool, "args_schema", None)
+            if schema is None:
+                return ""
+            fields = getattr(schema, "model_fields", None) or {}
+            required = []
+            for fname, finfo in fields.items():
+                is_required = finfo.is_required()
+                if is_required:
+                    ftype = getattr(finfo, "annotation", None)
+                    type_name = getattr(ftype, "__name__", str(ftype)) if ftype else "str"
+                    required.append(f"{fname}: {type_name}")
+            return ", ".join(required) if required else ""
+        except Exception:
+            return ""
 
     @staticmethod
     def _normalize_tool_args(tool_name: str, raw_args: Any) -> dict[str, Any]:
@@ -572,12 +601,11 @@ class MultiAgentOrchestrator:
         role_label = get_role_label(task.role)
         system_context = self._build_system_context()
 
-        # 构建带参数说明的工具描述，让角色知道每个工具的参数签名
+        # 构建带参数说明的工具描述，标记必填参数
         tool_lines: list[str] = []
         for tool in self.tools[:20]:
             name = tool.name
-            desc = tool.description[:150].strip()
-            # 尝试提取 args_schema 中的参数信息
+            desc = tool.description[:120].strip()
             args_info = ""
             try:
                 schema = getattr(tool, "args_schema", None)
@@ -586,9 +614,13 @@ class MultiAgentOrchestrator:
                     if fields:
                         params = []
                         for fname, finfo in fields.items():
+                            is_required = finfo.is_required()
                             ftype = getattr(finfo, "annotation", None)
                             type_name = getattr(ftype, "__name__", str(ftype)) if ftype else "str"
-                            params.append(f"{fname}: {type_name}")
+                            if is_required:
+                                params.append(f"【必填】{fname}: {type_name}")
+                            else:
+                                params.append(f"{fname}: {type_name} (可选)")
                         args_info = f"  参数: {', '.join(params)}"
             except Exception:
                 pass
