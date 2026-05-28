@@ -89,8 +89,7 @@ def create_list_directory_tool(allowed_roots: Sequence[Path]):
     @tool("list_directory")
     def list_directory(path: str = ".") -> str:
         """
-        列出允许访问范围内指定目录的文件和子目录。
-        适合在分析代码仓库结构或查找目标文件时使用。
+        列出目录内容。必须提供 path 参数（字符串，如 "/home/study/pwn2own"）。
         """
         try:
             target_path = resolve_permitted_path(path, normalized_roots)
@@ -131,8 +130,8 @@ def create_read_text_file_tool(allowed_roots: Sequence[Path]):
     @tool("read_text_file")
     def read_text_file(path: str, max_chars: int = MAX_FILE_READ_CHARS) -> str:
         """
-        读取允许访问范围内的文本文件内容。path 参数必填。
-        适合在回答代码或配置问题前先查看真实文件内容。
+        读取文本文件。必须提供 path 参数（字符串，如 "/home/study/test.txt"）。
+        可选 max_chars 参数（默认4000）控制最大读取字符数。
         """
         if max_chars <= 0:
             return "❌ max_chars 必须大于 0。"

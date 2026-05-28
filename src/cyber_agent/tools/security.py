@@ -5,8 +5,8 @@ import socket
 @tool
 def scan_port(target: str, port: int) -> str:
     """
-    扫描指定目标IP或域名的指定端口是否开放。
-    适用于网络安全检测和基础信息收集。
+    端口扫描。必须提供 target 参数（字符串，IP或域名）和 port 参数（整数，端口号）。
+    示例: scan_port(target="127.0.0.1", port=80)
     """
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

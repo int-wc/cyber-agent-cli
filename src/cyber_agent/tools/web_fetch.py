@@ -313,10 +313,9 @@ def create_web_fetch_tool(
         use_browser: bool = False,
     ) -> str:
         """
-        获取指定 URL 的网页文本内容。
-        对 CSDN、知乎等需要 JS 渲染的站点自动使用浏览器获取。
-        url 是需要获取的网页地址。
-        use_browser 为 True 时强制使用浏览器模式。
+        获取网页内容。必须提供 url 参数（字符串，如 "https://example.com"）。
+        可选 use_browser 参数（默认False）。
+        示例: fetch_web_page(url="https://downloads.openwrt.org/")
         """
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()

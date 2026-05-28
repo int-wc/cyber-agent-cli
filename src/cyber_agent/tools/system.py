@@ -225,8 +225,9 @@ def create_run_shell_command_tool(
         timeout_seconds: int = 60,
     ) -> str:
         """
-        在受限工作目录内执行 shell 命令。command 参数必填。
-        适合运行测试、构建命令、代码格式化或外部程序。
+        执行 shell 命令。必须提供 command 参数（字符串，如 "ls -la"）。
+        可选 working_directory（默认"."）和 timeout_seconds（默认60）。
+        示例: run_shell_command(command="ls -la /path")
         """
         try:
             resolved_working_directory = resolve_permitted_path(

@@ -1739,8 +1739,9 @@ def create_search_web_tool(
         max_results: int = 30,
     ) -> str:
         """
-        执行关键词网络搜索，并发查询多个搜索引擎（Bing/Google/百度），
-        在 6s 内返回 20-40 条去重结果。失败时回退到 HTTP HTML 搜索。
+        网络搜索。必须提供 query 参数（字符串，搜索关键词）。
+        可选 max_results 参数（默认30）。
+        示例: search_web(query="OpenWrt 固件下载")
         """
         if execution_controller is not None:
             execution_controller.ensure_not_cancelled()

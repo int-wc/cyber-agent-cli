@@ -68,10 +68,11 @@ if PROMPT_TOOLKIT_IMPORT_ERROR is None:
     class CliPromptSession:
         """封装 prompt_toolkit 交互，统一 CLI 的补全和命令提醒。"""
 
-        def __init__(self) -> None:
+        def __init__(self, status_provider=None) -> None:
             self._history = _get_input_history()
             self._session = PromptSession(history=self._history)
             self._completer = BuiltinCommandCompleter()
+            self._status_provider = status_provider  # 可选：提供 token 统计的回调
 
         def prompt(self) -> str:
             return self._session.prompt(
@@ -88,8 +89,20 @@ if PROMPT_TOOLKIT_IMPORT_ERROR is None:
             )
 
         def _build_bottom_toolbar(self):
+            lines = []
+            # 第一行：token 状态栏（固定在终端最底部）
+            if self._status_provider is not None:
+                try:
+                    status = self._status_provider()
+                    lines.append(status)
+                except Exception:
+                    pass
+            # 第二行：命令提醒
             user_input = self._session.default_buffer.text
-            return HTML(build_prompt_toolbar_markup(user_input))
+            cmd_hint = build_prompt_toolbar_markup(user_input)
+            if cmd_hint:
+                lines.append(cmd_hint)
+            return HTML("\n".join(lines))
 
 
 def build_prompt_toolbar_markup(user_input: str) -> str:

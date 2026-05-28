@@ -1406,7 +1406,17 @@ def prompt_chat_input() -> str:
             if PROMPT_TOOLKIT_IMPORT_ERROR is None:
                 try:
                     if _cli_prompt_session is None:
-                        _cli_prompt_session = CliPromptSession()
+                        # 状态栏回调：每次刷新时读取 renderer 的累计 token
+                        def status_provider():
+                            t = renderer._cumulative_input_tokens
+                            o = renderer._cumulative_output_tokens
+                            c = renderer._cumulative_cost
+                            return (
+                                f"累计 ↑{t} ↓{o} Σ{t+o} │ ¥{c:.4f}"
+                            )
+                        _cli_prompt_session = CliPromptSession(
+                            status_provider=status_provider,
+                        )
                     return _cli_prompt_session.prompt()
                 except Exception as exc:  # noqa: BLE001 - 终端兼容失败时需要自动降级
                     _prompt_toolkit_disabled = True
