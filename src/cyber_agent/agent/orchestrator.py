@@ -97,23 +97,28 @@ class MultiAgentOrchestrator:
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
-        """懒加载模型实例，自动检测 Anthropic/OpenAI API 格式。"""
+        """懒加载模型实例。对 DeepSeek Anthropic 端点强制使用 ChatOpenAI 格式，
+        因为 Anthropic 格式的 input_schema 可能不被 DeepSeek 正确解析，
+        导致工具调用时 input 始终为空。"""
         if self._llm is None:
             import warnings
-            llm_cls, is_anthropic = load_llm_for_api(self.base_url)
+            from .._lazy_imports import load_chat_openai
+
+            # 解析实际使用的基址：DeepSeek Anthropic 端点 → 切换到 OpenAI 格式
+            resolved_url = self.base_url or ""
+            if "api.deepseek.com/anthropic" in resolved_url:
+                resolved_url = "https://api.deepseek.com/v1"
+
             kwargs = settings.get_chat_openai_kwargs(
                 self.service_name,
                 model_name=self.model_name,
                 api_key=self.api_key,
-                base_url=self.base_url,
+                base_url=resolved_url,
             )
-            if is_anthropic:
-                kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
-                kwargs.pop("openai_api_key", None)
-            # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
+            # 始终使用 ChatOpenAI（OpenAI 工具调用格式），DeepSeek 同时支持两种
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*extra_body.*")
-                self._llm = llm_cls(**kwargs)
+                self._llm = load_chat_openai()(**kwargs)
         return self._llm
 
     def _emit(self, event_type: str, payload: Any) -> None:
