@@ -109,9 +109,12 @@ class MultiAgentOrchestrator:
             if "api.deepseek.com/anthropic" in resolved_url:
                 resolved_url = "https://api.deepseek.com/v1"
 
+            # DeepSeek /v1 端点不接受 [1m] 后缀，需去除
+            clean_model = self.model_name.replace("[1m]", "").strip()
+
             kwargs = settings.get_chat_openai_kwargs(
                 self.service_name,
-                model_name=self.model_name,
+                model_name=clean_model,
                 api_key=self.api_key,
                 base_url=resolved_url,
             )
