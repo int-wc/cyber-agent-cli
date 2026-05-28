@@ -5,7 +5,7 @@ from html import escape
 try:
     from prompt_toolkit import HTML, PromptSession
     from prompt_toolkit.completion import CompleteEvent, Completer, Completion
-    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.shortcuts.prompt import CompleteStyle
     from prompt_toolkit.styles import Style
 
@@ -52,11 +52,25 @@ if PROMPT_TOOLKIT_IMPORT_ERROR is None:
                 )
 
 
+    def _get_input_history() -> FileHistory | InMemoryHistory:
+        """获取持久化输入历史，存储在会话目录中跨启动保留。"""
+        try:
+            from pathlib import Path
+            from ..local_config import find_data_dir
+            history_dir = find_data_dir(".cyber-agent-cli-history")
+            history_dir.mkdir(parents=True, exist_ok=True)
+            history_path = history_dir / "input_history.txt"
+            return FileHistory(str(history_path))
+        except Exception:
+            return InMemoryHistory()
+
+
     class CliPromptSession:
         """封装 prompt_toolkit 交互，统一 CLI 的补全和命令提醒。"""
 
         def __init__(self) -> None:
-            self._session = PromptSession(history=InMemoryHistory())
+            self._history = _get_input_history()
+            self._session = PromptSession(history=self._history)
             self._completer = BuiltinCommandCompleter()
 
         def prompt(self) -> str:

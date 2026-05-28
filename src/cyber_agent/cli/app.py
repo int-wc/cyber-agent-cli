@@ -1366,6 +1366,12 @@ def run_chat_loop(
                 recent.pop(0)
 
             _try_persist(runner, runtime_context)
+        except KeyboardInterrupt:
+            # Ctrl+C 中断：保存现场后退出循环
+            _try_persist(runner, runtime_context)
+            _save_interrupt_checkpoint(runner, runtime_context)
+            renderer.print_info("\n任务已中断。使用 --resume 恢复。")
+            break
         except ExecutionInterruptedError as exc:
             _try_persist(runner, runtime_context)
             _save_interrupt_checkpoint(runner, runtime_context)
