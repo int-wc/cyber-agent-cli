@@ -432,23 +432,28 @@ class CliRenderer:
         self.print_renderable(content)
 
     def print_status_line(self, recent_inputs: list[str] | None = None) -> None:
-        """打印持续显示的 token/花费状态行 + 最近输入历史。"""
+        """打印固定在底部的 token/花费状态栏（每次输入输出后调用）。"""
+        self.ensure_response_stream_closed()
         t = self._cumulative_input_tokens
         o = self._cumulative_output_tokens
+        # 横线分隔 + token 统计
+        self.console.print(Rule(style="dim"))
         self.console.print(
-            f"  [dim]累计 ↑{t} ↓{o} Σ{t+o} │ ¥{self._cumulative_cost:.4f}[/dim]"
+            f"  [bold]累计 ↑{t} ↓{o} Σ{t+o} │ ¥{self._cumulative_cost:.4f}[/bold]",
+            end="",
         )
         if recent_inputs:
-            # 显示最近 5 条输入（截断到 40 字）
             previews = []
-            for inp in recent_inputs[-5:]:
+            for inp in recent_inputs[-3:]:
                 short = inp[:40].replace("\n", " ")
                 if len(inp) > 40:
                     short += "…"
                 previews.append(short)
             self.console.print(
-                f"  [dim]最近: {' → '.join(previews)}[/dim]"
+                f"  [dim]最近: {' → '.join(previews)}[/dim]",
             )
+        else:
+            self.console.print("")
 
     def print_error(self, content: str) -> None:
         """打印错误消息，支持 Markdown 渲染。"""

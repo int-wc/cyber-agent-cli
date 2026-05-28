@@ -1323,6 +1323,9 @@ def run_chat_loop(
         if builtin_result is False:
             break
         if builtin_result is True:
+            renderer.print_status_line(
+                runtime_context.get("_recent_inputs", [])
+            )
             continue
 
         # 注入待处理的文件内容到用户消息

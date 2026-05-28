@@ -129,17 +129,11 @@ def create_read_text_file_tool(allowed_roots: Sequence[Path]):
     normalized_roots = normalize_allowed_roots(allowed_roots)
 
     @tool("read_text_file")
-    def read_text_file(path: str = "", max_chars: int = MAX_FILE_READ_CHARS) -> str:
+    def read_text_file(path: str, max_chars: int = MAX_FILE_READ_CHARS) -> str:
         """
-        读取允许访问范围内的文本文件内容。path 为必填参数。
+        读取允许访问范围内的文本文件内容。path 参数必填。
         适合在回答代码或配置问题前先查看真实文件内容。
-        示例: read_text_file(path='/home/study/pwn2own/README.md')
         """
-        if not path.strip():
-            return (
-                "❌ 缺少必填参数 path。"
-                "请提供要读取的文件路径，例如：path='/home/study/pwn2own/README.md'"
-            )
         if max_chars <= 0:
             return "❌ max_chars 必须大于 0。"
 
@@ -175,19 +169,14 @@ def create_write_text_file_tool(allowed_roots: Sequence[Path]):
 
     @tool("write_text_file")
     def write_text_file(
-        path: str = "",
-        content: str = "",
+        path: str,
+        content: str,
         create_directories: bool = True,
     ) -> str:
         """
-        写入文本文件内容。path 和 content 为必填参数。
+        写入文本文件内容。path 和 content 参数必填。
         适合在明确知道目标文件最终内容时直接覆盖写入。
-        示例: write_text_file(path='/tmp/test.txt', content='hello')
         """
-        if not path.strip():
-            return "❌ 缺少必填参数 path。请提供目标文件路径。"
-        if not content:
-            return "❌ 缺少必填参数 content。请提供要写入的内容。"
         try:
             target_path = resolve_permitted_path(path, normalized_roots)
         except ValueError as exc:
@@ -213,17 +202,15 @@ def create_replace_in_file_tool(allowed_roots: Sequence[Path]):
 
     @tool("replace_in_file")
     def replace_in_file(
-        path: str = "",
-        old_text: str = "",
-        new_text: str = "",
+        path: str,
+        old_text: str,
+        new_text: str,
         replace_all: bool = False,
     ) -> str:
         """
-        在文本文件中替换指定片段。path、old_text、new_text 为必填参数。
+        在文本文件中替换指定片段。path、old_text、new_text 参数必填。
         适合对已有文件做小范围、可定位的精确修改。
         """
-        if not path.strip():
-            return "❌ 缺少必填参数 path。请提供目标文件路径。"
         if not old_text:
             return "❌ old_text 不能为空。"
 

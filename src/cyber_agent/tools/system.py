@@ -220,20 +220,14 @@ def create_run_shell_command_tool(
 
     @tool("run_shell_command")
     def run_shell_command(
-        command: str = "",
+        command: str,
         working_directory: str = ".",
         timeout_seconds: int = 60,
     ) -> str:
         """
-        在受限工作目录内执行 shell 命令。command 为必填参数。
+        在受限工作目录内执行 shell 命令。command 参数必填。
         适合运行测试、构建命令、代码格式化或外部程序。
-        示例: run_shell_command(command='ls -la /home/study/pwn2own')
         """
-        if not command.strip():
-            return (
-                "❌ 缺少必填参数 command。"
-                "请提供要执行的命令，例如：command='ls -la /home/study/pwn2own'"
-            )
         try:
             resolved_working_directory = resolve_permitted_path(
                 working_directory,

@@ -542,16 +542,18 @@ class MultiAgentOrchestrator:
                 tool_call_id=tool_call_id,
             )
         except Exception as exc:
-            # 提取工具的必填参数信息，帮助 LLM 修正下一次调用
-            error_msg = str(exc)
+            error_str = str(exc)
             required_hint = self._build_tool_required_hint(tool_name)
-            if required_hint and "Field required" in error_msg:
-                error_msg = (
-                    f"参数缺失——调用 {tool_name} 必须提供：{required_hint}。"
-                    f"请用正确的参数重新调用。原始错误：{exc}"
+            if required_hint and ("Field required" in error_str or "validation error" in error_str):
+                # 构建具体重试指令：包含工具名和必填参数的具体示例值
+                example = self._build_tool_call_example(tool_name)
+                error_str = (
+                    f"调用失败：缺少必填参数 ({required_hint})。\n"
+                    f"正确调用示例：{example}\n"
+                    f"请立即用正确的参数重新调用此工具。"
                 )
             return ToolMessage(
-                content=f"❌ {error_msg}",
+                content=f"❌ {tool_name}: {error_str}",
                 name=tool_name,
                 tool_call_id=tool_call_id,
             )
@@ -577,6 +579,21 @@ class MultiAgentOrchestrator:
         except Exception:
             return ""
 
+    def _build_tool_call_example(self, tool_name: str) -> str:
+        """为工具生成带具体参数值的调用示例。"""
+        examples: dict[str, str] = {
+            "run_shell_command": 'run_shell_command(command="ls -la")',
+            "read_text_file": 'read_text_file(path="/path/to/file")',
+            "write_text_file": 'write_text_file(path="/path/to/file", content="内容")',
+            "list_directory": 'list_directory(path="/path/to/dir")',
+            "search_web": 'search_web(query="搜索关键词")',
+            "web_fetch": 'web_fetch(url="https://example.com")',
+            "replace_in_file": 'replace_in_file(path="/path/to/file", old_text="旧", new_text="新")',
+            "scan_port": 'scan_port(host="127.0.0.1", port=80)',
+            "create_generated_capability": 'create_generated_capability(name="tool_name", kind="tool", description="描述")',
+        }
+        return examples.get(tool_name, f'{tool_name}(...) 请查看工具描述中的参数说明')
+
     @staticmethod
     def _normalize_tool_args(tool_name: str, raw_args: Any) -> dict[str, Any]:
         """将 LLM 返回的工具参数规范化为 dict，兼容 JSON 字符串格式。"""
@@ -597,50 +614,30 @@ class MultiAgentOrchestrator:
         raise ValueError(f"工具 {tool_name} 的参数格式无效，必须为对象或 JSON 字符串。")
 
     def _build_role_system_prompt(self, task: AgentTask) -> str:
-        """构建角色专属系统提示词，注入任务上下文、系统环境和可用工具信息。"""
+        """构建角色专属系统提示词。"""
         role_label = get_role_label(task.role)
         system_context = self._build_system_context()
 
-        # 构建带参数说明的工具描述，标记必填参数
-        tool_lines: list[str] = []
-        for tool in self.tools[:20]:
-            name = tool.name
-            desc = tool.description[:120].strip()
-            args_info = ""
-            try:
-                schema = getattr(tool, "args_schema", None)
-                if schema is not None:
-                    fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None)
-                    if fields:
-                        params = []
-                        for fname, finfo in fields.items():
-                            is_required = finfo.is_required()
-                            ftype = getattr(finfo, "annotation", None)
-                            type_name = getattr(ftype, "__name__", str(ftype)) if ftype else "str"
-                            if is_required:
-                                params.append(f"【必填】{fname}: {type_name}")
-                            else:
-                                params.append(f"{fname}: {type_name} (可选)")
-                        args_info = f"  参数: {', '.join(params)}"
-            except Exception:
-                pass
-            tool_lines.append(f"- {name}: {desc}{args_info}")
-        tool_descriptions = "\n".join(tool_lines) if tool_lines else "无额外工具"
+        # 工具调用速查表
+        cheat_sheet_lines = []
+        for tool in self.tools[:10]:
+            example = self._build_tool_call_example(tool.name)
+            cheat_sheet_lines.append(f"  {example}")
+        cheat_sheet = "\n".join(cheat_sheet_lines) if cheat_sheet_lines else "无"
 
-        # 工具调用模式：用简短强制的提示词替代角色长描述，避免 LLM 陷入"分析但不行动"
-        return f"""你是 {role_label}。你的唯一工作方式就是**调用工具**——不能只输出文字。
+        return f"""你是 {role_label}。唯一工作方式：调用工具。不允许只输出文字。
 
-## 可用工具
-{tool_descriptions}
+## 工具调用示例
+{cheat_sheet}
 
 ## 系统环境
 {system_context}
 
 ## 规则
-1. 第一条回复就必须包含工具调用，不允许先说"让我试试"
-2. 收到工具结果后立即分析并输出摘要
-3. 用中文回复，先给结论再给细节
-4. 工具调用失败时说明错误并尝试替代"""
+1. 第一条回复必须包含工具调用，不允许先说"让我试试"或"让我探索"
+2. 调用工具时必须提供【必填】参数，参考上面的示例格式
+3. 收到工具结果后立即用中文总结
+4. 工具调用失败时根据错误提示修正参数后立即重试"""
 
     def _build_role_user_message(self, task: AgentTask) -> str:
         """构建角色 Agent 的用户消息。"""
