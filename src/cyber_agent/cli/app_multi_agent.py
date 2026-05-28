@@ -29,20 +29,22 @@ def _build_user_interaction_handler(runtime_context: dict[str, object]):
         reasoning = plan.get("reasoning", "")
 
         # 展示决策者分析结果
-        renderer.print_info(f"\n[bold cyan]决策者分析:[/] {reasoning[:300]}")
+        renderer.console.print()
+        renderer.console.print(
+            f"  [bold cyan]决策者分析:[/] [dim]{reasoning[:300]}[/]"
+        )
 
         options = []
         for i, task in enumerate(subtasks):
             role = task.get("role", "?")
-            desc = task.get("task_description", "")[:120]
+            desc = task.get("task_description", "")
             options.append(SelectableOption(
                 key=f"{role}_{i}",
                 label=f"[{role}] {desc}",
-                description=f"角色: {role}",
                 metadata={"index": i, "role": role},
             ))
 
-        # 展示交互式多选菜单
+        # 展示交互式菜单
         result = present_multi_select_menu(
             options,
             title="选择要执行的子任务",
