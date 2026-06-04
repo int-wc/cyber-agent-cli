@@ -364,6 +364,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             ):
                 self._run_multi_agent_turn(user_input)
                 persist_runtime_session(self.runner, self.runtime_context)
+                self.call_from_thread(self._finish_request)
                 return
 
             try:
@@ -390,6 +391,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 )
             finally:
                 persist_runtime_session(self.runner, self.runtime_context)
+                self.call_from_thread(self._finish_request)
 
         def _run_multi_agent_turn(self, user_input: str) -> None:
             """TUI 中执行多 Agent 协作任务，带进度显示。"""

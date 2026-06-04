@@ -1301,10 +1301,7 @@ def run_chat_loop(
 
     while True:
         try:
-            # 每次输入前显示累计 token / 花费状态 + 最近输入
-            renderer.print_status_line(
-                runtime_context.get("_recent_inputs", [])
-            )
+            # 状态栏已由 prompt_toolkit bottom_toolbar 承载，不再单独 print
             user_input = prompt_chat_input().strip()
         except (Abort, EOFError, KeyboardInterrupt):
             renderer.print_info("\n👋 再见！")
@@ -1323,9 +1320,6 @@ def run_chat_loop(
         if builtin_result is False:
             break
         if builtin_result is True:
-            renderer.print_status_line(
-                runtime_context.get("_recent_inputs", [])
-            )
             continue
 
         # 注入待处理的文件内容到用户消息

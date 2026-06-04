@@ -86,6 +86,7 @@ if PROMPT_TOOLKIT_IMPORT_ERROR is None:
                 reserve_space_for_menu=6,
                 style=PROMPT_STYLE,
                 bottom_toolbar=self._build_bottom_toolbar,
+                rprompt=self._build_rprompt,
             )
 
         def _build_bottom_toolbar(self):
@@ -103,6 +104,19 @@ if PROMPT_TOOLKIT_IMPORT_ERROR is None:
             if cmd_hint:
                 lines.append(cmd_hint)
             return HTML("\n".join(lines))
+
+        def _build_rprompt(self):
+            """右侧提示：多行输入时显示行数和列数。"""
+            text = self._session.default_buffer.text
+            line_count = text.count("\n") + 1
+            if line_count > 1:
+                col = len(text.split("\n")[-1]) + 1
+                return HTML(
+                    f'<style fg="{TEXT_MUTED}" bg="{SURFACE_BG}">'
+                    f"行:{line_count} 列:{col}"
+                    f"</style>"
+                )
+            return HTML("")
 
 
 def build_prompt_toolbar_markup(user_input: str) -> str:
