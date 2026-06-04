@@ -33,10 +33,11 @@ if TYPE_CHECKING:
     from .runner import AgentRunner
 
 # ── 超时与熔断常量 ──
-SUBTASK_TIMEOUT_SECONDS = 180        # 单子任务超时（秒）
+BASE_SUBTASK_TIMEOUT = 180           # 子任务基础超时（秒）
+TIMEOUT_ESCALATION_STEP = 60         # 每次超时叠加步长（秒）
+MAX_TIMEOUT_ESCALATIONS = 5          # 最多叠加次数 → 最大 180+5×60=480s
 LLM_CALL_TIMEOUT_SECONDS = 120       # 单次角色 LLM 调用超时（秒）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
-PIPELINE_TOTAL_TIMEOUT_SECONDS = 600   # 管线总时限（秒）
 
 
 class PipelineCircuitBreakerError(RuntimeError):
@@ -64,7 +65,6 @@ class FourPillarPipeline:
 
         # 熔断器状态
         self._consecutive_failures = 0
-        self._pipeline_start_time = 0.0  # 管线启动时间戳
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -141,15 +141,6 @@ class FourPillarPipeline:
             return f"[{label} 调用失败: {exc}]"
 
     # ── 超时与熔断 ──
-    def _check_pipeline_timeout(self) -> None:
-        """检查管线总时限，超时则抛出异常。"""
-        elapsed = time_mod.monotonic() - self._pipeline_start_time
-        if elapsed > PIPELINE_TOTAL_TIMEOUT_SECONDS:
-            raise TimeoutError(
-                f"管线总时限已到（{PIPELINE_TOTAL_TIMEOUT_SECONDS}s），"
-                f"已运行 {elapsed:.0f}s"
-            )
-
     def _check_circuit_breaker(self) -> None:
         """检查熔断器：连续失败超过阈值则抛出异常。"""
         if self._consecutive_failures >= CIRCUIT_BREAKER_CONSECUTIVE_FAILS:
@@ -157,6 +148,72 @@ class FourPillarPipeline:
                 f"连续 {self._consecutive_failures} 个子任务失败，触发熔断保护。"
                 f"请检查任务是否合理或简化需求后重试。"
             )
+
+    def _run_subtask_with_escalating_timeout(
+        self,
+        subtask_prompt: str,
+        role_label: str,
+        desc: str,
+    ) -> str:
+        """带动态叠加超时的子任务执行。
+
+        基础超时 180s，每次超时叠加 60s，最多叠加 5 次（最大 480s）。
+        达到最大叠加次数仍未完成时，告知调用方需要重规划。
+        """
+        controller = getattr(self._runner, "execution_controller", None)
+        renderer = self._renderer
+
+        if controller is None:
+            return self._runner.run(subtask_prompt, verbose=False, event_handler=None)
+
+        for escalation in range(MAX_TIMEOUT_ESCALATIONS + 1):
+            timeout = BASE_SUBTASK_TIMEOUT + escalation * TIMEOUT_ESCALATION_STEP
+            if escalation > 0:
+                renderer.console.print(
+                    f"    [dim yellow]↻ 第 {escalation} 次超时叠加，"
+                    f"新超时={timeout}s，重试同一子任务...[/]"
+                )
+
+            timer_fired = threading.Event()
+
+            def _timeout_handler():
+                timer_fired.set()
+                controller.request_stop(f"子任务超时（{timeout}s）")
+
+            timer = threading.Timer(timeout, _timeout_handler)
+            timer.daemon = True
+            timer.start()
+
+            try:
+                result = self._runner.run(
+                    subtask_prompt,
+                    verbose=False,
+                    event_handler=None,
+                )
+                if escalation > 0:
+                    renderer.console.print(
+                        f"    [green]✓ 叠加重试成功[/]"
+                    )
+                return result
+            except ExecutionInterruptedError:
+                if timer_fired.is_set():
+                    # 超时导致的中断 → 判断是否还能叠加
+                    if escalation < MAX_TIMEOUT_ESCALATIONS:
+                        continue  # 下一轮叠加
+                    raise TimeoutError(
+                        f"子任务已达最大超时叠加（{timeout}s={BASE_SUBTASK_TIMEOUT}"
+                        f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s），"
+                        f"需重新规划此子任务。"
+                    )
+                raise  # 用户主动 /stop → 向上抛出
+            finally:
+                timer.cancel()
+
+        # 不应到达这里，但保留兜底
+        raise TimeoutError(
+            f"子任务超过最大超时叠加次数（{MAX_TIMEOUT_ESCALATIONS}），"
+            f"已放弃执行。"
+        )
 
     def _call_role_with_timeout(
         self,
@@ -167,7 +224,7 @@ class FourPillarPipeline:
         extra_instruction: str = "",
         timeout: float = LLM_CALL_TIMEOUT_SECONDS,
     ) -> str:
-        """带超时的角色 LLM 调用。在线程池中执行，超时则取消。"""
+        """带超时的角色 LLM 调用。在线程池中执行，超时则返回错误标记。"""
         renderer = self._renderer
 
         def _invoke():
@@ -193,50 +250,6 @@ class FourPillarPipeline:
                 f"  [red]✗ {label} 异常[/] [dim]({exc})[/]"
             )
             return f"[{label} 异常: {exc}]"
-
-    def _run_subtask_with_timeout(
-        self,
-        subtask_prompt: str,
-        role_label: str,
-        timeout: float = SUBTASK_TIMEOUT_SECONDS,
-    ) -> str:
-        """带超时的子任务执行。通过 ExecutionController 安全中断。
-
-        后台定时器在超时后调用 execution_controller.request_stop()，
-        runner.run() 在关键边界检测 cancel 事件并抛出 ExecutionInterruptedError。
-        """
-        controller = getattr(self._runner, "execution_controller", None)
-        renderer = self._renderer
-
-        if controller is None:
-            # 无控制器：直接调用，无超时保护
-            return self._runner.run(subtask_prompt, verbose=False, event_handler=None)
-
-        timer_fired = threading.Event()
-
-        def _timeout_handler():
-            timer_fired.set()
-            controller.request_stop(f"子任务超时（{timeout}s）")
-
-        timer = threading.Timer(timeout, _timeout_handler)
-        timer.daemon = True
-        timer.start()
-
-        try:
-            result = self._runner.run(
-                subtask_prompt,
-                verbose=False,
-                event_handler=None,
-            )
-            return result
-        except ExecutionInterruptedError:
-            if timer_fired.is_set():
-                raise TimeoutError(
-                    f"子任务执行超时（{timeout}s），已自动中断。"
-                )
-            raise
-        finally:
-            timer.cancel()
 
     def _track_llm_usage(self, response: Any) -> None:
         """从 LLM 响应中提取并累计 token 使用量。"""
@@ -307,15 +320,14 @@ class FourPillarPipeline:
     def run(self, user_input: str, auto_decision: bool = False) -> None:
         """执行完整的四柱管线。"""
         renderer = self._renderer
-        self._pipeline_start_time = time_mod.monotonic()
         self._consecutive_failures = 0
 
         try:
             self._run_phases(user_input, auto_decision)
-        except (TimeoutError, PipelineCircuitBreakerError) as exc:
+        except PipelineCircuitBreakerError as exc:
             renderer.console.print()
             renderer.console.print(
-                f"  [bold red]⛔ 管线中止: {exc}[/]"
+                f"  [bold red]⛔ 熔断中止: {exc}[/]"
             )
         finally:
             # 同步 token 到 renderer
@@ -335,7 +347,6 @@ class FourPillarPipeline:
 
         # 1. 分析者（底）
         renderer.console.print("  [dim]⏳ 分析者 正在深度分析...[/]")
-        self._check_pipeline_timeout()
         t0 = time_mod.monotonic()
         analysis = self._call_role_with_timeout(AgentRole.ANALYST, user_input)
         renderer.console.print(
@@ -346,7 +357,6 @@ class FourPillarPipeline:
         )
 
         # 2. 扩散者（路）
-        self._check_pipeline_timeout()
         renderer.console.print("  [dim]⏳ 扩散者 正在探索路径...[/]")
         t0 = time_mod.monotonic()
         diffusion = self._call_role_with_timeout(
@@ -358,7 +368,6 @@ class FourPillarPipeline:
         )
 
         # 3. 迁跃者（辅）
-        self._check_pipeline_timeout()
         renderer.console.print("  [dim]⏳ 迁跃者 正在创造性跨越...[/]")
         t0 = time_mod.monotonic()
         jump = self._call_role_with_timeout(
@@ -370,7 +379,6 @@ class FourPillarPipeline:
         )
 
         # 4. 反思者（主）—— 综合审视 + 制定执行计划
-        self._check_pipeline_timeout()
         renderer.console.print("  [dim]⏳ 反思者 正在综合审视...[/]")
         t0 = time_mod.monotonic()
         reflection = self._call_role_with_timeout(
@@ -401,8 +409,6 @@ class FourPillarPipeline:
         iteration = 0  # 在循环外声明，供 Phase 3 引用
 
         for iteration in range(1, max_iterations + 1):
-            self._check_pipeline_timeout()
-
             renderer.console.print()
             renderer.console.print(
                 f"[bold magenta]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
@@ -452,11 +458,13 @@ class FourPillarPipeline:
                 f"  [dim]已选择 {len(selected_indices)}/{len(subtasks)} 个子任务[/]"
             )
 
-            # 7. 顺序执行子任务（带超时和熔断）
+            # 7. 顺序执行子任务（动态叠加超时 + 熔断 + 超时重规划）
             renderer.console.print()
             renderer.console.print(
                 f"[bold yellow]🔧 执行 {len(selected_indices)} 个子任务[/]"
-                f" [dim](超时={SUBTASK_TIMEOUT_SECONDS}s, 熔断阈值={CIRCUIT_BREAKER_CONSECUTIVE_FAILS})[/]"
+                f" [dim](超时={BASE_SUBTASK_TIMEOUT}s"
+                f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s,"
+                f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS})[/]"
             )
 
             round_results: list[str] = []
@@ -466,8 +474,7 @@ class FourPillarPipeline:
                 if idx >= len(subtasks):
                     continue
 
-                # 每轮子任务前检查总管线和熔断器
-                self._check_pipeline_timeout()
+                # 每轮子任务前检查熔断器
                 try:
                     self._check_circuit_breaker()
                 except PipelineCircuitBreakerError as exc:
@@ -489,20 +496,20 @@ class FourPillarPipeline:
                 )
                 start = time_mod.monotonic()
 
-                try:
-                    subtask_prompt = (
-                        f"你是{get_role_label(self._str_to_role(role_str))}。"
-                        f"请完成以下子任务，只做这一件事，完成后给出结果摘要。\n\n"
-                        f"子任务: {desc}\n"
-                    )
-                    if ctx:
-                        subtask_prompt += f"\n上下文: {ctx}\n"
-                    if reasoning:
-                        subtask_prompt += f"\n整体背景: {reasoning[:300]}\n"
-                    subtask_prompt += "\n请直接调用工具完成此子任务，给出核心结果。"
+                subtask_prompt = (
+                    f"你是{get_role_label(self._str_to_role(role_str))}。"
+                    f"请完成以下子任务，只做这一件事，完成后给出结果摘要。\n\n"
+                    f"子任务: {desc}\n"
+                )
+                if ctx:
+                    subtask_prompt += f"\n上下文: {ctx}\n"
+                if reasoning:
+                    subtask_prompt += f"\n整体背景: {reasoning[:300]}\n"
+                subtask_prompt += "\n请直接调用工具完成此子任务，给出核心结果。"
 
-                    result = self._run_subtask_with_timeout(
-                        subtask_prompt, get_role_label(self._str_to_role(role_str)),
+                try:
+                    result = self._run_subtask_with_escalating_timeout(
+                        subtask_prompt, get_role_label(self._str_to_role(role_str)), desc,
                     )
                     elapsed = (time_mod.monotonic() - start) * 1000
                     renderer.console.print(
@@ -511,18 +518,51 @@ class FourPillarPipeline:
                     round_results.append(
                         f"## [{role_str}] {desc}\n{result}"
                     )
-                    # 成功 → 重置熔断计数器
                     self._consecutive_failures = 0
 
                 except TimeoutError as exc:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     self._consecutive_failures += 1
                     renderer.console.print(
-                        f"  [red]⏰ 超时[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
+                        f"  [red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
                     )
-                    round_results.append(
-                        f"## [{role_str}] {desc}\n❌ 超时: {exc}"
+                    # 重规划：让决策者将此子任务拆分为更小粒度的子任务
+                    replanned = self._replan_single_task(
+                        desc, exc, user_input, reasoning,
                     )
+                    if replanned:
+                        renderer.console.print(
+                            f"  [dim yellow]↻ 已重规划为 {len(replanned)} 个更小粒度的子任务，尝试执行...[/]"
+                        )
+                        for rt in replanned:
+                            rstart = time_mod.monotonic()
+                            try:
+                                rt_result = self._run_subtask_with_escalating_timeout(
+                                    rt["prompt"], rt["label"], rt["desc"],
+                                )
+                                r_elapsed = (time_mod.monotonic() - rstart) * 1000
+                                renderer.console.print(
+                                    f"    [green]✓ 重规划子任务完成[/] [dim]({r_elapsed:.0f}ms)[/]"
+                                )
+                                round_results.append(
+                                    f"## [重规划] {rt['desc']}\n{rt_result}"
+                                )
+                                self._consecutive_failures = 0
+                            except (TimeoutError, Exception) as r_exc:
+                                self._consecutive_failures += 1
+                                renderer.console.print(
+                                    f"    [red]✗ 重规划子任务失败[/]: {r_exc}"
+                                )
+                                round_results.append(
+                                    f"## [重规划] {rt['desc']}\n❌ 失败: {r_exc}"
+                                )
+                    else:
+                        renderer.console.print(
+                            f"  [dim]重规划失败，记录原始错误。[/]"
+                        )
+                        round_results.append(
+                            f"## [{role_str}] {desc}\n❌ 全部超时叠加后重规划也失败: {exc}"
+                        )
 
                 except Exception as exc:
                     elapsed = (time_mod.monotonic() - start) * 1000
@@ -536,12 +576,10 @@ class FourPillarPipeline:
 
             all_results.extend(round_results)
 
-            # 熔断退出
             if circuit_broken:
                 break
 
             # 8. 审计者验证
-            self._check_pipeline_timeout()
             renderer.console.print("  [dim]⏳ 审计者 正在验证结果...[/]")
             check = self._call_role_with_timeout(
                 AgentRole.CHECKER, user_input,
@@ -556,7 +594,6 @@ class FourPillarPipeline:
 
             # 9. 反思者审视 → 决定是否继续迭代
             if iteration < max_iterations:
-                self._check_pipeline_timeout()
                 renderer.console.print("  [dim]⏳ 反思者 正在审视是否需要迭代...[/]")
                 reflection = self._call_role_with_timeout(
                     AgentRole.REFLECTOR, user_input,
@@ -587,7 +624,6 @@ class FourPillarPipeline:
                 )
 
         # ── Phase 3: 聚合输出 ──
-        self._check_pipeline_timeout()
         renderer.console.print()
         renderer.console.print("[bold cyan]📊 四柱管线执行完成[/]")
 
@@ -600,6 +636,60 @@ class FourPillarPipeline:
                 f"{aggregated}"
             )
             renderer.print_markdown(summary)
+
+    # ── 重规划超时子任务 ──
+    def _replan_single_task(
+        self,
+        original_desc: str,
+        timeout_exc: TimeoutError,
+        user_input: str,
+        reasoning: str,
+    ) -> list[dict] | None:
+        """对超时子任务进行重规划，拆分为更小粒度的子任务。
+
+        让决策者分析失败原因并输出 JSON 格式的更小任务列表。
+        """
+        renderer = self._renderer
+        replan_context = (
+            f"## 原始用户任务\n{user_input}\n\n"
+            f"## 整体计划\n{reasoning[:500]}\n\n"
+            f"## 超时的子任务\n{original_desc}\n\n"
+            f"## 超时信息\n{timeout_exc}\n"
+        )
+
+        decision = self._call_role_with_timeout(
+            AgentRole.DECISION_MAKER, "",
+            context=replan_context,
+            extra_instruction=(
+                "以上子任务因超时未能完成。请将其拆分为 2-3 个更小粒度的子任务，"
+                "每个小任务应该更聚焦、更容易在短时间内完成。"
+                "\n\n输出必须是 JSON："
+                '{"reasoning": "...", "subtasks": ['
+                '{"role": "runner", "task_description": "..."}, '
+                '{"role": "reader", "task_description": "..."}]}'
+            ),
+        )
+        parsed = self._parse_json(decision)
+        raw_tasks = parsed.get("subtasks", [])
+        if not raw_tasks:
+            return None
+
+        result: list[dict] = []
+        for t in raw_tasks:
+            desc = t.get("task_description", str(t))
+            role = t.get("role", "runner")
+            result.append({
+                "desc": desc,
+                "prompt": (
+                    f"你是{get_role_label(self._str_to_role(role))}。"
+                    f"这是拆分后的小任务，请只做这一件事，完成后给出结果摘要。\n\n"
+                    f"子任务: {desc}\n"
+                    f"\n整体背景: {reasoning[:300]}\n"
+                    f"\n请直接调用工具完成此子任务，给出核心结果。"
+                ),
+                "label": get_role_label(self._str_to_role(role)),
+            })
+        return result
 
     # ── 子任务选择 ──
     def _auto_select(
@@ -616,7 +706,6 @@ class FourPillarPipeline:
             for i, t in enumerate(subtasks)
         )
 
-        self._check_pipeline_timeout()
         decision = self._call_role_with_timeout(
             AgentRole.THINKER, "",
             context=f"## 决策者分析\n{reasoning[:500]}\n\n## 子任务\n{tasks_text}",
