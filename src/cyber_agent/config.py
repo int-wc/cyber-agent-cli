@@ -7,7 +7,7 @@ DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 # 服务商默认模型。可通过 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖。
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
-    "deepseek": "deepseek-v4-pro[1m]",
+    "deepseek": "deepseek-v4-flash",
     "mimo": "mimo-v2.5-pro",
     "claude": "claude-opus-4-6"
 }
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_API_KEY",
     )
     gateway_default_model: str = Field(
-        default="deepseek-v4-pro[1m]",
+        default="deepseek-v4-flash",
         validation_alias="GATEWAY_DEFAULT_MODEL",
     )
     gateway_base_url: str | None = Field(
