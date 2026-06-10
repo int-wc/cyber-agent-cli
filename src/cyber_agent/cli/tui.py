@@ -352,10 +352,25 @@ if TEXTUAL_IMPORT_ERROR is None:
             padding: 0 1;
         }}
 
+        #composer-top-bar {{
+            layout: horizontal;
+            height: auto;
+            width: 100%;
+            margin: 0 0 1 0;
+        }}
+
         #composer-title {{
             color: {TEXT_MUTED};
             height: auto;
-            margin: 0 0 1 0;
+            width: 1fr;
+        }}
+
+        #token-status {{
+            color: {TEXT_MUTED};
+            height: auto;
+            width: auto;
+            text-align: right;
+            padding: 0 1;
         }}
 
         #chat-input {{
@@ -375,15 +390,6 @@ if TEXTUAL_IMPORT_ERROR is None:
             max-height: 4;
             overflow-y: auto;
             margin: 1 0 0 0;
-        }}
-
-        #token-status {{
-            color: {TEXT_MUTED};
-            height: 1;
-            margin: 0;
-            padding: 0 2;
-            background: {SURFACE_BG};
-            border-top: solid #334155;
         }}
 
         ChatMessage {{
@@ -453,10 +459,11 @@ if TEXTUAL_IMPORT_ERROR is None:
         def compose(self) -> ComposeResult:
             yield ScrollableContainer(id="chat-view")
             with Container(id="composer"):
-                yield Static(self._build_composer_title(), id="composer-title")
+                with Container(id="composer-top-bar"):
+                    yield Static(self._build_composer_title(), id="composer-title")
+                    yield Static(id="token-status")
                 yield self._build_input_widget()
                 yield Static(id="command-hint")
-            yield Static(id="token-status")
             with Container(id="startup-view"):
                 yield Static(id="startup-panel")
 
