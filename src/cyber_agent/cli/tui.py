@@ -228,12 +228,13 @@ if TEXTUAL_IMPORT_ERROR is None:
                         f"📄 消息详情 — {self._message.role}",
                         id="detail-title",
                     )
+                    yield Static("Ctrl+Shift+C 复制选中 · Ctrl+Y 全部复制", id="detail-hint")
                     yield Button("✕ 关闭", id="title-close", variant="warning")
                 text_area = TextArea(content, id="detail-content")
                 text_area.read_only = True
                 yield text_area
                 yield Static(
-                    "Esc 关闭 · Ctrl+Shift+C 复制选中 · Ctrl+Y 全部复制 · 拖拽选中",
+                    "Esc 关闭 · 鼠标拖拽选中",
                     id="detail-footer",
                 )
 
@@ -256,12 +257,20 @@ if TEXTUAL_IMPORT_ERROR is None:
             width: 100%;
         }}
         #detail-title {{
-            width: 1fr;
+            width: auto;
             height: 100%;
             padding: 0 1;
             color: #14b8a6;
             text-style: bold;
             content-align: left middle;
+        }}
+        #detail-hint {{
+            width: 1fr;
+            height: 100%;
+            padding: 0 1;
+            color: $secondary;
+            text-style: italic;
+            content-align: center middle;
         }}
         #title-close {{
             width: auto;
