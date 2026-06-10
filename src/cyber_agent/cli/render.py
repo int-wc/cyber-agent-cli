@@ -179,20 +179,9 @@ class CliRenderer:
             self._model_name,
         )
 
-        # 本轮花费
+        # 本轮花费（仅保留计算，底部工具栏已展示累计统计，不再重复打印）
         round_input = self._cumulative_input_tokens - self._turn_baseline_input
         round_output = self._cumulative_output_tokens - self._turn_baseline_output
-        round_cost = _estimate_cost(round_input, round_output, self._model_name)
-
-        self.console.print(
-            f"  [dim]本轮 ↑{round_input} ↓{round_output}"
-            f" ∑{round_input + round_output}"
-            f"  │  ¥{round_cost:.4f}"
-            f"  │  累计 ↑{self._cumulative_input_tokens}"
-            f" ↓{self._cumulative_output_tokens}"
-            f" ∑{self._cumulative_input_tokens + self._cumulative_output_tokens}"
-            f"  │  ¥{self._cumulative_cost:.4f}[/dim]"
-        )
 
     def _build_token_status_line(self) -> Text:
         """构建实时 token 状态行。"""
@@ -387,6 +376,8 @@ class CliRenderer:
 
     def end_response_stream(self, content: str, has_tool_calls: bool) -> None:
         """结束一轮流式输出，以 Markdown 渲染最终回复。"""
+        # 停止实时 Live 计数器，防止残留行或重复 Live 实例
+        self._stop_live()
         if self._streaming_response_started:
             if self._streaming_prefix_printed:
                 # 替换"接收中..."为换行，然后渲染完整 Markdown
