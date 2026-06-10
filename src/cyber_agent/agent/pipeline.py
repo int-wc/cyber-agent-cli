@@ -202,7 +202,7 @@ class FourPillarPipeline:
                 )
                 if escalation > 0:
                     renderer.console.print(
-                        f"    [green]✓ 叠加重试成功[/]"
+                        f"    [dim green]✓ 叠加重试成功[/]"
                     )
                 return result
             except ExecutionInterruptedError:
@@ -352,7 +352,7 @@ class FourPillarPipeline:
 
         # ── Phase 1: 四柱思考 ──
         renderer.console.print()
-        renderer.console.print("[bold cyan]🧠 四柱思考阶段[/]")
+        renderer.console.print("[dim bold]🧠 四柱思考阶段[/]")
         renderer.console.print("[dim]分析为底 → 扩展为路 → 迁跃为辅 → 反思为主[/]")
 
         # 1. 分析者（底）
@@ -360,7 +360,7 @@ class FourPillarPipeline:
         t0 = time_mod.monotonic()
         analysis = self._call_role_with_timeout(AgentRole.ANALYST, user_input)
         renderer.console.print(
-            f"  [green]✓ 分析者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
+            f"  [dim green]✓ 分析者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
         )
         renderer.console.print(
             f"  [dim]{analysis[:200].replace(chr(10), ' ')}...[/]"
@@ -374,7 +374,7 @@ class FourPillarPipeline:
             context=f"## 分析结论\n{analysis}",
         )
         renderer.console.print(
-            f"  [green]✓ 扩散者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
+            f"  [dim green]✓ 扩散者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
         )
 
         # 3. 迁跃者（辅）
@@ -385,7 +385,7 @@ class FourPillarPipeline:
             context=f"## 分析者\n{analysis}\n\n## 扩散者\n{diffusion}",
         )
         renderer.console.print(
-            f"  [green]✓ 迁跃者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
+            f"  [dim green]✓ 迁跃者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
         )
 
         # 4. 反思者（主）—— 综合审视 + 制定执行计划
@@ -405,13 +405,15 @@ class FourPillarPipeline:
         )
         elapsed = (time_mod.monotonic() - t0) * 1000
         renderer.console.print(
-            f"  [green]✓ 反思者 完成[/] [dim]({elapsed:.0f}ms)[/]"
+            f"  [dim green]✓ 反思者 完成[/] [dim]({elapsed:.0f}ms)[/]"
         )
 
-        # 展示反思者输出
+        # 展示反思者输出（摘要形式）
         renderer.console.print()
-        renderer.console.print("[bold yellow]📋 反思者审视结论[/]")
-        renderer.print_markdown(reflection[:1500])
+        renderer.console.print("[dim bold]📋 反思者审视结论（摘要）[/]")
+        renderer.console.print(
+            f"  [dim]{reflection[:500].replace(chr(10), ' ')}...[/]"
+        )
 
         # ── Phase 2: 执行循环（反思闭环）──
         max_iterations = 3
@@ -421,7 +423,7 @@ class FourPillarPipeline:
         for iteration in range(1, max_iterations + 1):
             renderer.console.print()
             renderer.console.print(
-                f"[bold magenta]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
+                f"[dim bold]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
             )
 
             # 5. 决策者 → 分解子任务
@@ -444,7 +446,7 @@ class FourPillarPipeline:
                 break
 
             renderer.console.print(
-                f"  [green]✓ 决策者 分解出 {len(subtasks)} 个子任务[/]"
+                f"  [dim green]✓ 决策者 分解出 {len(subtasks)} 个子任务[/]"
             )
 
             # 6. 选择子任务
@@ -471,7 +473,7 @@ class FourPillarPipeline:
             # 7. 顺序执行子任务（动态叠加超时 + 熔断 + 超时重规划）
             renderer.console.print()
             renderer.console.print(
-                f"[bold yellow]🔧 执行 {len(selected_indices)} 个子任务[/]"
+                f"[dim bold]🔧 执行 {len(selected_indices)} 个子任务[/]"
                 f" [dim](超时={BASE_SUBTASK_TIMEOUT}s"
                 f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s,"
                 f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS})[/]"
@@ -523,7 +525,7 @@ class FourPillarPipeline:
                     )
                     elapsed = (time_mod.monotonic() - start) * 1000
                     renderer.console.print(
-                        f"  [green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
+                        f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
                     )
                     round_results.append(
                         f"## [{role_str}] {desc}\n{result}"
@@ -534,7 +536,7 @@ class FourPillarPipeline:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     self._consecutive_failures += 1
                     renderer.console.print(
-                        f"  [red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
+                        f"  [dim red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
                     )
                     # 重规划：让决策者将此子任务拆分为更小粒度的子任务
                     replanned = self._replan_single_task(
@@ -552,7 +554,7 @@ class FourPillarPipeline:
                                 )
                                 r_elapsed = (time_mod.monotonic() - rstart) * 1000
                                 renderer.console.print(
-                                    f"    [green]✓ 重规划子任务完成[/] [dim]({r_elapsed:.0f}ms)[/]"
+                                    f"    [dim green]✓ 重规划子任务完成[/] [dim]({r_elapsed:.0f}ms)[/]"
                                 )
                                 round_results.append(
                                     f"## [重规划] {rt['desc']}\n{rt_result}"
@@ -561,7 +563,7 @@ class FourPillarPipeline:
                             except (TimeoutError, Exception) as r_exc:
                                 self._consecutive_failures += 1
                                 renderer.console.print(
-                                    f"    [red]✗ 重规划子任务失败[/]: {r_exc}"
+                                    f"    [dim red]✗ 重规划子任务失败[/]: {r_exc}"
                                 )
                                 round_results.append(
                                     f"## [重规划] {rt['desc']}\n❌ 失败: {r_exc}"
@@ -578,7 +580,7 @@ class FourPillarPipeline:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     self._consecutive_failures += 1
                     renderer.console.print(
-                        f"  [red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
+                        f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
                     )
                     round_results.append(
                         f"## [{role_str}] {desc}\n❌ 失败: {exc}"
@@ -600,7 +602,7 @@ class FourPillarPipeline:
                     )
                 ),
             )
-            renderer.console.print("  [green]✓ 审计者 完成[/]")
+            renderer.console.print("  [dim green]✓ 审计者 完成[/]")
 
             # 9. 反思者审视 → 决定是否继续迭代
             if iteration < max_iterations:
@@ -622,11 +624,11 @@ class FourPillarPipeline:
                 if "执行完成" in reflection or self._consecutive_failures > 0:
                     # 有失败时不再迭代，直接收尾
                     renderer.console.print(
-                        "  [green]✓ 反思者判定：执行完成[/]"
+                        "  [dim green]✓ 反思者判定：执行完成[/]"
                     )
                     break
                 renderer.console.print(
-                    "  [yellow]↻ 反思者判定：需继续迭代[/]"
+                    "  [dim yellow]↻ 反思者判定：需继续迭代[/]"
                 )
             else:
                 renderer.console.print(
@@ -635,7 +637,7 @@ class FourPillarPipeline:
 
         # ── Phase 3: 聚合输出 ──
         renderer.console.print()
-        renderer.console.print("[bold cyan]📊 四柱管线执行完成[/]")
+        renderer.console.print("[dim bold]📊 四柱管线执行完成[/]")
 
         if all_results:
             aggregated = "\n\n---\n\n".join(all_results)
@@ -708,7 +710,7 @@ class FourPillarPipeline:
         """思考者自动评估并选择子任务。"""
         renderer = self._renderer
         renderer.console.print(
-            "  [bold magenta]🤔 思考者正在评估子任务...[/]"
+            "  [dim bold]🤔 思考者正在评估子任务...[/]"
         )
 
         tasks_text = "\n".join(
