@@ -190,12 +190,15 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             bid = event.button.id
+            if bid == "view-detail":
+                # 先弹菜单，再推详情屏，防止 pop_screen 误弹
+                self.app.pop_screen()
+                self.app.push_screen(MessageDetailScreen(self._message))
+                return
             if bid == "copy-all":
                 self._copy_all()
             elif bid == "copy-selected":
                 self._copy_selected()
-            elif bid == "view-detail":
-                self._show_detail()
             self.app.pop_screen()
 
         def _copy_all(self) -> None:
@@ -208,8 +211,15 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.app.copy_to_clipboard(self._selected_text)
             self.app.notify("✅ 已复制选中文字", severity="information")
 
-        def _show_detail(self) -> None:
-            self.app.push_screen(MessageDetailScreen(self._message))
+
+    class _SelectableBlock(Static):
+        """可选中复制的富文本展示块。"""
+
+        ALLOW_SELECT = True
+
+        def __init__(self, renderable: RenderableType) -> None:
+            super().__init__(renderable)
+            self.renderable = renderable
 
 
     class MessageDetailScreen(Screen[None]):
@@ -228,11 +238,11 @@ if TEXTUAL_IMPORT_ERROR is None:
                 title=f"📄 消息详情 — {self._message.role}",
                 border_style="#14b8a6",
                 padding=(1, 2),
-                subtitle="Esc 关闭",
+                subtitle="Esc 关闭 · Ctrl+Y 复制",
             )
             with Container(id="detail-container"):
                 yield ScrollableContainer(
-                    RenderableBlock(panel),
+                    _SelectableBlock(panel),
                     id="detail-scroll",
                 )
             yield Button("  ✕ 关闭  ", id="detail-close", variant="warning")
@@ -261,10 +271,24 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         BINDINGS = [
             ("escape", "close_detail", "关闭"),
+            ("ctrl+y", "copy_detail", "复制"),
         ]
 
         def action_close_detail(self) -> None:
             self.app.pop_screen()
+
+        def action_copy_detail(self) -> None:
+            """复制：优先选中文字 → 全文。"""
+            selected = self.app.screen.get_selected_text()
+            if selected:
+                self.app.copy_to_clipboard(selected)
+                self.app.notify("✅ 已复制选中文字", severity="information")
+                return
+            text = self._message._text
+            content = text.plain if isinstance(text, Text) else str(text)
+            if content.strip():
+                self.app.copy_to_clipboard(content)
+                self.app.notify("✅ 已复制全文", severity="information")
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "detail-close":
