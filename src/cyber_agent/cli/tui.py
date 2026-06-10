@@ -212,6 +212,62 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.app.notify("✅ 已复制选中文字", severity="information")
 
 
+    class DetailContextMenuScreen(Screen[None]):
+        """详情页右键上下文菜单。"""
+
+        def __init__(self, content: str, selected_text: str = "") -> None:
+            super().__init__()
+            self._content = content
+            self._selected_text = selected_text
+
+        def compose(self) -> ComposeResult:
+            with Container(id="ctx-panel"):
+                yield Static("选择操作", id="ctx-title")
+                if self._selected_text:
+                    yield Button("✂️ 复制选中", id="copy-selected")
+                yield Button("📋 复制全文", id="copy-all")
+                yield Button("✕ 关闭", id="close")
+
+        CSS = """
+        DetailContextMenuScreen {
+            align: center middle;
+            background: rgba(0,0,0,0.35);
+        }
+        #ctx-panel {
+            width: auto;
+            min-width: 28;
+            height: auto;
+            background: $surface;
+            border: round #14b8a6;
+            padding: 1 2;
+        }
+        #ctx-title {
+            text-align: center;
+            color: $text-muted;
+            margin: 0 0 1 0;
+        }
+        #ctx-panel > Button {
+            width: 100%;
+            margin: 0 0 1 0;
+        }
+        """
+
+        BINDINGS = [("escape", "close_menu", "关闭")]
+
+        def action_close_menu(self) -> None:
+            self.app.pop_screen()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            bid = event.button.id
+            if bid == "copy-all":
+                self.app.copy_to_clipboard(self._content)
+                self.app.notify("✅ 已复制全文", severity="information")
+            elif bid == "copy-selected":
+                self.app.copy_to_clipboard(self._selected_text)
+                self.app.notify("✅ 已复制选中文字", severity="information")
+            self.app.pop_screen()
+
+
     class MessageDetailScreen(Screen[None]):
         """消息详情全屏查看。"""
 
@@ -233,7 +289,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 text_area.read_only = True
                 yield text_area
                 yield Static(
-                    "Esc 关闭 · Ctrl+Y 复制 · 鼠标拖拽选中",
+                    "Esc 关闭 · Ctrl+Y 复制 · 右键菜单 · 拖拽选中",
                     id="detail-footer",
                 )
 
@@ -285,10 +341,26 @@ if TEXTUAL_IMPORT_ERROR is None:
         BINDINGS = [
             ("escape", "close_detail", "关闭"),
             ("ctrl+y", "copy_detail", "复制"),
+            ("ctrl+c", "ignore_detail", ""),
         ]
 
         def action_close_detail(self) -> None:
             self.app.pop_screen()
+
+        def action_ignore_detail(self) -> None:
+            pass
+
+        def on_click(self, event) -> None:
+            """右键弹出上下文菜单。"""
+            if getattr(event, "button", 1) == 3:
+                event.stop()
+                text_area = self.query_one("#detail-content", TextArea)
+                selected = ""
+                if text_area.selection and not text_area.selection.is_empty():
+                    selected = text_area.selected_text or ""
+                text = self._message._text
+                content = text.plain if isinstance(text, Text) else str(text)
+                self.app.push_screen(DetailContextMenuScreen(content, selected))
 
         def action_copy_detail(self) -> None:
             """复制：优先选中文字 → 全文。"""
