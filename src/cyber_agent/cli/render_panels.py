@@ -2,6 +2,7 @@ import json
 import time
 from pathlib import Path
 
+
 from rich import box
 from rich.console import Console, RenderableType
 from rich.live import Live
@@ -148,8 +149,18 @@ def build_tool_call_panel(tool_calls: list[dict]) -> Panel:
 
 
 def build_tool_result_panel(content: str) -> Panel:
-    """构建工具结果面板。"""
-    return Panel(content, title="工具结果", border_style="green")
+    """构建工具结果面板，使用 Markdown 渲染。"""
+    # 截取前 4000 字符以防过长导致渲染卡顿
+    truncated = content[:4000]
+    if len(content) > 4000:
+        truncated += "\n\n*... 已截断，共 {} 字符*".format(len(content))
+    renderable: RenderableType = truncated
+    try:
+        from rich.markdown import Markdown as _Md
+        renderable = _Md(truncated, code_theme="monokai", justify="left")
+    except Exception:
+        pass
+    return Panel(renderable, title="工具结果", border_style="green")
 
 
 def build_approval_request_panel(payload: dict) -> Panel:
