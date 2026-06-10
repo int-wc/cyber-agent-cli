@@ -409,6 +409,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             ("tab", "accept_completion", "接受补全"),
             ("ctrl+y", "copy_last_response", "复制最后回复"),
             ("ctrl+b", "toggle_compressed_history", "压缩历史"),
+            ("ctrl+q", "quit_app", "退出程序"),
+            ("ctrl+c", "cancel_task", "暂停/取消"),
         ]
 
         def __init__(
@@ -982,7 +984,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             input_widget = self.query_one("#chat-input", Input)
             input_widget.disabled = False
             input_widget.placeholder = (
-                "任务执行中，输入 /stop 立即中断当前任务"
+                "任务执行中，输入 /stop 或按 Ctrl+C 中断当前任务"
                 if value
                 else "输入消息，或输入 /help 查看命令"
             )
@@ -992,6 +994,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             """弹出右键上下文菜单。"""
             selected = self.screen.get_selected_text() or ""
             self.push_screen(ContextMenuScreen(message, selected))
+
+        def action_quit_app(self) -> None:
+            """退出整个程序（Ctrl+Q）。"""
+            self.exit()
+
+        def action_cancel_task(self) -> None:
+            """取消当前运行中的任务（Ctrl+C）。"""
+            if self._is_busy:
+                from .app import request_running_task_stop
+                request_running_task_stop(self.runtime_context, reason="用户按 Ctrl+C")
+                self._add_message("system", "已按 Ctrl+C，正在终止当前任务...")
+            else:
+                self._add_message("system", "当前没有正在执行的任务。")
 
 
 def launch_textual_chat(
