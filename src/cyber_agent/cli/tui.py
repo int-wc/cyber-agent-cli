@@ -94,48 +94,34 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._text: str | Text = content
             self._use_markdown = use_markdown and _TEXTUAL_MARKDOWN_AVAILABLE and role == "assistant"
             self._refresh_renderable()
-            # 焦点脉冲动画状态
-            self._pulse_timer: Any = None
-            self._pulse_t: float = 0.0
-            self._pulse_dir: int = 1
+            # 焦点动画状态
+            self._focus_timer: Any = None
 
-        # ── 焦点脉冲呼吸动画 ──────────────────────────────────
+        # ── 焦点入场动画 ──────────────────────────────────────
 
         def on_focus(self) -> None:
-            """获得焦点：设置背景 + 左侧指示条 + 启动呼吸脉冲。"""
-            if self._pulse_timer is not None:
-                self._pulse_timer.stop()
+            """获得焦点：背景加深 + 左侧指示条亮闪后定色。"""
+            if self._focus_timer is not None:
+                self._focus_timer.stop()
             from textual.color import Color as _Color
             self.styles.background = _Color(26, 35, 50)  # #1a2332
-            self.styles.border_left = ("heavy", _Color(244, 61, 94))  # #f43f5e
-            self._pulse_t = 0.0
-            self._pulse_dir = 1
-            self._pulse_timer = self.set_interval(0.03, self._pulse_tick)
+            # 闪亮：先亮粉再沉到 rose
+            self.styles.border_left = ("heavy", _Color(253, 164, 175))  # #fda4af
+            self._focus_timer = self.set_timer(0.3, self._settle_focus)
+
+        def _settle_focus(self) -> None:
+            """高亮结束，沉淀为静态 rose。"""
+            from textual.color import Color as _Color
+            self.styles.border_left = ("heavy", _Color(244, 61, 94))
+            self._focus_timer = None
 
         def on_blur(self) -> None:
-            """失去焦点：停止脉冲、清除样式。"""
-            if self._pulse_timer is not None:
-                self._pulse_timer.stop()
-                self._pulse_timer = None
+            """失去焦点：清除所有选中样式。"""
+            if self._focus_timer is not None:
+                self._focus_timer.stop()
+                self._focus_timer = None
             self.styles.border_left = None
             self.styles.background = None
-
-        def _pulse_tick(self) -> None:
-            """左侧指示条在 rose #f43f5e ↔ #fda4af 间呼吸。"""
-            try:
-                step = 0.04
-                self._pulse_t += step * self._pulse_dir
-                if self._pulse_t >= 1.0:
-                    self._pulse_dir = -1
-                    self._pulse_t = 1.0
-                elif self._pulse_t <= 0.0:
-                    self._pulse_dir = 1
-                    self._pulse_t = 0.0
-                from textual.color import Color as _Color
-                c = _Color(244, 61, 94).blend(_Color(253, 164, 175), self._pulse_t)
-                self.styles.border_left = ("heavy", c)
-            except Exception:
-                pass  # 防止异常静默杀死 timer
 
         def set_content(self, content: str | Text) -> None:
             self._text = content
