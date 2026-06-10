@@ -139,13 +139,13 @@ if TEXTUAL_IMPORT_ERROR is None:
             background: {SURFACE_BG};
             height: auto;
             margin: 0;
-            padding: 1 2;
+            padding: 0 1;
         }}
 
         #composer-title {{
             color: {TEXT_MUTED};
             height: auto;
-            margin: 0 0 1 0;
+            margin: 0;
         }}
 
         #chat-input {{
@@ -153,7 +153,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             background: {WINDOW_BG};
             color: #f8fafc;
             height: auto;
-            min-height: 3;
+            min-height: 2;
         }}
 
         #chat-input:focus {{
@@ -163,6 +163,8 @@ if TEXTUAL_IMPORT_ERROR is None:
         #command-hint {{
             color: {TEXT_MUTED};
             height: auto;
+            max-height: 4;
+            overflow-y: auto;
             margin: 1 0 0 0;
         }}
 
@@ -519,7 +521,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 hint.append("  停止当前正在执行的任务", style=COMMAND_DESC_STYLE)
                 return hint
 
-            matches = match_builtin_commands(user_input.strip(), limit=6)
+            matches = match_builtin_commands(user_input.strip(), limit=3)
             if user_input.strip().startswith("/") and not matches:
                 hint.append(
                     "未匹配到内建命令，可输入 ",
@@ -530,7 +532,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return hint
 
             if not matches:
-                for line in build_command_hint_lines(user_input, limit=6):
+                for line in build_command_hint_lines(user_input, limit=3):
                     hint.append(line, style=COMMAND_DESC_STYLE)
                     hint.append("\n")
                 return hint
