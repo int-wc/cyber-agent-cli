@@ -82,12 +82,6 @@ if TEXTUAL_IMPORT_ERROR is None:
         FOCUS_ON_CLICK = True
         can_focus = True
 
-        _RAINBOW_CYCLE = [
-            "#ef4444", "#f97316", "#eab308", "#22c55e",
-            "#06b6d4", "#6366f1", "#d946ef",
-        ]
-        """红 → 橙 → 黄 → 绿 → 青 → 靛 → 紫 循环。"""
-
         def __init__(
             self,
             role: str,
@@ -100,37 +94,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._text: str | Text = content
             self._use_markdown = use_markdown and _TEXTUAL_MARKDOWN_AVAILABLE and role == "assistant"
             self._refresh_renderable()
-            # 焦点动画状态
-            self._focus_timer: Any = None
-            self._rainbow_idx: int = 0
 
-        # ── 焦点彩虹流动动画 ──────────────────────────────────
+        # ── 焦点静态指示条 ──────────────────────────────────────
 
         def on_focus(self) -> None:
-            """获得焦点：背景加深 + 左侧彩虹跑马灯。"""
-            if self._focus_timer is not None:
-                self._focus_timer.stop()
+            """获得焦点：背景加深 + 左侧 rose 指示条。"""
             from textual.color import Color as _Color
             self.styles.background = _Color(26, 35, 50)  # #1a2332
-            self._rainbow_idx = 0
-            self._update_border()
-            self._focus_timer = self.set_interval(0.12, self._rainbow_tick)
-
-        def _rainbow_tick(self) -> None:
-            """彩虹色步进：每步换一种颜色。"""
-            self._rainbow_idx = (self._rainbow_idx + 1) % len(self._RAINBOW_CYCLE)
-            self._update_border()
-
-        def _update_border(self) -> None:
-            self.styles.border_left = (
-                "heavy", self._RAINBOW_CYCLE[self._rainbow_idx],
-            )
+            self.styles.border_left = ("heavy", _Color(244, 61, 94))
 
         def on_blur(self) -> None:
-            """失去焦点：清除所有选中样式。"""
-            if self._focus_timer is not None:
-                self._focus_timer.stop()
-                self._focus_timer = None
+            """失去焦点：清除样式。"""
             self.styles.border_left = None
             self.styles.background = None
 
