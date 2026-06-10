@@ -739,7 +739,15 @@ class AgentRunner:
                     )
                 )
             )
-        model_messages.extend(self.history[1 + self.compressed_message_count :])
+        tail = list(self.history[1 + self.compressed_message_count :])
+        # 安全兜底：当上下文压缩将前序 HumanMessage 全部压缩、尾部仅剩 ToolMessage
+        # 时，补充最近的 HumanMessage 以便模型理解上下文（Anthropic/DeepSeek API 要求至少一条 user 消息）
+        if tail and not any(isinstance(m, HumanMessage) for m in tail):
+            for idx in range(len(self.history) - 1 - len(tail), 0, -1):
+                if isinstance(self.history[idx], HumanMessage):
+                    tail.insert(0, self.history[idx])
+                    break
+        model_messages.extend(tail)
         model_messages = self._shrink_model_messages_to_token_budget(model_messages)
         return prepare_messages_for_openai_compatible_service(
             model_messages,
