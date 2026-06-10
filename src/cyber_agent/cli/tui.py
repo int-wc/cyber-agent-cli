@@ -93,6 +93,44 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._text: str | Text = content
             self._use_markdown = use_markdown and _TEXTUAL_MARKDOWN_AVAILABLE and role == "assistant"
             self._refresh_renderable()
+            # 焦点脉冲动画状态
+            self._pulse_timer: Any = None
+            self._pulse_t: float = 0.0
+            self._pulse_dir: int = 1
+
+        # ── 焦点脉冲呼吸动画 ──────────────────────────────────
+
+        def on_focus(self) -> None:
+            """获得焦点：设置背景 + 启动呼吸脉冲。"""
+            if self._pulse_timer is not None:
+                self._pulse_timer.stop()
+            from textual.color import Color as _Color
+            self.styles.background = _Color(26, 35, 50)  # #1a2332
+            self._pulse_t = 0.0
+            self._pulse_dir = 1
+            self._pulse_timer = self.set_interval(0.03, self._pulse_tick)
+
+        def on_blur(self) -> None:
+            """失去焦点：停止脉冲、清除样式。"""
+            if self._pulse_timer is not None:
+                self._pulse_timer.stop()
+                self._pulse_timer = None
+            self.styles.border = None
+            self.styles.background = None
+
+        def _pulse_tick(self) -> None:
+            """在 teal 色 #14b8a6 ↔ #2dd4bf 之间平滑呼吸。"""
+            step = 0.04
+            self._pulse_t += step * self._pulse_dir
+            if self._pulse_t >= 1.0:
+                self._pulse_dir = -1
+                self._pulse_t = 1.0
+            elif self._pulse_t <= 0.0:
+                self._pulse_dir = 1
+                self._pulse_t = 0.0
+            from textual.color import Color as _Color
+            c = _Color(20, 184, 166).blend(_Color(45, 212, 191), self._pulse_t)
+            self.styles.border = ("round", c)
 
         def set_content(self, content: str | Text) -> None:
             self._text = content
@@ -331,8 +369,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         }}
 
         ChatMessage:focus {{
-            background: #1a2332;
-            border: round #14b8a6;
+            /* 动画由 on_focus / on_blur 程序化控制 */
         }}
 
         ChatMessage:focus > .rich-text {{
