@@ -24,3 +24,7 @@ desktop/package-lock.json
 *.node
 .coverage
 .cyber-agent-cli-history/
+
+# .cyber/ 项目数据目录（类似 .claude/）
+.cyber/
+!.cyber/settings.json

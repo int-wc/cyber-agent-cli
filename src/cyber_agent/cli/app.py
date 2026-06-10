@@ -397,6 +397,13 @@ def ensure_runtime_capabilities(
         _sync_runner_capabilities_from_context(runtime_context, runner)
         return
 
+    # 确保 .cyber/ 项目目录存在（类似 .claude/）
+    try:
+        from ..local_config import find_cyber_dir
+        find_cyber_dir()
+    except Exception:
+        pass
+
     CapabilityRegistry = _load_capability_registry_support()
     tool_support = _load_tool_support()
     capability_registry = CapabilityRegistry(

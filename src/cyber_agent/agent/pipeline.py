@@ -149,6 +149,12 @@ class FourPillarPipeline:
                 f"请检查任务是否合理或简化需求后重试。"
             )
 
+    @staticmethod
+    def _auto_approval_handler(tool: Any, tool_call: dict) -> "ApprovalDecision":
+        """管线自动批准所有工具调用（管线模式下无需用户交互确认）。"""
+        from .approval import ApprovalDecision
+        return ApprovalDecision(True, "管线自动批准所有工具调用。")
+
     def _run_subtask_with_escalating_timeout(
         self,
         subtask_prompt: str,
@@ -164,7 +170,10 @@ class FourPillarPipeline:
         renderer = self._renderer
 
         if controller is None:
-            return self._runner.run(subtask_prompt, verbose=False, event_handler=None)
+            return self._runner.run(
+                subtask_prompt, verbose=False, event_handler=None,
+                approval_handler=self._auto_approval_handler,
+            )
 
         for escalation in range(MAX_TIMEOUT_ESCALATIONS + 1):
             timeout = BASE_SUBTASK_TIMEOUT + escalation * TIMEOUT_ESCALATION_STEP
@@ -189,6 +198,7 @@ class FourPillarPipeline:
                     subtask_prompt,
                     verbose=False,
                     event_handler=None,
+                    approval_handler=self._auto_approval_handler,
                 )
                 if escalation > 0:
                     renderer.console.print(
