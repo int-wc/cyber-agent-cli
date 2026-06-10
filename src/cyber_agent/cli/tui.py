@@ -212,6 +212,15 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.app.notify("✅ 已复制选中文字", severity="information")
 
 
+    class _DetailTextArea(TextArea):
+        """详情文本区——解除与全局快捷键冲突的 TextArea 内部绑定。"""
+
+        BINDINGS = [
+            b for b in TextArea.BINDINGS
+            if "ctrl+y" not in b.key.split(",")
+        ]
+
+
     class MessageDetailScreen(Screen[None]):
         """消息详情全屏查看。"""
 
@@ -228,9 +237,9 @@ if TEXTUAL_IMPORT_ERROR is None:
                         f"📄 消息详情 — {self._message.role}",
                         id="detail-title",
                     )
-                    yield Static("Ctrl+Shift+C 复制选中 · Ctrl+Y 全部复制", id="detail-hint")
+                    yield Static("Ctrl+G 复制选中 · Ctrl+Y 全部复制", id="detail-hint")
                     yield Button("✕ 关闭", id="title-close", variant="warning")
-                text_area = TextArea(content, id="detail-content")
+                text_area = _DetailTextArea(content, id="detail-content")
                 text_area.read_only = True
                 yield text_area
                 yield Static(
@@ -293,7 +302,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         BINDINGS = [
             ("escape", "close_detail", "关闭"),
-            ("ctrl+shift+c", "copy_selected", "复制选中"),
+            ("ctrl+g", "copy_selected", "复制选中"),
             ("ctrl+y", "copy_all", "全部复制"),
             ("ctrl+c", "ignore_detail", ""),
         ]
