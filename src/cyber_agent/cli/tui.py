@@ -107,7 +107,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._pulse_timer.stop()
             from textual.color import Color as _Color
             self.styles.background = _Color(26, 35, 50)  # #1a2332
-            self.styles.border_left = ("heavy", _Color(20, 184, 166))
+            self.styles.border_left = ("heavy", _Color(244, 61, 94))  # #f43f5e
             self._pulse_t = 0.0
             self._pulse_dir = 1
             self._pulse_timer = self.set_interval(0.03, self._pulse_tick)
@@ -121,18 +121,21 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.styles.background = None
 
         def _pulse_tick(self) -> None:
-            """左侧指示条颜色在 #14b8a6 ↔ #2dd4bf 间呼吸。"""
-            step = 0.04
-            self._pulse_t += step * self._pulse_dir
-            if self._pulse_t >= 1.0:
-                self._pulse_dir = -1
-                self._pulse_t = 1.0
-            elif self._pulse_t <= 0.0:
-                self._pulse_dir = 1
-                self._pulse_t = 0.0
-            from textual.color import Color as _Color
-            c = _Color(20, 184, 166).blend(_Color(45, 212, 191), self._pulse_t)
-            self.styles.border_left = ("heavy", c)
+            """左侧指示条在 rose #f43f5e ↔ #fda4af 间呼吸。"""
+            try:
+                step = 0.04
+                self._pulse_t += step * self._pulse_dir
+                if self._pulse_t >= 1.0:
+                    self._pulse_dir = -1
+                    self._pulse_t = 1.0
+                elif self._pulse_t <= 0.0:
+                    self._pulse_dir = 1
+                    self._pulse_t = 0.0
+                from textual.color import Color as _Color
+                c = _Color(244, 61, 94).blend(_Color(253, 164, 175), self._pulse_t)
+                self.styles.border_left = ("heavy", c)
+            except Exception:
+                pass  # 防止异常静默杀死 timer
 
         def set_content(self, content: str | Text) -> None:
             self._text = content
