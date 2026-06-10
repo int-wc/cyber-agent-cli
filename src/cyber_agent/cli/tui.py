@@ -346,7 +346,6 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         #composer {{
             dock: bottom;
-            border-top: solid #334155;
             background: {SURFACE_BG};
             height: auto;
             margin: 0;
@@ -356,7 +355,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         #composer-title {{
             color: {TEXT_MUTED};
             height: auto;
-            margin: 0;
+            margin: 0 0 1 0;
         }}
 
         #chat-input {{
@@ -364,7 +363,6 @@ if TEXTUAL_IMPORT_ERROR is None:
             background: {WINDOW_BG};
             color: #f8fafc;
             height: auto;
-            min-height: 2;
         }}
 
         #chat-input:focus {{
@@ -384,7 +382,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             height: 1;
             margin: 0;
             padding: 0 2;
-            background: #1e293b;
+            background: {SURFACE_BG};
+            border-top: solid #334155;
         }}
 
         ChatMessage {{
