@@ -223,15 +223,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             text = self._message._text
             content = text.plain if isinstance(text, Text) else str(text)
             with Container(id="detail-container"):
-                yield Static(
-                    f"📄 消息详情 — {self._message.role}",
-                    id="detail-title",
-                )
+                with Container(id="title-bar"):
+                    yield Static(
+                        f"📄 消息详情 — {self._message.role}",
+                        id="detail-title",
+                    )
+                    yield Button("✕ 关闭", id="title-close", variant="warning")
                 text_area = TextArea(content, id="detail-content")
                 text_area.read_only = True
                 yield text_area
                 yield Static(
-                    "Esc 关闭 · Ctrl+Y 复制 · 鼠标拖拽选中文字",
+                    "Esc 关闭 · Ctrl+Y 复制 · 鼠标拖拽选中",
                     id="detail-footer",
                 )
 
@@ -245,25 +247,38 @@ if TEXTUAL_IMPORT_ERROR is None:
             height: 82%;
             background: {WINDOW_BG};
             border: round #14b8a6;
-            padding: 1;
+            padding: 1 1 0 1;
             layout: vertical;
         }}
+        #title-bar {{
+            layout: horizontal;
+            height: 3;
+            width: 100%;
+        }}
         #detail-title {{
-            text-align: center;
+            width: 1fr;
+            height: 100%;
             padding: 0 1;
             color: #14b8a6;
             text-style: bold;
-            height: 3;
+            content-align: left middle;
+        }}
+        #title-close {{
+            width: auto;
+            min-width: 10;
+            height: 100%;
+            margin: 0;
         }}
         #detail-content {{
             height: 1fr;
-            margin: 1 0;
+            margin: 0 0 1 0;
             border: none;
         }}
         #detail-footer {{
             text-align: center;
             color: $secondary;
             height: 1;
+            padding-bottom: 1;
         }}
         """
 
@@ -293,6 +308,10 @@ if TEXTUAL_IMPORT_ERROR is None:
             if content.strip():
                 self.app.copy_to_clipboard(content)
                 self.app.notify("✅ 已复制全文", severity="information")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "title-close":
+                self.app.pop_screen()
 
 
     class CyberAgentTUI(App):
