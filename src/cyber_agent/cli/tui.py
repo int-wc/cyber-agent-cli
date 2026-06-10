@@ -102,11 +102,12 @@ if TEXTUAL_IMPORT_ERROR is None:
         # ── 焦点脉冲呼吸动画 ──────────────────────────────────
 
         def on_focus(self) -> None:
-            """获得焦点：设置背景 + 启动呼吸脉冲。"""
+            """获得焦点：设置背景 + 左侧指示条 + 启动呼吸脉冲。"""
             if self._pulse_timer is not None:
                 self._pulse_timer.stop()
             from textual.color import Color as _Color
             self.styles.background = _Color(26, 35, 50)  # #1a2332
+            self.styles.border_left = ("heavy", _Color(20, 184, 166))
             self._pulse_t = 0.0
             self._pulse_dir = 1
             self._pulse_timer = self.set_interval(0.03, self._pulse_tick)
@@ -116,11 +117,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             if self._pulse_timer is not None:
                 self._pulse_timer.stop()
                 self._pulse_timer = None
-            self.styles.border = None
+            self.styles.border_left = None
             self.styles.background = None
 
         def _pulse_tick(self) -> None:
-            """在 teal 色 #14b8a6 ↔ #2dd4bf 之间平滑呼吸。"""
+            """左侧指示条颜色在 #14b8a6 ↔ #2dd4bf 间呼吸。"""
             step = 0.04
             self._pulse_t += step * self._pulse_dir
             if self._pulse_t >= 1.0:
@@ -131,7 +132,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self._pulse_t = 0.0
             from textual.color import Color as _Color
             c = _Color(20, 184, 166).blend(_Color(45, 212, 191), self._pulse_t)
-            self.styles.border = ("round", c)
+            self.styles.border_left = ("heavy", c)
 
         def set_content(self, content: str | Text) -> None:
             self._text = content
