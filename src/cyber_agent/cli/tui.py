@@ -44,7 +44,8 @@ try:
     from textual import work
     from textual.app import App, ComposeResult
     from textual.containers import Container, ScrollableContainer
-    from textual.widgets import Input, Static
+    from textual.screen import Screen
+    from textual.widgets import Button, Input, Static
 
     try:
         from textual.suggester import SuggestFromList
@@ -118,6 +119,152 @@ if TEXTUAL_IMPORT_ERROR is None:
                     pass
             self.update(build_chat_message_panel(self.role, self._text))
 
+        def on_click(self, event) -> None:
+            """右键点击弹出上下文菜单。"""
+            if getattr(event, "button", 1) == 3:
+                event.stop()
+                self.app._show_context_menu(self)
+
+
+    class ContextMenuScreen(Screen[None]):
+        """右键上下文菜单弹窗。"""
+
+        def __init__(
+            self, message: ChatMessage, selected_text: str,
+        ) -> None:
+            super().__init__()
+            self._message = message
+            self._selected_text = selected_text
+
+        def compose(self) -> ComposeResult:
+            with Container(id="ctx-panel"):
+                yield Static("选择操作", id="ctx-title")
+                yield Button("📋 复制全文", id="copy-all", variant="primary")
+                if self._selected_text:
+                    yield Button(
+                        "✂️ 复制选中", id="copy-selected", variant="default",
+                    )
+                yield Button("🪟 查看详情", id="view-detail", variant="default")
+                yield Button("✕ 关闭", id="close", variant="warning")
+
+        CSS = f"""
+        ContextMenuScreen {{
+            align: center middle;
+            background: rgba(0,0,0,0.5);
+        }}
+        #ctx-panel {{
+            width: auto;
+            min-width: 30;
+            height: auto;
+            background: {SURFACE_BG};
+            border: round #14b8a6;
+            padding: 1 2;
+        }}
+        #ctx-title {{
+            text-align: center;
+            color: {TEXT_MUTED};
+            margin: 0 0 1 0;
+        }}
+        #ctx-panel > Button {{
+            width: 100%;
+            margin: 0 0 1 0;
+        }}
+        """
+
+        BINDINGS = [
+            ("escape", "close_menu", "关闭"),
+        ]
+
+        def action_close_menu(self) -> None:
+            self.app.pop_screen()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            bid = event.button.id
+            if bid == "close":
+                self.app.pop_screen()
+                return
+
+            if bid == "copy-all":
+                self._copy_all()
+            elif bid == "copy-selected":
+                self._copy_selected()
+            elif bid == "view-detail":
+                self._show_detail()
+
+            self.app.pop_screen()
+
+        def _copy_all(self) -> None:
+            text = self._message._text
+            content = text.plain if isinstance(text, Text) else str(text)
+            self.app.copy_to_clipboard(content)
+            self.app.notify("✅ 已复制全文", severity="information")
+
+        def _copy_selected(self) -> None:
+            self.app.copy_to_clipboard(self._selected_text)
+            self.app.notify("✅ 已复制选中文字", severity="information")
+
+        def _show_detail(self) -> None:
+            self.app.push_screen(MessageDetailScreen(self._message))
+
+
+    class MessageDetailScreen(Screen[None]):
+        """消息详情全屏查看。"""
+
+        def __init__(self, message: ChatMessage) -> None:
+            super().__init__()
+            self._message = message
+
+        def compose(self) -> ComposeResult:
+            text = self._message._text
+            content = text.plain if isinstance(text, Text) else str(text)
+            from rich.panel import Panel as RichPanel
+            panel = RichPanel(
+                content,
+                title=f"📄 消息详情 — {self._message.role}",
+                border_style="#14b8a6",
+                padding=(1, 2),
+                subtitle="Esc 关闭",
+            )
+            with Container(id="detail-container"):
+                yield ScrollableContainer(
+                    RenderableBlock(panel),
+                    id="detail-scroll",
+                )
+            yield Button("  ✕ 关闭  ", id="detail-close", variant="warning")
+
+        CSS = f"""
+        MessageDetailScreen {{
+            align: center middle;
+            background: rgba(0,0,0,0.7);
+        }}
+        #detail-container {{
+            width: 86%;
+            height: 82%;
+            background: {WINDOW_BG};
+            border: round #14b8a6;
+            padding: 1;
+        }}
+        #detail-scroll {{
+            height: 100%;
+        }}
+        #detail-close {{
+            dock: bottom;
+            width: 20;
+            margin-top: 1;
+        }}
+        """
+
+        BINDINGS = [
+            ("escape", "close_detail", "关闭"),
+        ]
+
+        def action_close_detail(self) -> None:
+            self.app.pop_screen()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "detail-close":
+                self.app.pop_screen()
+
 
     class CyberAgentTUI(App):
         """基于 Textual 的交互式聊天界面。"""
@@ -163,6 +310,12 @@ if TEXTUAL_IMPORT_ERROR is None:
             border: round #14b8a6;
         }}
 
+        @keyframes focus-pulse {{
+            0% {{ border: round #14b8a6; background: #1a2332; }}
+            50% {{ border: round #2dd4bf; background: #1e2a3a; }}
+            100% {{ border: round #14b8a6; background: #1a2332; }}
+        }}
+
         #command-hint {{
             color: {TEXT_MUTED};
             height: auto;
@@ -184,7 +337,13 @@ if TEXTUAL_IMPORT_ERROR is None:
         }}
 
         ChatMessage:focus {{
+            background: #1a2332;
             border: round #14b8a6;
+            animation: focus-pulse 2s infinite ease-in-out;
+        }}
+
+        ChatMessage:focus > .rich-text {{
+            background: #1a2332;
         }}
 
         RenderableBlock {{
@@ -519,15 +678,15 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _build_composer_title(self) -> Text:
             composer_title = Text(style=COMMAND_DESC_STYLE)
-            composer_title.append("输入消息后按 ")
-            composer_title.append("Enter", style=KEYCAP_STYLE)
-            composer_title.append(" 发送，按 ")
-            composer_title.append("Tab", style=KEYCAP_STYLE)
-            composer_title.append(" 接受补全，输入 ")
-            composer_title.append("/", style=COMMAND_NAME_STYLE)
-            composer_title.append(" 可查看命令，点击消息选中，")
-            composer_title.append("Ctrl+Y", style=KEYCAP_STYLE)
-            composer_title.append(" 复制。")
+            composer_title.append("Enter")
+            composer_title.append(" 发送，")
+            composer_title.append("Tab")
+            composer_title.append(" 补全，")
+            composer_title.append("/")
+            composer_title.append(" 命令，右键")
+            composer_title.append(" 菜单，")
+            composer_title.append("Ctrl+Y")
+            composer_title.append(" 复制")
             return composer_title
 
         def _build_welcome_panel(self) -> RenderableType:
@@ -787,6 +946,11 @@ if TEXTUAL_IMPORT_ERROR is None:
                 else "输入消息，或输入 /help 查看命令"
             )
             self._update_command_hint(input_widget.value)
+
+        def _show_context_menu(self, message: ChatMessage) -> None:
+            """弹出右键上下文菜单。"""
+            selected = self.get_selected_text() or ""
+            self.push_screen(ContextMenuScreen(message, selected))
 
 
 def launch_textual_chat(
