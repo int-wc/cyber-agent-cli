@@ -45,7 +45,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.containers import Container, ScrollableContainer
     from textual.screen import Screen
-    from textual.widgets import Button, Input, Static
+    from textual.widgets import Button, Input, Static, TextArea
 
     try:
         from textual.suggester import SuggestFromList
@@ -212,16 +212,6 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.app.notify("✅ 已复制选中文字", severity="information")
 
 
-    class _SelectableBlock(Static):
-        """可选中复制的富文本展示块。"""
-
-        ALLOW_SELECT = True
-
-        def __init__(self, renderable: RenderableType) -> None:
-            super().__init__(renderable)
-            self.renderable = renderable
-
-
     class MessageDetailScreen(Screen[None]):
         """消息详情全屏查看。"""
 
@@ -232,20 +222,18 @@ if TEXTUAL_IMPORT_ERROR is None:
         def compose(self) -> ComposeResult:
             text = self._message._text
             content = text.plain if isinstance(text, Text) else str(text)
-            from rich.panel import Panel as RichPanel
-            panel = RichPanel(
-                content,
-                title=f"📄 消息详情 — {self._message.role}",
-                border_style="#14b8a6",
-                padding=(1, 2),
-                subtitle="Esc 关闭 · Ctrl+Y 复制",
-            )
             with Container(id="detail-container"):
-                yield ScrollableContainer(
-                    _SelectableBlock(panel),
-                    id="detail-scroll",
+                yield Static(
+                    f"📄 消息详情 — {self._message.role}",
+                    id="detail-title",
                 )
-            yield Button("  ✕ 关闭  ", id="detail-close", variant="warning")
+                text_area = TextArea(content, id="detail-content")
+                text_area.read_only = True
+                yield text_area
+                yield Static(
+                    "Esc 关闭 · Ctrl+Y 复制 · 鼠标拖拽选中文字",
+                    id="detail-footer",
+                )
 
         CSS = f"""
         MessageDetailScreen {{
@@ -258,14 +246,24 @@ if TEXTUAL_IMPORT_ERROR is None:
             background: {WINDOW_BG};
             border: round #14b8a6;
             padding: 1;
+            layout: vertical;
         }}
-        #detail-scroll {{
-            height: 100%;
+        #detail-title {{
+            text-align: center;
+            padding: 0 1;
+            color: #14b8a6;
+            text-style: bold;
+            height: 3;
         }}
-        #detail-close {{
-            dock: bottom;
-            width: 20;
-            margin-top: 1;
+        #detail-content {{
+            height: 1fr;
+            margin: 1 0;
+            border: none;
+        }}
+        #detail-footer {{
+            text-align: center;
+            color: $secondary;
+            height: 1;
         }}
         """
 
@@ -279,20 +277,22 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def action_copy_detail(self) -> None:
             """复制：优先选中文字 → 全文。"""
-            selected = self.app.screen.get_selected_text()
-            if selected:
-                self.app.copy_to_clipboard(selected)
-                self.app.notify("✅ 已复制选中文字", severity="information")
-                return
+            try:
+                text_area = self.query_one("#detail-content", TextArea)
+                if text_area.selection and not text_area.selection.is_empty():
+                    selected = text_area.selected_text
+                    if selected:
+                        self.app.copy_to_clipboard(selected)
+                        self.app.notify("✅ 已复制选中文字", severity="information")
+                        return
+            except Exception:
+                pass
+            # 无选中时复制全文
             text = self._message._text
             content = text.plain if isinstance(text, Text) else str(text)
             if content.strip():
                 self.app.copy_to_clipboard(content)
                 self.app.notify("✅ 已复制全文", severity="information")
-
-        def on_button_pressed(self, event: Button.Pressed) -> None:
-            if event.button.id == "detail-close":
-                self.app.pop_screen()
 
 
     class CyberAgentTUI(App):
