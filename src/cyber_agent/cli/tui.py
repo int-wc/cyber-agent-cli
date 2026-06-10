@@ -902,7 +902,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         def action_copy_last_response(self) -> None:
             """复制文本：优先选中文字 → 焦点消息全文 → 最后助手回复。"""
             # 1. 优先复制用户用鼠标选中的文字片段
-            selected = self.get_selected_text()
+            selected = self.screen.get_selected_text()
             if selected:
                 self.copy_to_clipboard(selected)
                 return
@@ -979,7 +979,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _show_context_menu(self, message: ChatMessage) -> None:
             """弹出右键上下文菜单。"""
-            selected = self.get_selected_text() or ""
+            selected = self.screen.get_selected_text() or ""
             self.push_screen(ContextMenuScreen(message, selected))
 
 
