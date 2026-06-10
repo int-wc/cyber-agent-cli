@@ -729,7 +729,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             composer_title.append("右键", style=KEYCAP_STYLE)
             composer_title.append(" 菜单，")
             composer_title.append("Ctrl+Y", style=KEYCAP_STYLE)
-            composer_title.append(" 复制")
+            composer_title.append(" 复制，")
+            composer_title.append("Ctrl+Q", style=KEYCAP_STYLE)
+            composer_title.append(" 退出，")
+            composer_title.append("Ctrl+C", style=KEYCAP_STYLE)
+            composer_title.append(" 取消")
             return composer_title
 
         def _build_welcome_panel(self) -> RenderableType:
