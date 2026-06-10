@@ -551,6 +551,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                         self.call_from_thread(self._set_assistant_content, "正在调用工具...")
                     return
                 if event_type == AgentEventType.TOOL_CALL:
+                    self._active_assistant_message = None  # 关闭当前消息，后续回复创建新消息
                     self.call_from_thread(
                         self._add_renderable,
                         build_tool_call_panel(payload if isinstance(payload, list) else []),
