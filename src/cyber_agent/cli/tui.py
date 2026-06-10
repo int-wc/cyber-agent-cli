@@ -409,6 +409,18 @@ if TEXTUAL_IMPORT_ERROR is None:
             margin: 0 0 1 0;
         }}
 
+        .tool-result {{
+            border: round green;
+            margin: 0 0 1 0;
+            padding: 0 1;
+        }}
+
+        .tool-result-title {{
+            color: green;
+            text-style: bold;
+            margin: 1 0 0 0;
+        }}
+
         #startup-view {{
             display: none;
             layer: overlay;
@@ -571,10 +583,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                         content = str(payload.get("content", ""))
                     else:
                         content = str(payload)
-                    self.call_from_thread(
-                        self._add_renderable,
-                        build_tool_result_panel(content),
-                    )
+                    self.call_from_thread(self._add_tool_result, content)
                     return
                 if event_type == AgentEventType.APPROVAL_REQUEST and isinstance(payload, dict):
                     self.call_from_thread(
@@ -858,6 +867,20 @@ if TEXTUAL_IMPORT_ERROR is None:
             chat_view.mount(block)
             chat_view.scroll_end(animate=False)
             return block
+
+        def _add_tool_result(self, content: str) -> None:
+            """添加工具结果，使用 TextualMarkdown 渲染。"""
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+            if _TEXTUAL_MARKDOWN_AVAILABLE and content.strip():
+                container = Container(classes="tool-result")
+                container.mount(
+                    Static("🔧 工具结果", classes="tool-result-title"),
+                    TextualMarkdown(content),
+                )
+                chat_view.mount(container)
+            else:
+                chat_view.mount(RenderableBlock(build_tool_result_panel(content)))
+            chat_view.scroll_end(animate=False)
 
         def _start_startup_animation(self) -> None:
             startup_view = self.query_one("#startup-view", Container)
