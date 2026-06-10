@@ -82,6 +82,12 @@ if TEXTUAL_IMPORT_ERROR is None:
         FOCUS_ON_CLICK = True
         can_focus = True
 
+        _RAINBOW_CYCLE = [
+            "#ef4444", "#f97316", "#eab308", "#22c55e",
+            "#06b6d4", "#6366f1", "#d946ef",
+        ]
+        """红 → 橙 → 黄 → 绿 → 青 → 靛 → 紫 循环。"""
+
         def __init__(
             self,
             role: str,
@@ -96,24 +102,29 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._refresh_renderable()
             # 焦点动画状态
             self._focus_timer: Any = None
+            self._rainbow_idx: int = 0
 
-        # ── 焦点入场动画 ──────────────────────────────────────
+        # ── 焦点彩虹流动动画 ──────────────────────────────────
 
         def on_focus(self) -> None:
-            """获得焦点：背景加深 + 左侧指示条亮闪后定色。"""
+            """获得焦点：背景加深 + 左侧彩虹跑马灯。"""
             if self._focus_timer is not None:
                 self._focus_timer.stop()
             from textual.color import Color as _Color
             self.styles.background = _Color(26, 35, 50)  # #1a2332
-            # 闪亮：先亮粉再沉到 rose
-            self.styles.border_left = ("heavy", _Color(253, 164, 175))  # #fda4af
-            self._focus_timer = self.set_timer(0.3, self._settle_focus)
+            self._rainbow_idx = 0
+            self._update_border()
+            self._focus_timer = self.set_interval(0.12, self._rainbow_tick)
 
-        def _settle_focus(self) -> None:
-            """高亮结束，沉淀为静态 rose。"""
-            from textual.color import Color as _Color
-            self.styles.border_left = ("heavy", _Color(244, 61, 94))
-            self._focus_timer = None
+        def _rainbow_tick(self) -> None:
+            """彩虹色步进：每步换一种颜色。"""
+            self._rainbow_idx = (self._rainbow_idx + 1) % len(self._RAINBOW_CYCLE)
+            self._update_border()
+
+        def _update_border(self) -> None:
+            self.styles.border_left = (
+                "heavy", self._RAINBOW_CYCLE[self._rainbow_idx],
+            )
 
         def on_blur(self) -> None:
             """失去焦点：清除所有选中样式。"""
