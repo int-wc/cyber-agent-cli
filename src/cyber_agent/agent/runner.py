@@ -659,16 +659,29 @@ class AgentRunner:
                 messages_to_summarize,
             )
         self.compressed_message_count = compression_boundary
-        log_context_compression(
-            before_chars=context_char_count,
-            after_chars=self._estimate_context_char_count(self.history),
-            compressed_count=len(messages_to_summarize),
-            method=(
+        self._last_compression = {
+            "count": len(messages_to_summarize),
+            "method": (
                 "local"
                 if self._estimate_context_token_count(summarizer_messages) > self.max_context_tokens
                 else "model"
             ),
+            "summary": self.compressed_summary,
+        }
+        log_context_compression(
+            before_chars=context_char_count,
+            after_chars=self._estimate_context_char_count(self.history),
+            compressed_count=len(messages_to_summarize),
+            method=self._last_compression["method"],
         )
+
+    @property
+    def last_compression_info(self) -> dict[str, object] | None:
+        """返回最近一次上下文压缩的快照，读取后自动清空。"""
+        info = getattr(self, "_last_compression", None)
+        if info is not None:
+            self._last_compression = None  # 一次性读取
+        return info
 
     def _shrink_model_messages_to_token_budget(
         self,

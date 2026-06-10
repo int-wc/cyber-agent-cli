@@ -204,6 +204,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         BINDINGS = [
             ("tab", "accept_completion", "接受补全"),
             ("ctrl+y", "copy_last_response", "复制最后回复"),
+            ("ctrl+b", "toggle_compressed_history", "压缩历史"),
         ]
 
         def __init__(
@@ -227,6 +228,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._cumulative_input_tokens = 0
             self._cumulative_output_tokens = 0
             self._cumulative_cost = 0.0
+            # 压缩历史视图状态
+            self._compression_visible = False
+            self._compression_widget: Static | None = None
 
         def compose(self) -> ComposeResult:
             yield ScrollableContainer(id="chat-view")
@@ -716,6 +720,46 @@ if TEXTUAL_IMPORT_ERROR is None:
                     if content.strip():
                         self.copy_to_clipboard(content)
                     break
+
+        def action_toggle_compressed_history(self) -> None:
+            """切换显示/隐藏上下文压缩摘要。"""
+            summary = getattr(self.runner, "compressed_summary", "") or ""
+            if not summary.strip():
+                return
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+
+            if self._compression_visible:
+                # 隐藏压缩摘要
+                if self._compression_widget is not None:
+                    try:
+                        chat_view.remove(self._compression_widget)
+                    except Exception:
+                        pass
+                    self._compression_widget = None
+                self._compression_visible = False
+                return
+
+            # 首次展开：创建并挂载压缩摘要面板
+            if self._compression_widget is None:
+                import re as _re
+                from rich.text import Text as RichText
+                from rich.panel import Panel
+                # 去除 Rich 标记，展示为纯文本
+                plain = _re.sub(r'\[/?\w+(?: [^\]]+)?\]', '', summary)
+                panel = Panel(
+                    RichText(f"📦 上下文压缩摘要\n\n{plain}", style="dim white"),
+                    title="压缩历史",
+                    border_style="dim yellow",
+                )
+                self._compression_widget = Static(panel)
+                # 挂载到聊天视图末尾
+                chat_view.mount(self._compression_widget)
+                chat_view.scroll_end(animate=False)
+            else:
+                # 已创建则直接显示
+                self._compression_widget.display = True
+
+            self._compression_visible = True
 
         def _set_busy(self, value: bool) -> None:
             self._is_busy = value

@@ -586,6 +586,9 @@ class FourPillarPipeline:
                         f"## [{role_str}] {desc}\n❌ 失败: {exc}"
                     )
 
+                # ── 上下文压缩通知 ──
+                self._emit_compression_notice()
+
             all_results.extend(round_results)
 
             if circuit_broken:
@@ -648,6 +651,15 @@ class FourPillarPipeline:
                 f"{aggregated}"
             )
             renderer.print_markdown(summary)
+
+    def _emit_compression_notice(self) -> None:
+        """检查 runner 最近是否触发了上下文压缩，若有则打印通知。"""
+        info = getattr(self._runner, "last_compression_info", None)
+        if info:
+            self._renderer.console.print(
+                f"  [dim yellow]📦 上下文压缩: {info['count']} 条历史消息已压缩"
+                f" ({info['method']})，按 Ctrl+B 查看详情[/]"
+            )
 
     # ── 重规划超时子任务 ──
     def _replan_single_task(
