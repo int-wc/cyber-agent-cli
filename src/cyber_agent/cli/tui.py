@@ -347,6 +347,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         #composer {{
             dock: bottom;
             background: {SURFACE_BG};
+            border-top: solid #334155;
             height: auto;
             margin: 0;
             padding: 0 1;
@@ -826,11 +827,10 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._reasoning_message = None
 
         def _show_token_usage(self, usage: dict[str, int]) -> None:
-            """在聊天区显示本轮 token 消耗及累计花费。"""
+            """累计 token 消耗并更新底部统计栏。"""
             input_tokens = usage.get("input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
-            # 累计
             self._cumulative_input_tokens += input_tokens
             self._cumulative_output_tokens += output_tokens
             cost = _estimate_cost(
@@ -838,16 +838,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 str(self.runtime_context.get("model_name", "")),
             )
             self._cumulative_cost += cost
-            cum_total = self._cumulative_input_tokens + self._cumulative_output_tokens
             self._update_token_status()
-            self._add_message(
-                "system",
-                f"本轮 ↑{input_tokens} ↓{output_tokens} ∑{total_tokens}"
-                f" │ ¥{cost:.4f}"
-                f" │ 累计 ↑{self._cumulative_input_tokens}"
-                f" ↓{self._cumulative_output_tokens} ∑{cum_total}"
-                f" │ ¥{self._cumulative_cost:.4f}",
-            )
 
         def _update_token_status(self) -> None:
             """更新底部持久状态栏。"""
