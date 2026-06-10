@@ -355,25 +355,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             if getattr(event, "button", 1) == 3:
                 event.stop()
                 text_area = self.query_one("#detail-content", TextArea)
-                selected = ""
-                if text_area.selection and not text_area.selection.is_empty():
-                    selected = text_area.selected_text or ""
+                selected = text_area.selected_text or ""
                 text = self._message._text
                 content = text.plain if isinstance(text, Text) else str(text)
                 self.app.push_screen(DetailContextMenuScreen(content, selected))
 
         def action_copy_detail(self) -> None:
             """复制：优先选中文字 → 全文。"""
-            try:
-                text_area = self.query_one("#detail-content", TextArea)
-                if text_area.selection and not text_area.selection.is_empty():
-                    selected = text_area.selected_text
-                    if selected:
-                        self.app.copy_to_clipboard(selected)
-                        self.app.notify("✅ 已复制选中文字", severity="information")
-                        return
-            except Exception:
-                pass
+            text_area = self.query_one("#detail-content", TextArea)
+            selected = text_area.selected_text or ""
+            if selected:
+                self.app.copy_to_clipboard(selected)
+                self.app.notify("✅ 已复制选中文字", severity="information")
+                return
             # 无选中时复制全文
             text = self._message._text
             content = text.plain if isinstance(text, Text) else str(text)
