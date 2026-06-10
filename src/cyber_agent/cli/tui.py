@@ -77,6 +77,8 @@ if TEXTUAL_IMPORT_ERROR is None:
     class ChatMessage(Static):
         """用于显示聊天消息的富文本气泡，支持可选 Markdown 渲染。"""
 
+        ALLOW_SELECT = True
+
         def __init__(
             self,
             role: str,
@@ -201,6 +203,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         BINDINGS = [
             ("tab", "accept_completion", "接受补全"),
+            ("ctrl+y", "copy_last_response", "复制最后回复"),
         ]
 
         def __init__(
@@ -396,73 +399,91 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.call_from_thread(self._finish_request)
 
         def _run_multi_agent_turn(self, user_input: str) -> None:
-            """TUI 中执行多 Agent 协作任务，带进度显示。"""
-            from ..agent.orchestrator import MultiAgentOrchestrator
+            """使用四柱管线（FourPillarPipeline）替代旧的多 Agent 编排器。"""
+            import re as _re
+            from ..agent.pipeline import FourPillarPipeline
             from .app import ensure_runtime_capabilities
+            from .render import CliRenderer
+            from rich.console import Console
 
             ensure_runtime_capabilities(self.runtime_context, self.runner)
 
             self.call_from_thread(
                 self._set_assistant_content,
-                "🚀 正在启动多 Agent 协作模式...",
+                "🚀 正在启动四柱 Agent 管线...",
             )
 
-            def orch_event_handler(event_type: str, payload: object) -> None:
-                if event_type == "orchestration_plan_done":
-                    self.call_from_thread(
-                        self._append_assistant_content,
-                        f"\n\n📋 任务已分解为 {payload.get('subtask_count', 0)} 个子任务",
-                    )
-                elif event_type == "orchestration_executing":
-                    self.call_from_thread(
-                        self._append_assistant_content,
-                        f"\n⚡ 并发执行 {payload.get('subtask_count', 0)} 个子任务...",
-                    )
-                elif event_type == "subtask_complete":
-                    icon = "✓" if payload.get("success") else "✗"
-                    self.call_from_thread(
-                        self._append_assistant_content,
-                        f"\n  {icon} {payload.get('role', '?')}",
-                    )
-                elif event_type == "orchestration_reflecting":
-                    self.call_from_thread(
-                        self._append_assistant_content,
-                        f"\n🪞 反思评估中...",
-                    )
-                elif event_type == "orchestration_end":
-                    self.call_from_thread(
-                        self._append_assistant_content,
-                        "\n\n",
-                    )
+            auto_decision = bool(self.runtime_context.get("auto_decision", False))
+            real_console = Console()
 
-            orchestrator = MultiAgentOrchestrator(
-                tools=list(getattr(self.runner, "tools", [])),
-                execution_controller=self.runtime_context.get("execution_controller"),
-                event_handler=orch_event_handler,
-                service_name=str(self.runtime_context.get("service_name", "deepseek")),
-                model_name=str(self.runtime_context.get("model_name", "")),
-                api_key=str(self.runtime_context.get("api_key", "")),
-                base_url=str(self.runtime_context.get("base_url", "")) if self.runtime_context.get("base_url") is not None else None,
+            # ── 控制台转发器：将管线输出同时发往 stdout 和 TUI 聊天视图 ──
+            class _PipelineTuiForwarder:
+                """将 Rich Console.print() 的输出同时转发到 TUI 聊天视图。"""
+
+                def __init__(self, tui_app: "CyberAgentTUI") -> None:
+                    self._console = real_console
+                    self._tui = tui_app
+                    self._last_text = ""
+
+                def print(self, *args: object, **kwargs: object) -> None:  # noqa: A003
+                    self._console.print(*args, **kwargs)
+                    text = self._extract_plain(*args)
+                    if text:
+                        self._last_text = text
+                        self._tui.call_from_thread(
+                            self._tui._append_assistant_content,
+                            text + "\n",
+                        )
+
+                @staticmethod
+                def _extract_plain(*args: object) -> str:
+                    """将 Rich print 参数转为纯文本，去除 Rich 标记样式。"""
+                    parts: list[str] = []
+                    for arg in args:
+                        if arg is None:
+                            continue
+                        if isinstance(arg, str):
+                            parts.append(_re.sub(r'\[/?\w+(?: [^\]]+)?\]', '', arg))
+                        elif hasattr(arg, 'plain'):
+                            parts.append(str(getattr(arg, 'plain', '')))
+                        else:
+                            parts.append(str(arg))
+                    return " ".join(parts).strip()
+
+            # ── 创建 TUI 兼容的 renderer ──
+            tui_console = _PipelineTuiForwarder(self)
+            tui_renderer = CliRenderer(console=tui_console)  # type: ignore[arg-type]
+
+            # 接管 print_markdown：最终摘要以 Markdown 渲染到聊天视图
+            _original_print_md = tui_renderer.print_markdown
+            def _tui_print_markdown(content: str) -> None:
+                _original_print_md(content)
+                if content.strip():
+                    self.call_from_thread(
+                        self._ensure_final_assistant_content,
+                        content,
+                    )
+            tui_renderer.print_markdown = _tui_print_markdown  # type: ignore[method-assign]
+
+            # 接管 add_token_usage：同步 token 到状态栏
+            _original_add_token = tui_renderer.add_token_usage
+            def _tui_add_token_usage(in_tokens: int, out_tokens: int) -> None:
+                _original_add_token(in_tokens, out_tokens)
+                self.call_from_thread(self._update_token_status)
+            tui_renderer.add_token_usage = _tui_add_token_usage  # type: ignore[method-assign]
+
+            pipeline = FourPillarPipeline(
+                runner=self.runner,
+                runtime_context=self.runtime_context,
+                renderer=tui_renderer,
             )
 
             try:
-                result = orchestrator.run(user_input)
-                if result:
-                    from rich.markdown import Markdown as RichMarkdown
-                    try:
-                        self.call_from_thread(
-                            self._set_assistant_content,
-                            RichMarkdown(result),
-                        )
-                    except Exception:
-                        self.call_from_thread(
-                            self._set_assistant_content,
-                            result,
-                        )
+                pipeline.run(user_input, auto_decision=auto_decision)
             except Exception as exc:
                 self.call_from_thread(
                     self._replace_assistant_with_error,
-                    f"多 Agent 协作失败：{exc}",
+                    f"四柱管线执行失败：{exc}",
                 )
                 self.call_from_thread(self._finish_request)
 
@@ -495,7 +516,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             composer_title.append("Tab", style=KEYCAP_STYLE)
             composer_title.append(" 接受补全，输入 ")
             composer_title.append("/", style=COMMAND_NAME_STYLE)
-            composer_title.append(" 可查看命令。")
+            composer_title.append(" 可查看命令，")
+            composer_title.append("Ctrl+Y", style=KEYCAP_STYLE)
+            composer_title.append(" 复制最后回复。")
             return composer_title
 
         def _build_welcome_panel(self) -> RenderableType:
@@ -677,6 +700,22 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._set_busy(False)
             self.query_one("#chat-input", Input).focus()
             self._active_assistant_message = None
+
+        def action_copy_last_response(self) -> None:
+            """复制最后一条助手回复到系统剪贴板。"""
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+            messages = list(chat_view.children)
+            # 从后往前找最后一条 assistant 消息
+            for child in reversed(messages):
+                if isinstance(child, ChatMessage) and child.role == "assistant":
+                    text = child._text
+                    if isinstance(text, Text):
+                        content = text.plain
+                    else:
+                        content = str(text)
+                    if content.strip():
+                        self.copy_to_clipboard(content)
+                    break
 
         def _set_busy(self, value: bool) -> None:
             self._is_busy = value
