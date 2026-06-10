@@ -310,12 +310,6 @@ if TEXTUAL_IMPORT_ERROR is None:
             border: round #14b8a6;
         }}
 
-        @keyframes focus-pulse {{
-            0% {{ border: round #14b8a6; background: #1a2332; }}
-            50% {{ border: round #2dd4bf; background: #1e2a3a; }}
-            100% {{ border: round #14b8a6; background: #1a2332; }}
-        }}
-
         #command-hint {{
             color: {TEXT_MUTED};
             height: auto;
@@ -339,7 +333,6 @@ if TEXTUAL_IMPORT_ERROR is None:
         ChatMessage:focus {{
             background: #1a2332;
             border: round #14b8a6;
-            animation: focus-pulse 2s infinite ease-in-out;
         }}
 
         ChatMessage:focus > .rich-text {{
