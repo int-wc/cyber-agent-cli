@@ -78,6 +78,7 @@ if TEXTUAL_IMPORT_ERROR is None:
         """用于显示聊天消息的富文本气泡，支持可选 Markdown 渲染。"""
 
         ALLOW_SELECT = True
+        FOCUS_ON_CLICK = True
 
         def __init__(
             self,
@@ -180,6 +181,10 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         ChatMessage {{
             margin: 0 0 1 0;
+        }}
+
+        ChatMessage:focus {{
+            border: round #14b8a6;
         }}
 
         RenderableBlock {{
@@ -520,9 +525,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             composer_title.append("Tab", style=KEYCAP_STYLE)
             composer_title.append(" 接受补全，输入 ")
             composer_title.append("/", style=COMMAND_NAME_STYLE)
-            composer_title.append(" 可查看命令，")
+            composer_title.append(" 可查看命令，点击消息选中，")
             composer_title.append("Ctrl+Y", style=KEYCAP_STYLE)
-            composer_title.append(" 复制最后回复。")
+            composer_title.append(" 复制。")
             return composer_title
 
         def _build_welcome_panel(self) -> RenderableType:
@@ -706,17 +711,28 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._active_assistant_message = None
 
         def action_copy_last_response(self) -> None:
-            """复制最后一条助手回复到系统剪贴板。"""
+            """复制文本：优先选中文字 → 焦点消息全文 → 最后助手回复。"""
+            # 1. 优先复制用户用鼠标选中的文字片段
+            selected = self.get_selected_text()
+            if selected:
+                self.copy_to_clipboard(selected)
+                return
+
+            # 2. 复制当前焦点消息的全文
+            focused = self.focused
+            if isinstance(focused, ChatMessage):
+                text = focused._text
+                content = text.plain if isinstance(text, Text) else str(text)
+                if content.strip():
+                    self.copy_to_clipboard(content)
+                    return
+
+            # 3. 兜底：复制最后一条助手回复
             chat_view = self.query_one("#chat-view", ScrollableContainer)
-            messages = list(chat_view.children)
-            # 从后往前找最后一条 assistant 消息
-            for child in reversed(messages):
+            for child in reversed(list(chat_view.children)):
                 if isinstance(child, ChatMessage) and child.role == "assistant":
                     text = child._text
-                    if isinstance(text, Text):
-                        content = text.plain
-                    else:
-                        content = str(text)
+                    content = text.plain if isinstance(text, Text) else str(text)
                     if content.strip():
                         self.copy_to_clipboard(content)
                     break
