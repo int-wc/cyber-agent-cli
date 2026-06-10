@@ -161,75 +161,109 @@ if TEXTUAL_IMPORT_ERROR is None:
             """右键点击弹出上下文菜单。"""
             if getattr(event, "button", 1) == 3:
                 event.stop()
-                self.app._show_context_menu(self)
+                self.app._show_context_menu(
+                    self, event.screen_x, event.screen_y,
+                )
 
 
-    class ContextMenuScreen(Screen[None]):
-        """右键上下文菜单弹窗。"""
+    class FloatingContextMenu(Container):
+        """浮动右键菜单，出现在点击位置处。"""
 
         def __init__(
             self, message: ChatMessage, selected_text: str,
+            screen_x: int, screen_y: int,
         ) -> None:
             super().__init__()
             self._message = message
             self._selected_text = selected_text
+            self._screen_x = screen_x
+            self._screen_y = screen_y
+            self._dismissed = False
 
         def compose(self) -> ComposeResult:
-            with Container(id="ctx-panel"):
+            yield Static(id="ctx-dismiss")
+            with Container(id="ctx-body"):
                 yield Static("选择操作", id="ctx-title")
-                yield Button("📋 复制全文", id="copy-all", variant="primary")
+                yield Button("📋 复制全文", id="copy-all")
                 if self._selected_text:
-                    yield Button(
-                        "✂️ 复制选中", id="copy-selected", variant="default",
-                    )
-                yield Button("🪟 查看详情", id="view-detail", variant="default")
-                yield Button("✕ 关闭", id="close", variant="warning")
+                    yield Button("✂️ 复制选中", id="copy-selected")
+                yield Button("🪟 查看详情", id="view-detail")
+                yield Button("✕ 关闭", id="close")
 
         CSS = f"""
-        ContextMenuScreen {{
-            align: center middle;
-            background: rgba(0,0,0,0.5);
+        FloatingContextMenu {{
+            layer: overlay;
+            width: 100%;
+            height: 100%;
         }}
-        #ctx-panel {{
+        #ctx-dismiss {{
+            width: 100%;
+            height: 100%;
+        }}
+        #ctx-body {{
+            position: absolute;
             width: auto;
-            min-width: 30;
+            min-width: 28;
             height: auto;
             background: {SURFACE_BG};
             border: round #14b8a6;
-            padding: 1 2;
+            padding: 0 1;
+        }}
+        #ctx-body > Button {{
+            width: 100%;
+            margin: 0 0 1 0;
         }}
         #ctx-title {{
             text-align: center;
+            padding: 0 2;
             color: {TEXT_MUTED};
-            margin: 0 0 1 0;
-        }}
-        #ctx-panel > Button {{
-            width: 100%;
             margin: 0 0 1 0;
         }}
         """
 
         BINDINGS = [
-            ("escape", "close_menu", "关闭"),
+            ("escape", "dismiss_menu", "关闭"),
         ]
 
-        def action_close_menu(self) -> None:
-            self.app.pop_screen()
+        def action_dismiss_menu(self) -> None:
+            self._safe_dismiss()
+
+        def on_mount(self) -> None:
+            """将菜单定位到点击位置附近。"""
+            panel = self.query_one("#ctx-body")
+            sw, sh = self.screen.size
+            x = min(self._screen_x + 1, max(sw - 30, 1))
+            y = min(max(self._screen_y - 2, 1), max(sh - 10, 1))
+            panel.styles.offset = (x, y)
+
+        def on_click(self, event) -> None:
+            """点击遮罩层（菜单外部）时关闭。"""
+            if self._dismissed:
+                return
+            try:
+                target = self.screen.get_widget_at(event.screen_x, event.screen_y)
+            except Exception:
+                return
+            if isinstance(target, tuple):
+                target = target[0]
+            if getattr(target, "id", "") == "ctx-dismiss":
+                self._safe_dismiss()
+
+        def _safe_dismiss(self) -> None:
+            if self._dismissed:
+                return
+            self._dismissed = True
+            self.remove()
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             bid = event.button.id
-            if bid == "close":
-                self.app.pop_screen()
-                return
-
             if bid == "copy-all":
                 self._copy_all()
             elif bid == "copy-selected":
                 self._copy_selected()
             elif bid == "view-detail":
                 self._show_detail()
-
-            self.app.pop_screen()
+            self._safe_dismiss()
 
         def _copy_all(self) -> None:
             text = self._message._text
@@ -708,14 +742,15 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def _build_composer_title(self) -> Text:
             composer_title = Text(style=COMMAND_DESC_STYLE)
-            composer_title.append("Enter")
+            composer_title.append("Enter", style=KEYCAP_STYLE)
             composer_title.append(" 发送，")
-            composer_title.append("Tab")
+            composer_title.append("Tab", style=KEYCAP_STYLE)
             composer_title.append(" 补全，")
-            composer_title.append("/")
-            composer_title.append(" 命令，右键")
+            composer_title.append("/", style=COMMAND_NAME_STYLE)
+            composer_title.append(" 命令，")
+            composer_title.append("右键", style=KEYCAP_STYLE)
             composer_title.append(" 菜单，")
-            composer_title.append("Ctrl+Y")
+            composer_title.append("Ctrl+Y", style=KEYCAP_STYLE)
             composer_title.append(" 复制")
             return composer_title
 
@@ -977,10 +1012,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             )
             self._update_command_hint(input_widget.value)
 
-        def _show_context_menu(self, message: ChatMessage) -> None:
-            """弹出右键上下文菜单。"""
+        def _show_context_menu(
+            self, message: ChatMessage,
+            screen_x: int = 2, screen_y: int = 2,
+        ) -> None:
+            """在点击位置弹出浮动右键菜单。"""
+            # 移除已存在的浮动菜单
+            for existing in self.screen.query("FloatingContextMenu"):
+                existing.remove()
             selected = self.screen.get_selected_text() or ""
-            self.push_screen(ContextMenuScreen(message, selected))
+            menu = FloatingContextMenu(
+                message, selected, screen_x, screen_y,
+            )
+            self.screen.mount(menu)
 
 
 def launch_textual_chat(
