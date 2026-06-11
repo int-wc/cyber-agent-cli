@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..execution_control import ExecutionInterruptedError
+from .events import AgentEventType
 from .roles import AgentRole, get_role_label, get_role_prompt
 
 if TYPE_CHECKING:
@@ -155,6 +156,42 @@ class FourPillarPipeline:
         from .approval import ApprovalDecision
         return ApprovalDecision(True, "管线自动批准所有工具调用。")
 
+    def _make_subtask_event_handler(
+        self,
+        renderer: Any,
+    ) -> Any:
+        """创建子任务执行期间的事件处理器，将工具调用进度转发到渲染器。
+
+        CLI 模式下直接输出到终端，TUI 模式下通过 _PipelineTuiForwarder
+        转发到聊天视图。
+        """
+        subtask_start = time_mod.monotonic()
+
+        def handler(event_type: str | AgentEventType, data: Any) -> None:
+            nonlocal subtask_start
+            if event_type == AgentEventType.TOOL_CALL:
+                calls = data if isinstance(data, (list, tuple)) else []
+                for tc in calls:
+                    name = tc.get("name", "?")
+                    args = tc.get("args", {})
+                    args_str = json.dumps(args, ensure_ascii=False)
+                    if len(args_str) > 150:
+                        args_str = args_str[:150] + "..."
+                    elapsed = time_mod.monotonic() - subtask_start
+                    renderer.console.print(
+                        f"      [dim]🔧 {name}({args_str})  ({elapsed:.0f}s)[/]"
+                    )
+            elif event_type == AgentEventType.TOOL_RESULT:
+                content = data.get("content", "")
+                tool_name = data.get("tool_name", "")
+                first_line = content.strip().split("\n")[0][:120]
+                if first_line:
+                    renderer.console.print(
+                        f"      [dim]  {tool_name} → {first_line}[/]"
+                    )
+
+        return handler
+
     def _run_subtask_with_escalating_timeout(
         self,
         subtask_prompt: str,
@@ -171,7 +208,8 @@ class FourPillarPipeline:
 
         if controller is None:
             return self._runner.run(
-                subtask_prompt, verbose=False, event_handler=None,
+                subtask_prompt, verbose=False,
+                event_handler=self._make_subtask_event_handler(renderer),
                 approval_handler=self._auto_approval_handler,
             )
 
@@ -194,10 +232,11 @@ class FourPillarPipeline:
             timer.start()
 
             try:
+                event_handler = self._make_subtask_event_handler(renderer)
                 result = self._runner.run(
                     subtask_prompt,
                     verbose=False,
-                    event_handler=None,
+                    event_handler=event_handler,
                     approval_handler=self._auto_approval_handler,
                 )
                 if escalation > 0:
