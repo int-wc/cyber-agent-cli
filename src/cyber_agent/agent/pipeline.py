@@ -34,9 +34,9 @@ if TYPE_CHECKING:
     from .runner import AgentRunner
 
 # ── 超时与熔断常量 ──
-BASE_SUBTASK_TIMEOUT = 180           # 子任务基础超时（秒）
+BASE_SUBTASK_TIMEOUT = 300           # 子任务基础超时（秒），复杂分析需 5 分钟以上
 TIMEOUT_ESCALATION_STEP = 60         # 每次超时叠加步长（秒）
-MAX_TIMEOUT_ESCALATIONS = 5          # 最多叠加次数 → 最大 180+5×60=480s
+MAX_TIMEOUT_ESCALATIONS = 3          # 最多叠加次数 → 最大 300+3×60=480s
 LLM_CALL_TIMEOUT_SECONDS = 120       # 单次角色 LLM 调用超时（秒）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
 
@@ -556,7 +556,13 @@ class FourPillarPipeline:
                     subtask_prompt += f"\n上下文: {ctx}\n"
                 if reasoning:
                     subtask_prompt += f"\n整体背景: {reasoning[:300]}\n"
-                subtask_prompt += "\n请直接调用工具完成此子任务，给出核心结果。"
+                subtask_prompt += (
+                    "\n请直接调用工具完成此子任务，给出核心结果。"
+                    "\n\n效率要求："
+                    "\n- 一步到位，避免分批读取——能一次读完的就不要分多次"
+                    "\n- 不需要用 run_shell_command 执行 # 注释来记录思路，直接在回复中说明"
+                    "\n- 每个工具有明确目的，不做多余的探测"
+                )
 
                 try:
                     result = self._run_subtask_with_escalating_timeout(
