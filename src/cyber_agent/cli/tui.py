@@ -67,12 +67,51 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 运行环境缺依赖�
 if TEXTUAL_IMPORT_ERROR is None:
 
     class RenderableBlock(Static):
-        """用于在聊天区挂载共享 Rich 面板，避免 TUI 重新实现一套样式。"""
+        """用于在聊天区挂载共享 Rich 面板，支持右键菜单。"""
 
-        def __init__(self, renderable: RenderableType) -> None:
+        def __init__(
+            self,
+            renderable: RenderableType,
+            *,
+            role: str = "system",
+            text_content: str = "",
+        ) -> None:
             super().__init__()
             self.renderable = renderable
+            self.role = role
+            self._text_content = text_content or self._extract_text(renderable)
             self.update(renderable)
+
+        @staticmethod
+        def _extract_text(renderable: RenderableType) -> str:
+            """从 Rich renderable 中递归提取纯文本，支持 Panel、Table、Text 等嵌套结构。"""
+            from rich.panel import Panel as _RichPanel
+            if isinstance(renderable, str):
+                return renderable
+            if isinstance(renderable, Text):
+                return renderable.plain
+            # Rich Panel → 递归提取内部 renderable
+            if isinstance(renderable, _RichPanel):
+                inner = renderable.renderable
+                if inner is not None and inner is not renderable:
+                    return RenderableBlock._extract_text(inner)
+            # Rich Table → 遍历所有列的单元格（col.cells 是 col._cells 的生成器）
+            if hasattr(renderable, "columns"):
+                parts: list[str] = []
+                for col in renderable.columns:
+                    if hasattr(col, "cells"):
+                        for cell in col.cells:
+                            txt = RenderableBlock._extract_text(cell)
+                            if txt.strip():
+                                parts.append(txt)
+                return " ".join(parts)
+            return str(renderable)
+
+        def on_click(self, event) -> None:
+            """右键点击弹出上下文菜单。"""
+            if getattr(event, "button", 1) == 3:
+                event.stop()
+                self.app._show_context_menu(self)
 
 
     class ChatMessage(Static):
@@ -124,13 +163,28 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return bool(self._text.plain.strip())
             return bool(self._text.strip())
 
+        @staticmethod
+        def _render_markdown_to_rich(content: str) -> RenderableType:
+            """预渲染 Markdown 到 Rich Text（保留样式），避免 Rich Markdown 在 Textual 中渲染丢失样式。"""
+            try:
+                from rich.console import Console as _RichConsole
+                from rich.markdown import Markdown as _RichMd
+                from rich.text import Text as _RichText
+                _buf = _RichConsole(width=240, color_system="truecolor", force_terminal=True)
+                with _buf.capture() as _cap:
+                    _buf.print(_RichMd(content, code_theme="monokai"))
+                _styled = _cap.get()
+                if _styled.strip():
+                    return _RichText.from_ansi(_styled)
+            except Exception:
+                pass
+            return content
+
         def _refresh_renderable(self) -> None:
             if self._use_markdown and isinstance(self._text, str) and self._text.strip():
-                try:
-                    self.update(TextualMarkdown(self._text))
-                    return
-                except Exception:
-                    pass
+                rendered = self._render_markdown_to_rich(self._text)
+                self.update(build_chat_message_panel(self.role, rendered))
+                return
             self.update(build_chat_message_panel(self.role, self._text))
 
         def on_click(self, event) -> None:
@@ -141,13 +195,15 @@ if TEXTUAL_IMPORT_ERROR is None:
 
 
     class ContextMenuScreen(Screen[None]):
-        """右键上下文菜单。"""
+        """右键上下文菜单——支持 ChatMessage 与 RenderableBlock。"""
+
+        ALLOW_SELECT = True
 
         def __init__(
-            self, message: ChatMessage, selected_text: str,
+            self, widget: ChatMessage | RenderableBlock, selected_text: str,
         ) -> None:
             super().__init__()
-            self._message = message
+            self._widget = widget
             self._selected_text = selected_text
 
         def compose(self) -> ComposeResult:
@@ -193,7 +249,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             if bid == "view-detail":
                 # 先弹菜单，再推详情屏，防止 pop_screen 误弹
                 self.app.pop_screen()
-                self.app.push_screen(MessageDetailScreen(self._message))
+                self.app.push_screen(MessageDetailScreen(self._widget))
                 return
             if bid == "copy-all":
                 self._copy_all()
@@ -202,10 +258,19 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.app.pop_screen()
 
         def _copy_all(self) -> None:
-            text = self._message._text
-            content = text.plain if isinstance(text, Text) else str(text)
+            content = self._get_widget_text(self._widget)
             self.app.copy_to_clipboard(content)
             self.app.notify("✅ 已复制全文", severity="information")
+
+        @staticmethod
+        def _get_widget_text(widget: object) -> str:
+            """从 ChatMessage 或 RenderableBlock 中提取纯文本。"""
+            if hasattr(widget, "_text"):
+                t = getattr(widget, "_text")
+                return t.plain if isinstance(t, Text) else str(t)
+            if hasattr(widget, "_text_content"):
+                return str(getattr(widget, "_text_content"))
+            return str(widget)
 
         def _copy_selected(self) -> None:
             self.app.copy_to_clipboard(self._selected_text)
@@ -213,19 +278,34 @@ if TEXTUAL_IMPORT_ERROR is None:
 
 
     class MessageDetailScreen(Screen[None]):
-        """消息详情全屏查看。"""
+        """消息详情全屏查看——支持 ChatMessage 与 RenderableBlock。"""
 
-        def __init__(self, message: ChatMessage) -> None:
+        ALLOW_SELECT = True
+
+        def __init__(self, widget: ChatMessage | RenderableBlock) -> None:
             super().__init__()
-            self._message = message
+            self._widget = widget
+
+        @staticmethod
+        def _get_widget_text(widget: object) -> str:
+            if hasattr(widget, "_text"):
+                t = getattr(widget, "_text")
+                return t.plain if isinstance(t, Text) else str(t)
+            if hasattr(widget, "_text_content"):
+                return str(getattr(widget, "_text_content"))
+            return str(widget)
+
+        @staticmethod
+        def _get_widget_role(widget: object) -> str:
+            return str(getattr(widget, "role", "system"))
 
         def compose(self) -> ComposeResult:
-            text = self._message._text
-            content = text.plain if isinstance(text, Text) else str(text)
+            content = self._get_widget_text(self._widget)
+            role = self._get_widget_role(self._widget)
             with Container(id="detail-container"):
                 with Container(id="title-bar"):
                     yield Static(
-                        f"📄 消息详情 — {self._message.role}",
+                        f"📄 消息详情 — {role}",
                         id="detail-title",
                     )
                     yield Static("Ctrl+Shift+G 复制选中 · Ctrl+Shift+Y 全部复制", id="detail-hint")
@@ -316,8 +396,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def action_copy_all(self) -> None:
             """复制全部内容。"""
-            text = self._message._text
-            content = text.plain if isinstance(text, Text) else str(text)
+            content = self._get_widget_text(self._widget)
             if content.strip():
                 self.app.copy_to_clipboard(content)
                 self.app.notify("✅ 已复制全部内容", severity="information")
@@ -409,18 +488,6 @@ if TEXTUAL_IMPORT_ERROR is None:
             margin: 0 0 1 0;
         }}
 
-        .tool-result {{
-            border: round green;
-            margin: 0 0 1 0;
-            padding: 0 1;
-        }}
-
-        .tool-result-title {{
-            color: green;
-            text-style: bold;
-            margin: 1 0 0 0;
-        }}
-
         #startup-view {{
             display: none;
             layer: overlay;
@@ -465,9 +532,17 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._cumulative_input_tokens = 0
             self._cumulative_output_tokens = 0
             self._cumulative_cost = 0.0
+            # 流式 token 估算（用于实时刷新状态栏）
+            self._current_response_chars = 0   # 当前响应段已收到的字符数
+            self._estimated_output_tokens = 0   # 本轮估算的 output token 总和
             # 压缩历史视图状态
             self._compression_visible = False
             self._compression_widget: Static | None = None
+            # 最近一次助手回复原文（用于复制等操作）
+            self._last_assistant_raw_text: str = ""
+            # 输入历史导航（上下键）
+            self._history_index = -1
+            self._history_draft: str = ""
 
         def compose(self) -> ComposeResult:
             yield ScrollableContainer(id="chat-view")
@@ -504,10 +579,61 @@ if TEXTUAL_IMPORT_ERROR is None:
         def on_input_changed(self, event: Input.Changed) -> None:
             self._update_command_hint(event.value)
 
+        def on_key(self, event) -> None:
+            """全局键盘事件：输入框聚焦时上下键切换输入历史。
+
+            注意：不能用 on_input_key——Textual 没有 Input.Key 事件，
+            键盘事件统一通过 App/Screen 层的 on_key 分发。
+            """
+            focused = self.focused
+            if focused is None:
+                return
+            # 只拦截 chat-input 获得焦点时的 up/down
+            if getattr(focused, "id", None) == "chat-input":
+                if event.key == "up":
+                    event.stop()
+                    self._navigate_history(-1)
+                elif event.key == "down":
+                    event.stop()
+                    self._navigate_history(1)
+
+        def _navigate_history(self, direction: int) -> None:
+            """沿输入历史向前（-1=UP）或向后（1=DOWN）导航。"""
+            input_widget = self.query_one("#chat-input", Input)
+            recent = self.runtime_context.get("_recent_inputs", [])
+            if not recent:
+                return
+
+            if direction == -1:  # UP → 更旧
+                if self._history_index == -1:
+                    # 首次离开当前输入，保存草稿
+                    self._history_draft = input_widget.value
+                new_index = min(self._history_index + 1, len(recent) - 1)
+                if new_index == self._history_index:
+                    return
+                self._history_index = new_index
+                input_widget.value = recent[-(self._history_index + 1)]
+
+            elif direction == 1:  # DOWN → 更新
+                if self._history_index == -1:
+                    return  # 已经在最新位置
+                self._history_index -= 1
+                if self._history_index == -1:
+                    input_widget.value = self._history_draft
+                else:
+                    input_widget.value = recent[-(self._history_index + 1)]
+
+            if hasattr(input_widget, "cursor_position"):
+                input_widget.cursor_position = len(input_widget.value)
+
         def on_input_submitted(self, event: Input.Submitted) -> None:
             user_input = event.value.strip()
             if not user_input:
                 return
+
+            # 提交后重置历史导航
+            self._history_index = -1
+            self._history_draft = ""
 
             event.input.value = ""
             self._update_command_hint("")
@@ -524,6 +650,12 @@ if TEXTUAL_IMPORT_ERROR is None:
 
             self._add_message("user", user_input)
 
+            # 记录最近输入历史（上限 50 条）
+            recent = self.runtime_context.setdefault("_recent_inputs", [])
+            recent.append(user_input)
+            if len(recent) > 50:
+                recent.pop(0)
+
             from .app import capture_builtin_command_renderables
 
             builtin_result, renderables = capture_builtin_command_renderables(
@@ -539,6 +671,8 @@ if TEXTUAL_IMPORT_ERROR is None:
             if builtin_result is True:
                 for renderable in renderables:
                     self._add_renderable(renderable)
+                # session 切换后刷新标题栏
+                self._refresh_composer_title()
                 return
 
             self._set_busy(True)
@@ -553,13 +687,16 @@ if TEXTUAL_IMPORT_ERROR is None:
                     self.call_from_thread(self._append_reasoning, str(payload))
                     return
                 if event_type == AgentEventType.RESPONSE_BEGIN:
+                    self._current_response_chars = 0
                     self.call_from_thread(self._flush_reasoning)
                     self.call_from_thread(self._set_assistant_content, "")
                     return
                 if event_type == AgentEventType.RESPONSE_TOKEN:
+                    self._current_response_chars += 1
                     self.call_from_thread(self._append_assistant_content, str(payload))
                     return
                 if event_type == AgentEventType.RESPONSE_END and isinstance(payload, dict):
+                    self.call_from_thread(self._on_response_segment_end)
                     content = str(payload.get("content", ""))
                     has_tool_calls = bool(payload.get("has_tool_calls", False))
                     if content and not has_tool_calls:
@@ -764,6 +901,11 @@ if TEXTUAL_IMPORT_ERROR is None:
             composer_title.append(" 退出，")
             composer_title.append("Ctrl+C", style=KEYCAP_STYLE)
             composer_title.append(" 取消")
+            # 会话标识
+            session_id = str(self.runtime_context.get("session_id", ""))
+            if session_id:
+                short_id = session_id[-12:] if len(session_id) > 12 else session_id
+                composer_title.append(f" │ {short_id}", style="dim #64748b")
             return composer_title
 
         def _build_welcome_panel(self) -> RenderableType:
@@ -835,13 +977,32 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._reasoning_parts = []
             self._reasoning_message = None
 
+        def _on_response_segment_end(self) -> None:
+            """一段响应结束，用字符数估算 output token 并实时刷新状态栏。"""
+            if self._current_response_chars > 0:
+                # 中英文平均约 4 字符 = 1 token
+                estimated = max(1, self._current_response_chars // 4)
+                self._estimated_output_tokens += estimated
+                self._cumulative_output_tokens += estimated
+                self._current_response_chars = 0
+                self._update_token_status()
+
         def _show_token_usage(self, usage: dict[str, int]) -> None:
-            """累计 token 消耗并更新底部统计栏。"""
+            """累计 token 消耗并更新底部统计栏——用实际值纠正 stream 期间的估算。"""
             input_tokens = usage.get("input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
-            total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
-            self._cumulative_input_tokens += input_tokens
+            # 如果有尚未估算的残留字符，先估算
+            if self._current_response_chars > 0:
+                estimated = max(1, self._current_response_chars // 4)
+                self._estimated_output_tokens += estimated
+                self._cumulative_output_tokens += estimated
+                self._current_response_chars = 0
+            # 移除本轮估算值，替换为实际 API 返回值
+            self._cumulative_output_tokens -= self._estimated_output_tokens
             self._cumulative_output_tokens += output_tokens
+            self._estimated_output_tokens = 0
+            # input token 仅在 TURN_END 可知
+            self._cumulative_input_tokens += input_tokens
             cost = _estimate_cost(
                 input_tokens, output_tokens,
                 str(self.runtime_context.get("model_name", "")),
@@ -869,17 +1030,13 @@ if TEXTUAL_IMPORT_ERROR is None:
             return block
 
         def _add_tool_result(self, content: str) -> None:
-            """添加工具结果，使用 TextualMarkdown 渲染。"""
+            """添加工具结果（纯 Panel，不做 markdown 解析）。"""
             chat_view = self.query_one("#chat-view", ScrollableContainer)
-            if _TEXTUAL_MARKDOWN_AVAILABLE and content.strip():
-                container = Container(classes="tool-result")
-                container.mount(
-                    Static("🔧 工具结果", classes="tool-result-title"),
-                    TextualMarkdown(content),
-                )
-                chat_view.mount(container)
-            else:
-                chat_view.mount(RenderableBlock(build_tool_result_panel(content)))
+            chat_view.mount(RenderableBlock(
+                build_tool_result_panel(content),
+                role="tool",
+                text_content=content,
+            ))
             chat_view.scroll_end(animate=False)
 
         def _start_startup_animation(self) -> None:
@@ -926,7 +1083,14 @@ if TEXTUAL_IMPORT_ERROR is None:
             self.query_one("#chat-view", ScrollableContainer).scroll_end(animate=False)
 
         def _ensure_final_assistant_content(self, content: str) -> None:
-            """确保最终输出以 Markdown 渲染。"""
+            """确保最终输出以 Markdown 渲染。
+
+            先预渲染 Markdown → Rich Text（保留样式），再放入 Panel，
+            避免替换 widget 带来的滚动问题。
+            """
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+            self._last_assistant_raw_text = content
+
             if self._active_assistant_message is None:
                 self._active_assistant_message = self._add_message(
                     "assistant", content, use_markdown=True,
@@ -936,7 +1100,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             if _TEXTUAL_MARKDOWN_AVAILABLE:
                 self._active_assistant_message._use_markdown = True
             self._active_assistant_message.set_content(content)
-            self.query_one("#chat-view", ScrollableContainer).scroll_end(animate=False)
+            chat_view.scroll_end(animate=False)
 
         def _replace_assistant_with_error(self, content: str) -> None:
             if self._active_assistant_message is None:
@@ -951,14 +1115,14 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._active_assistant_message = None
 
         def action_copy_last_response(self) -> None:
-            """复制文本：优先选中文字 → 焦点消息全文 → 最后助手回复。"""
+            """复制文本：优先选中文字 → 焦点消息全文 → 最后助手回复原文。"""
             # 1. 优先复制用户用鼠标选中的文字片段
             selected = self.screen.get_selected_text()
             if selected:
                 self.copy_to_clipboard(selected)
                 return
 
-            # 2. 复制当前焦点消息的全文
+            # 2. 复制当前焦点消息的全文（ChatMessage 模式）
             focused = self.focused
             if isinstance(focused, ChatMessage):
                 text = focused._text
@@ -967,7 +1131,12 @@ if TEXTUAL_IMPORT_ERROR is None:
                     self.copy_to_clipboard(content)
                     return
 
-            # 3. 兜底：复制最后一条助手回复
+            # 3. 兜底：复制最后一条助手回复原文（兼容 Markdown 容器模式）
+            if self._last_assistant_raw_text.strip():
+                self.copy_to_clipboard(self._last_assistant_raw_text)
+                return
+
+            # 4. 更兜底：扫描 ChatMessage
             chat_view = self.query_one("#chat-view", ScrollableContainer)
             for child in reversed(list(chat_view.children)):
                 if isinstance(child, ChatMessage) and child.role == "assistant":
@@ -1028,13 +1197,29 @@ if TEXTUAL_IMPORT_ERROR is None:
             )
             self._update_command_hint(input_widget.value)
 
-        def _show_context_menu(self, message: ChatMessage) -> None:
-            """弹出右键上下文菜单。"""
+        def _refresh_composer_title(self) -> None:
+            """刷新标题栏（会话切换后更新 session ID 显示）。"""
+            try:
+                self.query_one("#composer-title", Static).update(
+                    self._build_composer_title()
+                )
+            except Exception:
+                pass
+
+        def _show_context_menu(
+            self, widget: ChatMessage | RenderableBlock,
+        ) -> None:
+            """弹出右键上下文菜单——支持 ChatMessage 与 RenderableBlock。"""
             selected = self.screen.get_selected_text() or ""
-            self.push_screen(ContextMenuScreen(message, selected))
+            self.push_screen(ContextMenuScreen(widget, selected))
 
         def action_quit_app(self) -> None:
-            """退出整个程序（Ctrl+Q）。"""
+            """退出整个程序（Ctrl+Q），保存当前会话。"""
+            from .app import persist_runtime_session
+            try:
+                persist_runtime_session(self.runner, self.runtime_context)
+            except Exception:
+                pass
             self.exit()
 
         def action_cancel_task(self) -> None:
@@ -1058,8 +1243,17 @@ def launch_textual_chat(
     if TEXTUAL_IMPORT_ERROR is not None:  # pragma: no cover - 降级分支
         raise ModuleNotFoundError(str(TEXTUAL_IMPORT_ERROR)) from TEXTUAL_IMPORT_ERROR
 
-    CyberAgentTUI(
+    app = CyberAgentTUI(
         runner,
         runtime_context,
         show_banner=show_banner,
-    ).run()
+    )
+    try:
+        app.run()
+    finally:
+        # 异常退出（终端关闭、SIGINT 等）时兜底保存当前会话
+        from .app import persist_runtime_session
+        try:
+            persist_runtime_session(runner, runtime_context)
+        except Exception:
+            pass

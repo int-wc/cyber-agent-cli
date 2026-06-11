@@ -617,6 +617,121 @@ def _handle_file(
     return True
 
 
+# ── /session ──
+
+def _handle_session(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """查看/管理多会话：list、load、new、show。"""
+    from .app import (
+        load_history_session_into_runner,
+        print_history_list,
+        show_history_session,
+        start_new_runtime_session,
+        sync_runtime_context_from_runner,
+        _load_session_store_support,
+    )
+
+    sub = tokens[1] if len(tokens) >= 2 else ""
+
+    if sub == "list":
+        print_history_list(runtime_context, cli_renderer)
+        return True
+
+    if sub == "load" and len(tokens) >= 3:
+        _safe(lambda: load_history_session_into_runner(
+            tokens[2], runner, runtime_context, cli_renderer,
+        ), cli_renderer)
+        return True
+
+    if sub == "show" and len(tokens) >= 3:
+        _safe(lambda: show_history_session(tokens[2], cli_renderer), cli_renderer)
+        return True
+
+    if sub == "new":
+        runner.reset()
+        start_new_runtime_session(runtime_context)
+        sync_runtime_context_from_runner(runtime_context, runner)
+        cli_renderer.print_info(
+            f"已创建新会话：{runtime_context['session_id']}"
+        )
+        return True
+
+    # /session → 当前会话信息 + 列表摘要
+    current_id = str(runtime_context.get("session_id", "无"))
+    source_id = runtime_context.get("session_source_id")
+    summary_lines = [f"当前会话: {current_id}"]
+    if source_id:
+        summary_lines.append(f"来源会话: {source_id}")
+
+    session_store = _load_session_store_support()
+    stored = session_store["list_stored_sessions"]()
+    if stored:
+        summary_lines.append(f"磁盘上共有 {len(stored)} 个已保存会话")
+        for s in stored[:5]:
+            marker = " ← 当前" if s.session_id == current_id else ""
+            summary_lines.append(
+                f"  {s.session_id[:20]} {s.title[:30]} {marker}"
+            )
+        if len(stored) > 5:
+            summary_lines.append(f"  ... 还有 {len(stored) - 5} 个")
+    else:
+        summary_lines.append("磁盘上暂无已保存会话")
+
+    summary_lines.append("")
+    summary_lines.append("子命令: list / load <id> / show <id> / new")
+
+    cli_renderer.print_info("\n".join(summary_lines))
+    return True
+
+
+# ── /capabilities ──
+
+def _handle_capabilities(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """展示所有动态注册能力（capabilities）的摘要清单。"""
+    from .app import ensure_runtime_capabilities
+
+    ensure_runtime_capabilities(runtime_context, runner)
+    capability_registry: CapabilityRegistry | None = runtime_context.get("capability_registry")
+    if capability_registry is None:
+        cli_renderer.print_info("能力系统未初始化。")
+        return True
+
+    capabilities = capability_registry.list_capabilities()
+    if not capabilities:
+        cli_renderer.print_info("当前没有已注册的能力。使用 / 后 Agent 可通过 create_generated_capability 工具生成。")
+        return True
+
+    rows: list[tuple[str, str]] = []
+    for cap in capabilities:
+        status_symbol = {
+            "satisfied": "✅", "awaiting_user_feedback": "⏳",
+            "needs_feedback": "⚠️", "draft": "📝",
+        }.get(cap.status, "❓")
+        enabled_tag = "" if cap.enabled else " 🔒已禁用"
+        kind_tag = "🧩 skill" if cap.kind == "skill" else "🔧 tool"
+        reg_tag = f" +as_tool" if cap.register_as_tool else ""
+        desc = (cap.description[:80] + "…") if len(cap.description) > 80 else cap.description
+        rows.append((
+            cap.name,
+            f"{kind_tag}{reg_tag} | rev={cap.revision} | "
+            f"{status_symbol}{enabled_tag}\n{desc}",
+        ))
+
+    cli_renderer.print_status(rows, title="动态能力（Capabilities）")
+    return True
+
+
 # ── 命令注册表 ──
 
 _COMMAND_REGISTRY: dict[str, CommandHandler] = {
@@ -639,6 +754,8 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/multi": _handle_multi,
     "/auto-decision": _handle_auto_decision,
     "/file": _handle_file,
+    "/session": _handle_session,
+    "/capabilities": _handle_capabilities,
 }
 
 

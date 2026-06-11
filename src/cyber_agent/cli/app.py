@@ -853,6 +853,7 @@ def persist_runtime_session(
         mode=runner.mode.value,
         approval_policy=runtime_context["approval_policy"].value,
         source_session_id=runtime_context.get("session_source_id"),
+        recent_inputs=runtime_context.get("_recent_inputs"),
     )
     runtime_context["session_storage_dir"] = session_path.parent
     return session_path
@@ -1133,6 +1134,9 @@ def load_history_session_into_runner(
     runner.restore_history(stored_session.messages)
     runtime_context["approval_policy"] = target_approval_policy
     sync_runtime_context_from_runner(runtime_context, runner)
+    # 恢复该历史会话的用户输入记录（用于上下键导航）
+    if stored_session.recent_inputs:
+        runtime_context["_recent_inputs"] = list(stored_session.recent_inputs)
     start_new_runtime_session(
         runtime_context,
         source_session_id=stored_session.summary.session_id,

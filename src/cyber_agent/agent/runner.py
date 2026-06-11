@@ -1020,16 +1020,30 @@ class AgentRunner:
 
                     tool_registry = self._build_tool_registry()
                     round_tool_messages: list[ToolMessage] = []
-                    for tool_call in ai_message.tool_calls:
-                        self.execution_controller.ensure_not_cancelled()
-                        tool_message = self._invoke_tool(
-                            tool_call,
-                            tool_registry,
-                            approval_handler,
-                            event_handler,
-                        )
-                        self.history.append(tool_message)
-                        round_tool_messages.append(tool_message)
+                    try:
+                        for tool_call in ai_message.tool_calls:
+                            self.execution_controller.ensure_not_cancelled()
+                            tool_message = self._invoke_tool(
+                                tool_call,
+                                tool_registry,
+                                approval_handler,
+                                event_handler,
+                            )
+                            self.history.append(tool_message)
+                            round_tool_messages.append(tool_message)
+                    except ExecutionInterruptedError:
+                        # 超时/中断后清理本轮追加的孤立 AIMessage(tool_calls) 和
+                        # 已部分执行的 ToolMessage，防止 retry 时 API 端收到
+                        # tool_use 无对应 tool_result 的 400 错误
+                        for remove_idx in range(len(self.history) - 1, -1, -1):
+                            if self.history[remove_idx] is ai_message:
+                                del self.history[remove_idx:]
+                                break
+                        # 同时移除本轮开始的 HumanMessage（line 987），
+                        # 将 history 恢复至调用 run() 前的状态
+                        if self.history and isinstance(self.history[-1], HumanMessage):
+                            self.history.pop()
+                        raise
                     round_signature = build_tool_round_signature(
                         ai_message.tool_calls,
                         round_tool_messages,

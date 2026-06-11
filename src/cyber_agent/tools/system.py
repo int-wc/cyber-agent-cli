@@ -100,7 +100,11 @@ def _start_stream_reader(stream: object) -> tuple[list[str], threading.Thread]:
             return
         try:
             while True:
-                chunk = stream.read(1024)
+                try:
+                    chunk = stream.read(1024)
+                except ValueError:
+                    # 另一线程关闭了管道，终止读取
+                    break
                 if not chunk:
                     break
                 chunks.append(chunk)

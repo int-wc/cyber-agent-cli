@@ -69,6 +69,7 @@ class StoredSession:
 
     summary: StoredSessionSummary
     messages: list[BaseMessage]
+    recent_inputs: list[str] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -276,6 +277,7 @@ def save_session_history(
     mode: str,
     approval_policy: str,
     source_session_id: str | None = None,
+    recent_inputs: list[str] | None = None,
     base_dir: Path | None = None,
 ) -> Path:
     """将当前会话历史保存到工作目录下的独立会话文件。"""
@@ -300,6 +302,7 @@ def save_session_history(
         "mode": mode,
         "approval_policy": approval_policy,
         "source_session_id": source_session_id,
+        "recent_inputs": recent_inputs or [],
         "turn_count": sum(isinstance(message, HumanMessage) for message in messages),
         "message_count": len(messages),
         "messages": serialized_messages,
@@ -344,6 +347,7 @@ def load_session_history(
     return StoredSession(
         summary=_build_summary(raw_data, session_id),
         messages=messages,
+        recent_inputs=raw_data.get("recent_inputs", None),
     )
 
 
