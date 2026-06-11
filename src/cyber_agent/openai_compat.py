@@ -86,17 +86,68 @@ def prepare_messages_for_openai_compatible_service(
     return [_strip_reasoning_content(message) for message in messages]
 
 
+def _extract_text_from_content(
+    content: str | list[str | dict],
+) -> str:
+    """从 LangChain 消息 content 字段中提取纯文本，兼容 str 和 list[dict] 格式。"""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text", "")))
+    return "".join(parts)
+
+
 def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
-    """兼容旧历史：DeepSeek 工具调用 assistant 消息至少要有 reasoning_content 字段。"""
+    """将 DeepSeek 格式的 reasoning_content 转为 content blocks 格式。
+
+    网关将 DeepSeek 请求转发到 Claude 时，Claude 的 extended thinking
+    要求 assistant 消息的 content 为 blocks 数组：
+      [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
+    而非顶层 reasoning_content 字段。
+    """
     if not isinstance(message, AIMessage):
         return message
-    if not message.tool_calls and "tool_calls" not in message.additional_kwargs:
-        return message
-    if "reasoning_content" in message.additional_kwargs:
-        return message
-    additional_kwargs = dict(message.additional_kwargs)
-    additional_kwargs["reasoning_content"] = ""
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+
+    reasoning_content = message.additional_kwargs.get("reasoning_content")
+
+    # 有 reasoning_content → 转为 content blocks 格式
+    if reasoning_content is not None:
+        # 如果 content 已经是 list 格式且包含 thinking block，跳过
+        if isinstance(message.content, list):
+            if any(
+                isinstance(block, dict) and block.get("type") == "thinking"
+                for block in message.content
+            ):
+                return message
+
+        text_part = _extract_text_from_content(message.content)
+        new_content: list[dict[str, str]] = []
+        if reasoning_content:
+            new_content.append({"type": "thinking", "thinking": str(reasoning_content)})
+        if text_part:
+            new_content.append({"type": "text", "text": text_part})
+        if not new_content:
+            return message
+
+        additional_kwargs = dict(message.additional_kwargs)
+        return AIMessage(
+            content=new_content,
+            additional_kwargs=additional_kwargs,
+            tool_calls=list(message.tool_calls) if message.tool_calls else [],
+            id=message.id,
+        )
+
+    # 工具调用的 assistant 消息至少要有 reasoning_content 空字段
+    if message.tool_calls or "tool_calls" in message.additional_kwargs:
+        additional_kwargs = dict(message.additional_kwargs)
+        additional_kwargs["reasoning_content"] = ""
+        return message.model_copy(update={"additional_kwargs": additional_kwargs})
+
+    return message
 
 
 def _strip_reasoning_content(message: BaseMessage) -> BaseMessage:
