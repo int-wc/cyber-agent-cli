@@ -69,11 +69,12 @@ class FourPillarPipeline:
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
-        """懒加载用于角色思考的 LLM（无工具绑定，纯文本调用）。"""
+        """懒加载用于角色思考的 LLM（无工具绑定，纯文本调用）。
+        自动检测 API 格式使用对应客户端。"""
         if self._llm is not None:
             return self._llm
 
-        from .._lazy_imports import load_chat_openai
+        from .._lazy_imports import load_llm_for_api
         from ..config import settings
 
         service_name = str(self._runtime_context.get("service_name", "deepseek"))
@@ -82,12 +83,10 @@ class FourPillarPipeline:
         if not base_url:
             base_url = settings.resolve_base_url(service_name)
 
-        # 强制使用 OpenAI 格式端点
-        if "api.deepseek.com/anthropic" in base_url:
-            base_url = "https://api.deepseek.com/v1"
-
         # 角色思考用子模型降低成本
         model_name = settings.subagent_model.replace("[1m]", "").strip()
+
+        llm_cls, is_anthropic = load_llm_for_api(base_url)
 
         kwargs = settings.get_chat_openai_kwargs(
             service_name,
@@ -95,14 +94,22 @@ class FourPillarPipeline:
             api_key=api_key,
             base_url=base_url,
         )
-        # 禁用 thinking，角色不需要深度推理
-        if "extra_body" in kwargs and isinstance(kwargs["extra_body"], dict):
-            kwargs["extra_body"]["thinking"] = {"type": "disabled"}
+
+        if is_anthropic:
+            # ChatAnthropic 不支持 extra_body / openai_api_key
+            kwargs.pop("extra_body", None)
+            kwargs.pop("openai_api_key", None)
+            kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+            # 在 extra_body 被移除后不再设置 thinking
+        else:
+            # OpenAI 兼容端点：禁用 thinking，角色不需要深度推理
+            if "extra_body" in kwargs and isinstance(kwargs["extra_body"], dict):
+                kwargs["extra_body"]["thinking"] = {"type": "disabled"}
 
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*extra_body.*")
-            self._llm = load_chat_openai()(**kwargs)
+            self._llm = llm_cls(**kwargs)
         return self._llm
 
     def _call_role(

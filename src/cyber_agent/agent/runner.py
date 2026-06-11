@@ -307,28 +307,19 @@ class AgentRunner:
 
     def _build_llm(self) -> Any:
         """按当前运行时服务商与模型配置重建模型实例。
-
-        DeepSeek 的 anthropic 兼容端点（api.deepseek.com/anthropic）虽含
-        /anthropic 路径，但其协议格式为 OpenAI 兼容而非 Anthropic Messages
-        API，必须使用 ChatOpenAI。Pipeline 和 Orchestrator 已有相同处理，
-        此处保持一致。
+        自动检测 API 格式：Anthropic 兼容 API 使用 ChatAnthropic，
+        OpenAI 兼容 API 使用 ChatOpenAI。
         """
         import warnings
 
-        # DeepSeek anthropic 端点 → 强制使用 ChatOpenAI
         resolved_url = self.base_url or ""
-        if self.service == "deepseek" and "api.deepseek.com/anthropic" in resolved_url:
-            resolved_url = "https://api.deepseek.com/v1"
-            llm_cls = load_chat_openai()
-            is_anthropic = False
-        else:
-            try:
-                llm_cls, is_anthropic = load_llm_for_api(resolved_url)
-            except ModuleNotFoundError as exc:
-                missing = "langchain_anthropic" if is_anthropic_api(resolved_url) else "langchain_openai"
-                raise ModuleNotFoundError(
-                    f"缺少 `{missing}` 依赖，当前环境无法创建模型客户端。"
-                ) from exc
+        try:
+            llm_cls, is_anthropic = load_llm_for_api(resolved_url)
+        except ModuleNotFoundError as exc:
+            missing = "langchain_anthropic" if is_anthropic_api(resolved_url) else "langchain_openai"
+            raise ModuleNotFoundError(
+                f"缺少 `{missing}` 依赖，当前环境无法创建模型客户端。"
+            ) from exc
 
         if not is_anthropic and self.service == "deepseek":
             if str(getattr(llm_cls, "__module__", "")).startswith("langchain_openai."):
@@ -341,9 +332,10 @@ class AgentRunner:
             base_url=resolved_url,
         )
         if is_anthropic:
-            # ChatAnthropic uses anthropic_api_key instead of api_key
-            kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+            # ChatAnthropic 不支持 extra_body 和 openai_api_key
+            kwargs.pop("extra_body", None)
             kwargs.pop("openai_api_key", None)
+            kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
         # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*extra_body.*")

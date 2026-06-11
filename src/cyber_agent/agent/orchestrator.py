@@ -97,24 +97,16 @@ class MultiAgentOrchestrator:
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
-        """懒加载模型实例。对 DeepSeek Anthropic 端点强制使用 ChatOpenAI 格式，
-        因为 Anthropic 格式的 input_schema 可能不被 DeepSeek 正确解析，
-        导致工具调用时 input 始终为空。
-
-        同时禁用 thinking 模式，因为 DeepSeek /v1 端点要求多轮对话中
-        将 reasoning_content 回传，而角色 Agent 的工具调用循环无法保证这点。
-        """
+        """懒加载模型实例。自动检测 API 格式使用对应客户端。
+        角色 Agent 无工具调用，无需处理工具 call schema 兼容问题。"""
         if self._llm is None:
             import warnings
-            from .._lazy_imports import load_chat_openai
+            from .._lazy_imports import load_llm_for_api
 
-            # 解析实际使用的基址：DeepSeek Anthropic 端点 → 切换到 OpenAI 格式
             resolved_url = self.base_url or ""
-            if "api.deepseek.com/anthropic" in resolved_url:
-                resolved_url = "https://api.deepseek.com/v1"
-
-            # DeepSeek /v1 端点不接受 [1m] 后缀，需去除
             clean_model = self.model_name.replace("[1m]", "").strip()
+
+            llm_cls, is_anthropic = load_llm_for_api(resolved_url)
 
             kwargs = settings.get_chat_openai_kwargs(
                 self.service_name,
@@ -122,14 +114,22 @@ class MultiAgentOrchestrator:
                 api_key=self.api_key,
                 base_url=resolved_url,
             )
-            # 禁用 thinking 模式：角色 Agent 不需要深度推理，
-            # 且 /v1 端点的 reasoning_content 回传要求会导致多轮工具调用失败
-            if "extra_body" in kwargs and isinstance(kwargs["extra_body"], dict):
-                kwargs["extra_body"]["thinking"] = {"type": "disabled"}
+
+            if is_anthropic:
+                # ChatAnthropic 不支持 extra_body / openai_api_key
+                kwargs.pop("extra_body", None)
+                kwargs.pop("openai_api_key", None)
+                kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
+                # 角色 Agent 无工具调用，anthropic 端点自身控制 thinking
+            else:
+                # OpenAI 兼容端点：禁用 thinking 模式，
+                # 角色 Agent 不需要深度推理
+                if "extra_body" in kwargs and isinstance(kwargs["extra_body"], dict):
+                    kwargs["extra_body"]["thinking"] = {"type": "disabled"}
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*extra_body.*")
-                self._llm = load_chat_openai()(**kwargs)
+                self._llm = llm_cls(**kwargs)
         return self._llm
 
     def _emit(self, event_type: str, payload: Any) -> None:

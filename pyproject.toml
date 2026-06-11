@@ -8,6 +8,7 @@ dependencies = [
     "langchain>=0.2.0",
     "langgraph>=0.2.0",
     "langchain-openai",
+    "langchain-anthropic",
     "typer>=0.16.0",
     "click>=8.2.1",
     "textual>=0.52.0",
