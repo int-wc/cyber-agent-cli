@@ -7,6 +7,7 @@ Requires-Python: >=3.11
 Requires-Dist: langchain>=0.2.0
 Requires-Dist: langgraph>=0.2.0
 Requires-Dist: langchain-openai
+Requires-Dist: langchain-anthropic
 Requires-Dist: typer>=0.16.0
 Requires-Dist: click>=8.2.1
 Requires-Dist: textual>=0.52.0

@@ -104,59 +104,43 @@ def _extract_text_from_content(
 
 
 def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
-    """将 DeepSeek 格式的 reasoning_content 转为 content blocks 格式。
+    """将 DeepSeek 格式的 reasoning_content 嵌入消息纯文本中。
 
-    网关将 DeepSeek 请求转发到 Claude 时，Claude 的 extended thinking
-    要求 assistant 消息的 content 为 blocks 数组：
-      [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
-    而非顶层 reasoning_content 字段。
+    不再创建 list[dict] content blocks（type:thinking + type:text），
+    因为 clauses:
+      - 通过本地网关转发到 Claude 时，网关会自行处理 reasoning_content
+      - 直连 DeepSeek anthropic 端点时不支持 type:thinking block
+      - 直连 DeepSeek /v1 端点时 content 应为纯文本
 
-    转换完成后必须从 additional_kwargs 中移除 reasoning_content，否则
-    patched_convert_message_to_dict 会将其序列化为顶层字段。网关收到后
-    会认为 content blocks 之外还有 reasoning_content 需要转换，导致
-    二次创建 thinking block——若 reasoning_content 为空字符串则会创建
-    缺少 thinking 字段的畸形 block，Claude API 报 "missing field thinking"。
+    改为将 reasoning 作为 <thinking> 标记嵌入文本开头，并剥离
+    additional_kwargs 中的 reasoning_content，避免 serialization 时
+    作为顶层字段残留导致不稳定。
     """
     if not isinstance(message, AIMessage):
         return message
 
     reasoning_content = message.additional_kwargs.get("reasoning_content")
 
-    # 有 reasoning_content → 转为 content blocks 格式
     if reasoning_content is not None:
-        # 如果 content 已经是 list 格式且包含 thinking block，跳过
-        if isinstance(message.content, list):
-            if any(
-                isinstance(block, dict) and block.get("type") == "thinking"
-                for block in message.content
-            ):
-                return message
-
         text_part = _extract_text_from_content(message.content)
-        new_content: list[dict[str, str]] = []
+        # 将 reasoning 作为标记嵌入纯文本，不创建 content block
         if reasoning_content:
-            new_content.append({"type": "thinking", "thinking": str(reasoning_content)})
-        if text_part:
-            new_content.append({"type": "text", "text": text_part})
-        if not new_content:
-            return message
+            merged = f"<thinking>\n{reasoning_content}\n</thinking>\n\n{text_part}" if text_part else f"<thinking>\n{reasoning_content}\n</thinking>"
+        else:
+            merged = text_part
 
-        # 剥离 reasoning_content，防止 serialization 时作为顶层字段残留，
-        # 导致网关二次创建 thinking block（与上方已转好的 blocks 冲突）
         additional_kwargs = {
             k: v for k, v in message.additional_kwargs.items()
             if k != "reasoning_content"
         }
         return AIMessage(
-            content=new_content,
+            content=merged,
             additional_kwargs=additional_kwargs,
             tool_calls=list(message.tool_calls) if message.tool_calls else [],
             id=message.id,
         )
 
-    # 工具调用的 assistant 消息：不要添加空 reasoning_content。
-    # 网关收到空值 reasoning_content 后会创建 {"type": "thinking"} 缺少
-    # thinking 字段的 content block，Claude API 拒绝。
+    # 工具调用消息：确保没有空 reasoning_content 残留
     if message.tool_calls or "tool_calls" in message.additional_kwargs:
         additional_kwargs = dict(message.additional_kwargs)
         additional_kwargs.pop("reasoning_content", None)
