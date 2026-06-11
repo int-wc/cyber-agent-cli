@@ -191,11 +191,21 @@ class FourPillarPipeline:
             elif event_type == AgentEventType.TOOL_RESULT:
                 content = data.get("content", "")
                 tool_name = data.get("tool_name", "")
-                first_line = content.strip().split("\n")[0][:120]
-                if first_line:
-                    renderer.console.print(
-                        f"      [dim]  {tool_name} → {first_line}[/]"
-                    )
+                lines = content.strip().split("\n")
+                # run_shell_command 的第一行总是 "命令: xxx"（重复 🔧 行），
+                # 改为只展示退出码，减少冗余
+                if tool_name == "run_shell_command":
+                    exit_line = next((l for l in lines if l.startswith("退出码:")), "")
+                    if exit_line:
+                        renderer.console.print(
+                            f"      [dim]  {tool_name} → {exit_line}[/]"
+                        )
+                else:
+                    first_line = lines[0][:120] if lines else ""
+                    if first_line:
+                        renderer.console.print(
+                            f"      [dim]  {tool_name} → {first_line}[/]"
+                        )
 
         return handler
 

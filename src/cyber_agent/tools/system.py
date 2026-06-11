@@ -166,6 +166,12 @@ def _run_process_with_controller(
                 execution_controller.ensure_not_cancelled()
 
             if process.poll() is not None:
+                # 关闭管道写端：后台子进程（如 java -jar ... &）可能仍持有写端
+                # 导致 reader 线程的 stream.read(1024) 永远等不到 EOF 而死锁
+                if process.stdout is not None and not process.stdout.closed:
+                    process.stdout.close()
+                if process.stderr is not None and not process.stderr.closed:
+                    process.stderr.close()
                 stdout, stderr = _collect_stream_output(
                     stdout_chunks,
                     stderr_chunks,
