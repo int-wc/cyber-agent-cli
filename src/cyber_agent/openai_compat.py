@@ -60,7 +60,9 @@ def ensure_deepseek_reasoning_content_compat() -> None:
         message_dict = original_convert_message(message)
         if isinstance(message, AIMessage):
             reasoning_content = message.additional_kwargs.get("reasoning_content")
-            if reasoning_content is not None:
+            # 只透传非空值：空字符串或 None 不添加，防止网关创建
+            # {"type": "thinking"}（缺少 thinking 字段）的 content block
+            if reasoning_content:
                 message_dict["reasoning_content"] = str(reasoning_content)
         return message_dict
 
@@ -108,6 +110,12 @@ def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
     要求 assistant 消息的 content 为 blocks 数组：
       [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
     而非顶层 reasoning_content 字段。
+
+    转换完成后必须从 additional_kwargs 中移除 reasoning_content，否则
+    patched_convert_message_to_dict 会将其序列化为顶层字段。网关收到后
+    会认为 content blocks 之外还有 reasoning_content 需要转换，导致
+    二次创建 thinking block——若 reasoning_content 为空字符串则会创建
+    缺少 thinking 字段的畸形 block，Claude API 报 "missing field thinking"。
     """
     if not isinstance(message, AIMessage):
         return message
@@ -133,7 +141,12 @@ def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
         if not new_content:
             return message
 
-        additional_kwargs = dict(message.additional_kwargs)
+        # 剥离 reasoning_content，防止 serialization 时作为顶层字段残留，
+        # 导致网关二次创建 thinking block（与上方已转好的 blocks 冲突）
+        additional_kwargs = {
+            k: v for k, v in message.additional_kwargs.items()
+            if k != "reasoning_content"
+        }
         return AIMessage(
             content=new_content,
             additional_kwargs=additional_kwargs,
@@ -141,10 +154,12 @@ def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
             id=message.id,
         )
 
-    # 工具调用的 assistant 消息至少要有 reasoning_content 空字段
+    # 工具调用的 assistant 消息：不要添加空 reasoning_content。
+    # 网关收到空值 reasoning_content 后会创建 {"type": "thinking"} 缺少
+    # thinking 字段的 content block，Claude API 拒绝。
     if message.tool_calls or "tool_calls" in message.additional_kwargs:
         additional_kwargs = dict(message.additional_kwargs)
-        additional_kwargs["reasoning_content"] = ""
+        additional_kwargs.pop("reasoning_content", None)
         return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
     return message

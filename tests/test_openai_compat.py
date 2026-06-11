@@ -47,8 +47,12 @@ class OpenAICompatTestCase(unittest.TestCase):
         self.assertEqual(message_payload["reasoning_content"], "需要先调用工具。")
         self.assertIn("tool_calls", message_payload)
 
-    def test_prepare_messages_adds_missing_reasoning_content_for_deepseek_tool_calls(self) -> None:
-        """测试：旧历史中的 DeepSeek 工具调用消息会补齐 reasoning_content 字段。"""
+    def test_prepare_messages_removes_reasoning_content_for_deepseek_tool_calls(self) -> None:
+        """测试：工具调用消息的 reasoning_content 会被移除。
+
+        网关收到空值 reasoning_content 后会创建缺少 thinking 字段的
+        content block 导致 Claude API 报错，因此不再补齐空值。
+        """
         message = AIMessage(
             content="",
             tool_calls=[
@@ -66,10 +70,8 @@ class OpenAICompatTestCase(unittest.TestCase):
             deepseek_thinking_enabled=True,
         )
 
-        self.assertEqual(
-            prepared_messages[0].additional_kwargs["reasoning_content"],
-            "",
-        )
+        # reasoning_content 不应出现在 additional_kwargs 中
+        self.assertNotIn("reasoning_content", prepared_messages[0].additional_kwargs)
 
     def test_prepare_messages_preserves_reasoning_content_for_deepseek(self) -> None:
         """测试：DeepSeek 始终透传 reasoning_content，因为 API 要求回传。"""
