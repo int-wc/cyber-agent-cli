@@ -307,17 +307,28 @@ class AgentRunner:
 
     def _build_llm(self) -> Any:
         """按当前运行时服务商与模型配置重建模型实例。
-        自动检测 API 格式：Anthropic 兼容 API 使用 ChatAnthropic，
-        OpenAI 兼容 API 使用 ChatOpenAI。"""
+
+        DeepSeek 的 anthropic 兼容端点（api.deepseek.com/anthropic）虽含
+        /anthropic 路径，但其协议格式为 OpenAI 兼容而非 Anthropic Messages
+        API，必须使用 ChatOpenAI。Pipeline 和 Orchestrator 已有相同处理，
+        此处保持一致。
+        """
         import warnings
 
-        try:
-            llm_cls, is_anthropic = load_llm_for_api(self.base_url)
-        except ModuleNotFoundError as exc:
-            missing = "langchain_anthropic" if is_anthropic_api(self.base_url) else "langchain_openai"
-            raise ModuleNotFoundError(
-                f"缺少 `{missing}` 依赖，当前环境无法创建模型客户端。"
-            ) from exc
+        # DeepSeek anthropic 端点 → 强制使用 ChatOpenAI
+        resolved_url = self.base_url or ""
+        if self.service == "deepseek" and "api.deepseek.com/anthropic" in resolved_url:
+            resolved_url = "https://api.deepseek.com/v1"
+            llm_cls = load_chat_openai()
+            is_anthropic = False
+        else:
+            try:
+                llm_cls, is_anthropic = load_llm_for_api(resolved_url)
+            except ModuleNotFoundError as exc:
+                missing = "langchain_anthropic" if is_anthropic_api(resolved_url) else "langchain_openai"
+                raise ModuleNotFoundError(
+                    f"缺少 `{missing}` 依赖，当前环境无法创建模型客户端。"
+                ) from exc
 
         if not is_anthropic and self.service == "deepseek":
             if str(getattr(llm_cls, "__module__", "")).startswith("langchain_openai."):
@@ -327,7 +338,7 @@ class AgentRunner:
             self.service,
             model_name=self.model_name,
             api_key=self.api_key,
-            base_url=self.base_url,
+            base_url=resolved_url,
         )
         if is_anthropic:
             # ChatAnthropic uses anthropic_api_key instead of api_key
