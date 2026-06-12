@@ -45,7 +45,7 @@ MAX_CYCLIC_TOOL_PATTERN_LENGTH = 4
 MAX_TOOL_RESULT_SIGNATURE_CHARS = 400
 MAX_MODEL_STREAM_START_ATTEMPTS = 2
 MODEL_STREAM_START_RETRY_DELAY_SECONDS = 0.3
-MAX_EMPTY_FINAL_RESPONSE_RETRIES = 1
+MAX_EMPTY_FINAL_RESPONSE_RETRIES = 2
 CONTEXT_TOKEN_SAFETY_MARGIN_RATIO = 0.95
 EMPTY_FINAL_RESPONSE_ERROR = (
     "模型返回空最终回复：本轮没有新的工具调用，也没有生成可发送文本。"
@@ -756,12 +756,22 @@ class AgentRunner:
                 )
             )
         tail = list(self.history[1 + self.compressed_message_count :])
-        # 安全兜底：当上下文压缩将前序 HumanMessage 全部压缩、尾部仅剩 ToolMessage
-        # 时，补充最近的 HumanMessage 以便模型理解上下文（Anthropic/DeepSeek API 要求至少一条 user 消息）
+
+        # 安全兜底 1：当上下文压缩将前序 HumanMessage 全部压缩、尾部仅剩 ToolMessage
+        # 时，补充最近的 HumanMessage 以便模型理解上下文
+        # （Anthropic/DeepSeek API 要求至少一条 user 消息）
         if tail and not any(isinstance(m, HumanMessage) for m in tail):
             for idx in range(len(self.history) - 1 - len(tail), 0, -1):
                 if isinstance(self.history[idx], HumanMessage):
                     tail.insert(0, self.history[idx])
+                    break
+
+        # 安全兜底 2：全部历史被压缩（压缩边界吞噬了所有非 SystemMessage），
+        # tail 完全为空 → 回退搜索最近的一条 HumanMessage
+        if not tail:
+            for idx in range(len(self.history) - 1, 0, -1):
+                if isinstance(self.history[idx], HumanMessage):
+                    tail.append(self.history[idx])
                     break
         model_messages.extend(tail)
         model_messages = self._shrink_model_messages_to_token_budget(model_messages)

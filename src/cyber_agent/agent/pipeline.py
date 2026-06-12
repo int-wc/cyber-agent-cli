@@ -20,6 +20,7 @@ from __future__ import annotations
 import concurrent.futures
 from datetime import datetime
 import json
+from pathlib import Path
 import re as _re_mod
 import threading
 import time as time_mod
@@ -27,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..execution_control import ExecutionInterruptedError
+from ..execution_control import ExecutionController, ExecutionInterruptedError
 from .events import AgentEventType
 from .roles import AgentRole, get_role_label, get_role_prompt
 
@@ -219,10 +220,29 @@ class FourPillarPipeline:
 
         CLI 模式下直接输出到终端，TUI 模式下通过 _PipelineTuiForwarder
         转发到聊天视图。
+
+        返回的 handler 附加了 .get_token_usage() 方法，调用方可在 run() 完成后
+        读取本次执行的 Token 消耗并累加到管线总计。
         """
         subtask_start = time_mod.monotonic()
-        # 暂存上一条 run_shell_command 的调用信息，供 TOOL_RESULT 合并输出
-        _pending_shell_call: dict = {}
+        # 工具调用按序入队，TOOL_RESULT 时输出单行。使用 【】包围状态避免 Rich 误解析。
+        _pending_tool_calls: list[dict] = []
+        _token_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+        def _determine_status(tool_name: str, content: str, exit_code: str) -> str:
+            if tool_name == "run_shell_command":
+                if exit_code == "0":
+                    return "成功"
+                elif exit_code not in ("?", ""):
+                    return "失败"
+                else:
+                    return "异常"
+            first_line = content.strip().split("\n")[0] if content.strip() else ""
+            if not content or not content.strip():
+                return "异常"
+            if first_line.startswith("❌"):
+                return "失败"
+            return "成功"
 
         def handler(event_type: str | AgentEventType, data: Any) -> None:
             nonlocal subtask_start
@@ -232,60 +252,54 @@ class FourPillarPipeline:
                     name = tc.get("name", "?")
                     args = tc.get("args", {})
                     args_str = json.dumps(args, ensure_ascii=False)
-                    if len(args_str) > 150:
-                        args_str = args_str[:150] + "..."
+                    if len(args_str) > 80:
+                        args_str = args_str[:80] + "…"
                     elapsed = time_mod.monotonic() - subtask_start
                     self._record_trace(
                         "tool_call",
                         detail=f"{name}({args_str[:300]})",
                         metadata={"tool": name, "elapsed_s": round(elapsed)},
                     )
-                    if name == "run_shell_command":
-                        # 暂存，TOOL_RESULT 时合并输出退出码
-                        _pending_shell_call["name"] = name
-                        _pending_shell_call["args_str"] = args_str
-                    else:
-                        renderer.console.print(
-                            f"      [dim]🔧 {name}({args_str})  ({elapsed:.0f}s)[/]"
-                        )
+                    _pending_tool_calls.append({
+                        "name": name, "args_str": args_str,
+                    })
             elif event_type == AgentEventType.TOOL_RESULT:
                 content = data.get("content", "")
                 tool_name = data.get("tool_name", "")
                 lines = content.strip().split("\n")
-                # 提取退出码供 trace 使用
                 _exit_code = "?"
                 for _l in lines:
                     if _l.startswith("退出码:"):
                         _exit_code = _l.replace("退出码:", "").strip()
                         break
+                status = _determine_status(tool_name, content, _exit_code)
                 self._record_trace(
                     "tool_result",
-                    detail=f"{tool_name} → exit={_exit_code}",
-                    metadata={"tool": tool_name, "exit_code": _exit_code},
+                    detail=f"{tool_name} → {status}",
+                    metadata={"tool": tool_name, "exit_code": _exit_code, "status": status},
                 )
-                if tool_name == "run_shell_command":
-                    # 将退出码合并在 🔧 行尾部，不单独输出结果行
-                    exit_code = _exit_code
-                    elapsed = time_mod.monotonic() - subtask_start
-                    # 防御：_pending_shell_call 可能因上一轮异常未正确清空
-                    if not _pending_shell_call:
+                elapsed = time_mod.monotonic() - subtask_start
+                if _pending_tool_calls:
+                    pinfo = _pending_tool_calls.pop(0)
+                    # 第一行：工具名 + 耗时 + 状态（始终在同一行）
+                    renderer.console.print(
+                        f"      [dim]🔧 {pinfo['name']}  ({elapsed:.0f}s)【{status}】[/]",
+                        no_wrap=True,
+                        overflow="ellipsis",
+                    )
+                    # 第二行：参数详情（如有）
+                    if pinfo['args_str']:
                         renderer.console.print(
-                            f"      [dim]  {tool_name} → [exit={exit_code}][/]"
+                            f"        [dim]{pinfo['name']}({pinfo['args_str']})[/]",
+                            overflow="ellipsis",
+                            no_wrap=True,
                         )
-                    else:
-                        pinfo = _pending_shell_call
-                        renderer.console.print(
-                            f"      [dim]🔧 {pinfo['name']}({pinfo['args_str']})"
-                            f"  ({elapsed:.0f}s) [exit={exit_code}][/]"
-                        )
-                        _pending_shell_call.clear()
-                else:
-                    first_line = lines[0][:120] if lines else ""
-                    if first_line:
-                        renderer.console.print(
-                            f"      [dim]  {tool_name} → {first_line}[/]"
-                        )
+            elif event_type == AgentEventType.TURN_END:
+                if isinstance(data, dict):
+                    _token_usage["input_tokens"] += data.get("input_tokens", 0)
+                    _token_usage["output_tokens"] += data.get("output_tokens", 0)
 
+        handler.get_token_usage = lambda: dict(_token_usage)  # type: ignore[attr-defined]
         return handler
 
     def _run_subtask_with_escalating_timeout(
@@ -335,6 +349,10 @@ class FourPillarPipeline:
                     event_handler=event_handler,
                     approval_handler=self._auto_approval_handler,
                 )
+                # 收集本轮 Token 用量并累加到管线总计
+                usage = event_handler.get_token_usage()
+                self.cumulative_input_tokens += usage["input_tokens"]
+                self.cumulative_output_tokens += usage["output_tokens"]
                 if escalation > 0:
                     renderer.console.print(
                         f"    [dim green]✓ 叠加重试成功[/]"
@@ -359,6 +377,186 @@ class FourPillarPipeline:
             f"子任务超过最大超时叠加次数（{MAX_TIMEOUT_ESCALATIONS}），"
             f"已放弃执行。"
         )
+
+    # ── 并行子任务支持 ──
+
+    def _create_subtask_runner(self) -> Any:
+        """创建独立的 AgentRunner 实例供并行子任务使用。
+
+        克隆主 runner 的配置，但持有独立的 ExecutionController 和空历史，
+        避免并行执行时互相影响历史记录和超时控制。
+        """
+        from .runner import AgentRunner
+
+        kwargs: dict[str, Any] = {
+            "tools": list(getattr(self._runner, "tools", [])),
+            "mode": getattr(self._runner, "mode", None),
+            "allowed_roots": list(getattr(self._runner, "allowed_roots", [])),
+            "command_registry": dict(getattr(self._runner, "command_registry", {})),
+            "extra_allowed_paths": list(getattr(self._runner, "extra_allowed_paths", [])),
+            "configured_registry": dict(getattr(self._runner, "configured_registry", {})),
+            # 独立的执行控制器——避免并行子任务互相中止
+            "execution_controller": ExecutionController(),
+            "capability_registry": getattr(self._runner, "capability_registry", None),
+            "file_skills": list(getattr(self._runner, "file_skills", [])),
+            "service_name": self._runtime_context.get("service_name", ""),
+            "model_name": self._runtime_context.get("model_name", ""),
+            "api_key": self._runtime_context.get("api_key", ""),
+            "base_url": self._runtime_context.get("base_url"),
+            "system_prompt": getattr(self._runner, "system_prompt", None),
+        }
+        # 仅传非 None 的可选值
+        for attr in ("max_context_chars", "max_context_tokens",
+                     "context_keep_recent_messages", "context_summary_max_chars"):
+            val = getattr(self._runner, attr, None)
+            if val is not None:
+                kwargs[attr] = val
+        return AgentRunner(**kwargs)
+
+    @staticmethod
+    def _build_subtask_prompt(
+        role_label: str,
+        desc: str,
+        *,
+        ctx: str = "",
+        reasoning: str = "",
+    ) -> str:
+        """构建单条子任务的 prompt 文本。"""
+        prompt = (
+            f"你是{role_label}。"
+            f"请完成以下子任务，只做这一件事，完成后给出结果摘要。\n\n"
+            f"子任务: {desc}\n"
+        )
+        if ctx:
+            prompt += f"\n上下文: {ctx}\n"
+        if reasoning:
+            prompt += f"\n整体背景: {reasoning[:300]}\n"
+        prompt += (
+            "\n请直接调用工具完成此子任务，给出核心结果。"
+            "\n\n效率要求："
+            "\n- 一步到位，避免分批读取——能一次读完的就不要分多次"
+            "\n- 不需要用 run_shell_command 执行 # 注释来记录思路，直接在回复中说明"
+            "\n- 每个工具有明确目的，不做多余的探测"
+        )
+        return prompt
+
+    def _run_parallel_batch(
+        self,
+        batch: list[dict],
+        *,
+        user_input: str,
+        reasoning: str,
+        additional_context: str,
+    ) -> list[str]:
+        """并发执行一批标记为 parallel 的子任务。
+
+        每个子任务使用独立的 AgentRunner 实例，通过 ThreadPoolExecutor
+        并发执行。全部完成后统一收集结果并按原始顺序返回。
+        """
+        renderer = self._renderer
+        n = len(batch)
+        renderer.console.print(
+            f"  [dim]── ⚡ 并行执行 {n} 个子任务 ...[/]"
+        )
+        self._record_trace("parallel_batch_start", detail=f"{n} 个子任务")
+
+        max_workers = min(n, 4)  # 最多 4 路并行，避免打满带宽
+
+        def _run_one(seq: int, task: dict) -> dict:
+            role_str = task.get("role", "runner")
+            desc = task.get("task_description", str(task))
+            ctx = task.get("context", "")
+            if additional_context:
+                ctx = f"{ctx}\n补充: {additional_context}" if ctx else additional_context
+            role_label = get_role_label(self._str_to_role(role_str))
+
+            subtask_prompt = self._build_subtask_prompt(
+                role_label, desc, ctx=ctx, reasoning=reasoning,
+            )
+            sub_runner = self._create_subtask_runner()
+            sub_renderer = renderer
+
+            try:
+                event_handler = self._make_subtask_event_handler(sub_renderer)
+                sub_start = time_mod.monotonic()
+                result = sub_runner.run(
+                    subtask_prompt,
+                    verbose=False,
+                    event_handler=event_handler,
+                    approval_handler=self._auto_approval_handler,
+                )
+                # 收集并行子任务的 Token 用量（注意线程安全：每子任务独立 handler）
+                usage = event_handler.get_token_usage()
+                self.cumulative_input_tokens += usage["input_tokens"]
+                self.cumulative_output_tokens += usage["output_tokens"]
+                elapsed = (time_mod.monotonic() - sub_start) * 1000
+                self._record_trace(
+                    "parallel_subtask_complete",
+                    detail=f"[{role_str}] {desc[:200]} ({elapsed:.0f}ms)",
+                )
+                return {
+                    "seq": seq,
+                    "role": role_str,
+                    "desc": desc,
+                    "result": result,
+                    "elapsed_ms": elapsed,
+                    "error": None,
+                }
+            except Exception as exc:
+                self._record_trace(
+                    "parallel_subtask_error",
+                    detail=f"[{role_str}] {desc[:100]}: {exc}",
+                )
+                return {
+                    "seq": seq,
+                    "role": role_str,
+                    "desc": desc,
+                    "result": "",
+                    "elapsed_ms": 0,
+                    "error": str(exc),
+                }
+
+        results: list[dict] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_run_one, seq, task): seq
+                for seq, task in enumerate(batch)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    seq = futures[future]
+                    results.append({
+                        "seq": seq,
+                        "role": batch[seq].get("role", "runner"),
+                        "desc": batch[seq].get("task_description", str(batch[seq])),
+                        "result": "",
+                        "elapsed_ms": 0,
+                        "error": str(exc),
+                    })
+
+        # 按原始顺序排序后输出
+        results.sort(key=lambda r: r["seq"])
+        out: list[str] = []
+        for r in results:
+            if r["error"]:
+                renderer.console.print(
+                    f"    [dim red]✗ [{r['role']}] {r['desc'][:60]}... "
+                    f"({r['elapsed_ms']:.0f}ms) 失败: {r['error']}[/]"
+                )
+                out.append(f"## [{r['role']}] {r['desc']}\n❌ 失败: {r['error']}")
+                self._consecutive_failures += 1
+            else:
+                renderer.console.print(
+                    f"    [dim green]✓ [{r['role']}] {r['desc'][:60]}... "
+                    f"({r['elapsed_ms']:.0f}ms, {len(r['result'])}字)[/]"
+                )
+                out.append(f"## [{r['role']}] {r['desc']}\n{r['result']}")
+                self._consecutive_failures = 0
+
+        self._record_trace("parallel_batch_end", detail=f"{n} 个子任务完成")
+        return out
 
     def _call_role_with_timeout(
         self,
@@ -500,73 +698,123 @@ class FourPillarPipeline:
         renderer.console.print("[dim bold]🧠 四柱思考阶段[/]")
         renderer.console.print("[dim]分析为底 → 扩展为路 → 迁跃为辅 → 反思为主[/]")
 
+        def _is_role_error(result: str) -> bool:
+            """检测角色 LLM 是否返回了错误/超时文本而非有效分析。"""
+            return "调用失败" in result or "调用超时" in result
+
+        def _role_abort_warning(role_label: str) -> str:
+            return (
+                f"⚠️ {role_label} 执行异常，后续角色将基于有限信息继续。"
+            )
+
+        phase1_failed = False
+
         # 1. 分析者（底）
         renderer.console.print("  [dim]⏳ 分析者 正在深度分析...[/]")
         t0 = time_mod.monotonic()
         analysis = self._call_role_with_timeout(AgentRole.ANALYST, user_input)
-        renderer.console.print(
-            f"  [dim green]✓ 分析者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
-        )
-        renderer.console.print(
-            f"  [dim]{analysis[:200].replace(chr(10), ' ')}...[/]"
-        )
+        elapsed_ms = (time_mod.monotonic() - t0) * 1000
+        if _is_role_error(analysis):
+            renderer.console.print(f"  [bold red]✗ 分析者 异常 ({elapsed_ms:.0f}ms): {analysis[:100]}[/]")
+            phase1_failed = True
+        else:
+            renderer.console.print(f"  [dim green]✓ 分析者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
+            renderer.console.print(f"  [dim]{analysis[:200].replace(chr(10), ' ')}...[/]")
         self._record_trace("role_analyst", detail=analysis[:1000])
 
         # 2. 扩散者（路）
         renderer.console.print("  [dim]⏳ 扩散者 正在探索路径...[/]")
         t0 = time_mod.monotonic()
+        ctx_for_diffuser = (
+            f"## 分析结论\n{analysis}"
+            if not _is_role_error(analysis)
+            else _role_abort_warning("分析者")
+        )
         diffusion = self._call_role_with_timeout(
             AgentRole.DIFFUSER, user_input,
-            context=f"## 分析结论\n{analysis}",
+            context=ctx_for_diffuser,
         )
-        renderer.console.print(
-            f"  [dim green]✓ 扩散者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
-        )
+        elapsed_ms = (time_mod.monotonic() - t0) * 1000
+        if _is_role_error(diffusion):
+            renderer.console.print(f"  [bold red]✗ 扩散者 异常 ({elapsed_ms:.0f}ms): {diffusion[:100]}[/]")
+            phase1_failed = True
+        else:
+            renderer.console.print(f"  [dim green]✓ 扩散者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
         self._record_trace("role_diffuser", detail=diffusion[:1000])
 
         # 3. 迁跃者（辅）
         renderer.console.print("  [dim]⏳ 迁跃者 正在创造性跨越...[/]")
         t0 = time_mod.monotonic()
+        analysis_ok = not _is_role_error(analysis)
+        diffusion_ok = not _is_role_error(diffusion)
+        if analysis_ok and diffusion_ok:
+            ctx_for_jumper = f"## 分析者\n{analysis}\n\n## 扩散者\n{diffusion}"
+        elif analysis_ok:
+            ctx_for_jumper = f"## 分析者\n{analysis}\n\n" + _role_abort_warning("扩散者")
+        else:
+            ctx_for_jumper = _role_abort_warning("分析者/扩散者")
         jump = self._call_role_with_timeout(
             AgentRole.JUMPER, user_input,
-            context=f"## 分析者\n{analysis}\n\n## 扩散者\n{diffusion}",
+            context=ctx_for_jumper,
         )
-        renderer.console.print(
-            f"  [dim green]✓ 迁跃者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
-        )
+        elapsed_ms = (time_mod.monotonic() - t0) * 1000
+        if _is_role_error(jump):
+            renderer.console.print(f"  [bold red]✗ 迁跃者 异常 ({elapsed_ms:.0f}ms): {jump[:100]}[/]")
+            phase1_failed = True
+        else:
+            renderer.console.print(f"  [dim green]✓ 迁跃者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
         self._record_trace("role_jumper", detail=jump[:1000])
 
         # 4. 反思者（主）—— 综合审视 + 制定执行计划
         renderer.console.print("  [dim]⏳ 反思者 正在综合审视...[/]")
         t0 = time_mod.monotonic()
+        # 构建反思者上下文，跳过已失败的角色输出
+        reflector_parts = []
+        if not _is_role_error(analysis):
+            reflector_parts.append(f"## 分析者（分析为底）\n{analysis}")
+        if not _is_role_error(diffusion):
+            reflector_parts.append(f"## 扩散者（扩展为路）\n{diffusion}")
+        if not _is_role_error(jump):
+            reflector_parts.append(f"## 迁跃者（迁跃为辅）\n{jump}")
+        reflector_context = (
+            "\n\n".join(reflector_parts)
+            if reflector_parts
+            else "所有前置角色均执行异常，请基于用户原始需求直接输出执行计划。"
+        )
         reflection = self._call_role_with_timeout(
             AgentRole.REFLECTOR, user_input,
-            context=(
-                f"## 分析者（分析为底）\n{analysis}\n\n"
-                f"## 扩散者（扩展为路）\n{diffusion}\n\n"
-                f"## 迁跃者（迁跃为辅）\n{jump}"
-            ),
+            context=reflector_context,
             extra_instruction=(
                 "请综合以上三个角色的输出，做出最终判断。"
                 "输出执行计划时要具体、可操作，每个子任务分配明确的执行角色（runner/reader/builder）。"
             ),
         )
         elapsed = (time_mod.monotonic() - t0) * 1000
-        renderer.console.print(
-            f"  [dim green]✓ 反思者 完成[/] [dim]({elapsed:.0f}ms)[/]"
-        )
+        if _is_role_error(reflection):
+            renderer.console.print(f"  [bold red]✗ 反思者 异常 ({elapsed:.0f}ms): {reflection[:100]}[/]")
+            phase1_failed = True
+        else:
+            renderer.console.print(f"  [dim green]✓ 反思者 完成[/] [dim]({elapsed:.0f}ms)[/]")
+
+        if phase1_failed:
+            renderer.console.print()
+            renderer.console.print(
+                "  [bold yellow]⚠️ 四柱思考阶段存在角色异常，"
+                "管线将继续尝试但输出质量可能下降。[/]"
+            )
 
         # 展示反思者输出（摘要形式）
-        renderer.console.print()
-        renderer.console.print("[dim bold]📋 反思者审视结论（摘要）[/]")
-        renderer.console.print(
-            f"  [dim]{reflection[:500].replace(chr(10), ' ')}...[/]"
-        )
+        if not _is_role_error(reflection):
+            renderer.console.print()
+            renderer.console.print("[dim bold]📋 反思者审视结论（摘要）[/]")
+            renderer.console.print(
+                f"  [dim]{reflection[:500].replace(chr(10), ' ')}...[/]"
+            )
         self._record_trace("role_reflector", detail=reflection[:1000])
 
         # ── Phase 2: 执行循环（反思闭环）──
         max_iterations = 3
-        all_results: list[str] = []
+        all_results: list[list[str]] = []
         iteration = 0  # 在循环外声明，供 Phase 3 引用
 
         for iteration in range(1, max_iterations + 1):
@@ -580,8 +828,10 @@ class FourPillarPipeline:
             renderer.console.print("  [dim]⏳ 决策者 正在分解子任务...[/]")
             iter_context = reflection
             if all_results:
+                # 展示最近一轮执行结果（从按迭代分组的数据中取最后一轮）
+                prev_round = all_results[-1]
                 iter_context += f"\n\n## 上一轮执行结果\n" + "\n".join(
-                    f"- {r[:300]}" for r in all_results[-3:]
+                    f"- {r[:300]}" for r in prev_round[-5:]
                 )
             plan_json = self._call_role_with_timeout(
                 AgentRole.DECISION_MAKER, user_input,
@@ -632,11 +882,17 @@ class FourPillarPipeline:
             round_results: list[str] = []
             circuit_broken = False
 
-            for idx in selected_indices:
+            # ── 批量执行：顺序 + 并行混合 ──
+            # 连续标记 parallel=true 的子任务合并为一个并行批次；
+            # 未标记或 parallel=false 的子任务仍顺序执行。
+            batch_i = 0
+            while batch_i < len(selected_indices):
+                idx = selected_indices[batch_i]
                 if idx >= len(subtasks):
+                    batch_i += 1
                     continue
 
-                # 每轮子任务前检查熔断器
+                # 每批次前检查熔断器
                 try:
                     self._check_circuit_breaker()
                 except PipelineCircuitBreakerError as exc:
@@ -647,112 +903,126 @@ class FourPillarPipeline:
                     break
 
                 task = subtasks[idx]
-                role_str = task.get("role", "runner")
-                desc = task.get("task_description", str(task))
-                ctx = task.get("context", "")
-                if additional_context:
-                    ctx = f"{ctx}\n补充: {additional_context}" if ctx else additional_context
+                is_parallel = bool(task.get("parallel", False))
 
-                renderer.console.print(
-                    f"  [dim]── [{role_str}] {desc[:80]}...[/]"
-                )
-                start = time_mod.monotonic()
-                self._record_trace(
-                    "subtask_start",
-                    detail=f"[{role_str}] {desc[:200]}",
-                )
+                if is_parallel:
+                    # 收集连续 parallel 子任务形成一个并行批次
+                    parallel_batch: list[dict] = []
+                    while batch_i < len(selected_indices):
+                        pidx = selected_indices[batch_i]
+                        if pidx >= len(subtasks):
+                            batch_i += 1
+                            continue
+                        ptask = subtasks[pidx]
+                        if not ptask.get("parallel", False):
+                            break
+                        parallel_batch.append(ptask)
+                        batch_i += 1
 
-                subtask_prompt = (
-                    f"你是{get_role_label(self._str_to_role(role_str))}。"
-                    f"请完成以下子任务，只做这一件事，完成后给出结果摘要。\n\n"
-                    f"子任务: {desc}\n"
-                )
-                if ctx:
-                    subtask_prompt += f"\n上下文: {ctx}\n"
-                if reasoning:
-                    subtask_prompt += f"\n整体背景: {reasoning[:300]}\n"
-                subtask_prompt += (
-                    "\n请直接调用工具完成此子任务，给出核心结果。"
-                    "\n\n效率要求："
-                    "\n- 一步到位，避免分批读取——能一次读完的就不要分多次"
-                    "\n- 不需要用 run_shell_command 执行 # 注释来记录思路，直接在回复中说明"
-                    "\n- 每个工具有明确目的，不做多余的探测"
-                )
-
-                try:
-                    result = self._run_subtask_with_escalating_timeout(
-                        subtask_prompt, get_role_label(self._str_to_role(role_str)), desc,
+                    batch_results = self._run_parallel_batch(
+                        parallel_batch,
+                        user_input=user_input,
+                        reasoning=reasoning,
+                        additional_context=additional_context,
                     )
-                    elapsed = (time_mod.monotonic() - start) * 1000
+                    round_results.extend(batch_results)
+                else:
+                    # 顺序执行单条子任务（保持原有行为）
+                    role_str = task.get("role", "runner")
+                    desc = task.get("task_description", str(task))
+                    ctx = task.get("context", "")
+                    if additional_context:
+                        ctx = f"{ctx}\n补充: {additional_context}" if ctx else additional_context
+
                     renderer.console.print(
-                        f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
+                        f"  [dim]── [{role_str}] {desc[:80]}...[/]"
                     )
-                    self._record_trace("subtask_complete", detail=result[:500])
-                    round_results.append(
-                        f"## [{role_str}] {desc}\n{result}"
+                    start = time_mod.monotonic()
+                    self._record_trace(
+                        "subtask_start",
+                        detail=f"[{role_str}] {desc[:200]}",
                     )
-                    self._consecutive_failures = 0
 
-                except TimeoutError as exc:
-                    elapsed = (time_mod.monotonic() - start) * 1000
-                    self._consecutive_failures += 1
-                    self._record_trace("subtask_timeout", detail=str(exc))
-                    renderer.console.print(
-                        f"  [dim red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
+                    subtask_prompt = self._build_subtask_prompt(
+                        role_str, desc, ctx=ctx, reasoning=reasoning,
                     )
-                    # 重规划：让决策者将此子任务拆分为更小粒度的子任务
-                    replanned = self._replan_single_task(
-                        desc, exc, user_input, reasoning,
-                    )
-                    if replanned:
-                        renderer.console.print(
-                            f"  [dim yellow]↻ 已重规划为 {len(replanned)} 个更小粒度的子任务，尝试执行...[/]"
+
+                    try:
+                        result = self._run_subtask_with_escalating_timeout(
+                            subtask_prompt, get_role_label(self._str_to_role(role_str)), desc,
                         )
-                        for rt in replanned:
-                            rstart = time_mod.monotonic()
-                            try:
-                                rt_result = self._run_subtask_with_escalating_timeout(
-                                    rt["prompt"], rt["label"], rt["desc"],
-                                )
-                                r_elapsed = (time_mod.monotonic() - rstart) * 1000
-                                renderer.console.print(
-                                    f"    [dim green]✓ 重规划子任务完成[/] [dim]({r_elapsed:.0f}ms)[/]"
-                                )
-                                round_results.append(
-                                    f"## [重规划] {rt['desc']}\n{rt_result}"
-                                )
-                                self._consecutive_failures = 0
-                            except (TimeoutError, Exception) as r_exc:
-                                self._consecutive_failures += 1
-                                renderer.console.print(
-                                    f"    [dim red]✗ 重规划子任务失败[/]: {r_exc}"
-                                )
-                                round_results.append(
-                                    f"## [重规划] {rt['desc']}\n❌ 失败: {r_exc}"
-                                )
-                    else:
+                        elapsed = (time_mod.monotonic() - start) * 1000
                         renderer.console.print(
-                            f"  [dim]重规划失败，记录原始错误。[/]"
+                            f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
+                        )
+                        self._record_trace("subtask_complete", detail=result[:500])
+                        round_results.append(
+                            f"## [{role_str}] {desc}\n{result}"
+                        )
+                        self._consecutive_failures = 0
+
+                    except TimeoutError as exc:
+                        elapsed = (time_mod.monotonic() - start) * 1000
+                        self._consecutive_failures += 1
+                        self._record_trace("subtask_timeout", detail=str(exc))
+                        renderer.console.print(
+                            f"  [dim red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
+                        )
+                        # 重规划：让决策者将此子任务拆分为更小粒度的子任务
+                        replanned = self._replan_single_task(
+                            desc, exc, user_input, reasoning,
+                        )
+                        if replanned:
+                            renderer.console.print(
+                                f"  [dim yellow]↻ 已重规划为 {len(replanned)} 个更小粒度的子任务，尝试执行...[/]"
+                            )
+                            for rt in replanned:
+                                rstart = time_mod.monotonic()
+                                try:
+                                    rt_result = self._run_subtask_with_escalating_timeout(
+                                        rt["prompt"], rt["label"], rt["desc"],
+                                    )
+                                    r_elapsed = (time_mod.monotonic() - rstart) * 1000
+                                    renderer.console.print(
+                                        f"    [dim green]✓ 重规划子任务完成[/] [dim]({r_elapsed:.0f}ms)[/]"
+                                    )
+                                    round_results.append(
+                                        f"## [重规划] {rt['desc']}\n{rt_result}"
+                                    )
+                                    self._consecutive_failures = 0
+                                except (TimeoutError, Exception) as r_exc:
+                                    self._consecutive_failures += 1
+                                    renderer.console.print(
+                                        f"    [dim red]✗ 重规划子任务失败[/]: {r_exc}"
+                                    )
+                                    round_results.append(
+                                        f"## [重规划] {rt['desc']}\n❌ 失败: {r_exc}"
+                                    )
+                        else:
+                            renderer.console.print(
+                                f"  [dim]重规划失败，记录原始错误。[/]"
+                            )
+                            round_results.append(
+                                f"## [{role_str}] {desc}\n❌ 全部超时叠加后重规划也失败: {exc}"
+                            )
+
+                    except Exception as exc:
+                        elapsed = (time_mod.monotonic() - start) * 1000
+                        self._consecutive_failures += 1
+                        self._record_trace("subtask_error", detail=f"{exc}")
+                        renderer.console.print(
+                            f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
                         )
                         round_results.append(
-                            f"## [{role_str}] {desc}\n❌ 全部超时叠加后重规划也失败: {exc}"
+                            f"## [{role_str}] {desc}\n❌ 失败: {exc}"
                         )
 
-                except Exception as exc:
-                    elapsed = (time_mod.monotonic() - start) * 1000
-                    self._consecutive_failures += 1
-                    self._record_trace("subtask_error", detail=f"{exc}")
-                    renderer.console.print(
-                        f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
-                    )
-                    round_results.append(
-                        f"## [{role_str}] {desc}\n❌ 失败: {exc}"
-                    )
+                    # ── 上下文压缩通知 ──
+                    self._emit_compression_notice()
 
-                # ── 上下文压缩通知 ──
-                self._emit_compression_notice()
+                    batch_i += 1
 
-            all_results.extend(round_results)
+            all_results.append(round_results)
 
             if circuit_broken:
                 break
@@ -810,14 +1080,55 @@ class FourPillarPipeline:
         renderer.console.print("[dim bold]📊 四柱管线执行完成[/]")
 
         if all_results:
-            aggregated = "\n\n---\n\n".join(all_results)
-            summary = (
-                f"## 四柱管线执行总结\n\n"
-                f"共执行 {len(all_results)} 个子任务，"
-                f"经过 {iteration} 轮迭代。\n\n"
-                f"{aggregated}"
-            )
-            renderer.print_markdown(summary)
+            total_tasks = sum(len(round_) for round_ in all_results)
+            # 统计成功/失败：仅当结果通过 except 分支存储（以 ❌ 失败: 或 ❌ 全部超时开头）
+            # 才算失败；模型输出内容中可能含 ❌ 字符（如测试覆盖矩阵 ❌* 标记）但不计失败
+            success_count = 0
+            fail_count = 0
+            for round_ in all_results:
+                for r in round_:
+                    body = r.split("\n", 1)[1] if "\n" in r else r
+                    is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
+                    if is_fail:
+                        fail_count += 1
+                    else:
+                        success_count += 1
+
+            summary_parts = [
+                f"## 📊 四柱管线执行总结\n",
+                f"共执行 {total_tasks} 个子任务，经过 {iteration} 轮迭代。"
+                f" ✅ 成功 {success_count} | ❌ 失败 {fail_count}",
+            ]
+
+            for iter_idx, round_ in enumerate(all_results, 1):
+                summary_parts.append(
+                    f"\n### 第 {iter_idx} 轮迭代 ({len(round_)} 个子任务)"
+                )
+                for r in round_:
+                    lines = r.split("\n", 1)
+                    heading = lines[0].lstrip("# ")  # 如 "[runner] 读取文件"
+                    body = lines[1] if len(lines) > 1 else ""
+                    # 仅当 body 以 ❌ 失败: 开头（即通过 except 分支存储）才算真失败
+                    is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
+                    prefix = "❌" if is_fail else "✅"
+                    if is_fail:
+                        # 提取失败原因（取第一行，兼容 ❌ 失败: 和 ❌ 全部超时... 两种前缀）
+                        fail_reason = body.lstrip("❌ ").split("\n")[0][:120]
+                        for _prefix in ("失败: ", "全部超时叠加后重规划也失败: "):
+                            if fail_reason.startswith(_prefix):
+                                fail_reason = fail_reason[len(_prefix):]
+                                break
+                        summary_parts.append(f"- {prefix} {heading} — {fail_reason}")
+                    else:
+                        # 成功则显示结果摘要（前 120 字）
+                        snippet = body.strip().replace("\n", " ")[:120]
+                        if len(body.strip()) > 120:
+                            snippet += "…"
+                        summary_parts.append(f"- {prefix} {heading}")
+                        if snippet:
+                            summary_parts.append(f"  > {snippet}")
+            summary_parts.append("")
+            renderer.print_markdown("\n".join(summary_parts))
 
     def _emit_compression_notice(self) -> None:
         """检查 runner 最近是否触发了上下文压缩，若有则打印通知。"""
