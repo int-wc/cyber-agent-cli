@@ -173,6 +173,8 @@ class FourPillarPipeline:
         转发到聊天视图。
         """
         subtask_start = time_mod.monotonic()
+        # 暂存上一条 run_shell_command 的调用信息，供 TOOL_RESULT 合并输出
+        _pending_shell_call: dict = {}
 
         def handler(event_type: str | AgentEventType, data: Any) -> None:
             nonlocal subtask_start
@@ -185,21 +187,32 @@ class FourPillarPipeline:
                     if len(args_str) > 150:
                         args_str = args_str[:150] + "..."
                     elapsed = time_mod.monotonic() - subtask_start
-                    renderer.console.print(
-                        f"      [dim]🔧 {name}({args_str})  ({elapsed:.0f}s)[/]"
-                    )
+                    if name == "run_shell_command":
+                        # 暂存，TOOL_RESULT 时合并输出退出码
+                        _pending_shell_call["name"] = name
+                        _pending_shell_call["args_str"] = args_str
+                    else:
+                        renderer.console.print(
+                            f"      [dim]🔧 {name}({args_str})  ({elapsed:.0f}s)[/]"
+                        )
             elif event_type == AgentEventType.TOOL_RESULT:
                 content = data.get("content", "")
                 tool_name = data.get("tool_name", "")
                 lines = content.strip().split("\n")
-                # run_shell_command 的第一行总是 "命令: xxx"（重复 🔧 行），
-                # 改为只展示退出码，减少冗余
                 if tool_name == "run_shell_command":
-                    exit_line = next((l for l in lines if l.startswith("退出码:")), "")
-                    if exit_line:
-                        renderer.console.print(
-                            f"      [dim]  {tool_name} → {exit_line}[/]"
-                        )
+                    # 将退出码合并在 🔧 行尾部，不单独输出结果行
+                    exit_code = "?"
+                    for line in lines:
+                        if line.startswith("退出码:"):
+                            exit_code = line.replace("退出码:", "").strip()
+                            break
+                    elapsed = time_mod.monotonic() - subtask_start
+                    pinfo = _pending_shell_call
+                    renderer.console.print(
+                        f"      [dim]🔧 {pinfo['name']}({pinfo['args_str']})"
+                        f"  ({elapsed:.0f}s) [exit={exit_code}][/]"
+                    )
+                    _pending_shell_call.clear()
                 else:
                     first_line = lines[0][:120] if lines else ""
                     if first_line:

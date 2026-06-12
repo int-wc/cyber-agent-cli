@@ -19,6 +19,10 @@ from .metadata import attach_tool_risk
 MAX_COMMAND_OUTPUT_CHARS = 4000
 MAX_TOOL_TIMEOUT_SECONDS = 120
 PROCESS_POLL_INTERVAL_SECONDS = 0.1
+# 输出静默超时：进程曾产生过输出，但此后连续无新输出的秒数。
+# 用于检测后台进程 + 阻塞式后续命令（tail -f、无 timeout 的 curl 等）
+# 导致的 shell 进程无法退出的情况。
+_MAX_QUIET_SECONDS = 60
 
 
 def normalize_command_registry(
@@ -161,9 +165,47 @@ def _run_process_with_controller(
         stdout_chunks, stdout_thread = _start_stream_reader(process.stdout)
         stderr_chunks, stderr_thread = _start_stream_reader(process.stderr)
 
+        # 输出静默检测状态
+        _last_chunk_count = 0
+        _had_output = False
+        _quiet_since: float | None = None
+
         while True:
             if execution_controller is not None:
                 execution_controller.ensure_not_cancelled()
+
+            # ── 输出静默检测 ──
+            chunk_count = len(stdout_chunks) + len(stderr_chunks)
+            if chunk_count > _last_chunk_count:
+                _had_output = True
+                _quiet_since = None
+                _last_chunk_count = chunk_count
+            elif _had_output and _quiet_since is None:
+                _quiet_since = time.monotonic()
+
+            if (
+                _had_output
+                and _quiet_since is not None
+                and time.monotonic() - _quiet_since >= _MAX_QUIET_SECONDS
+                and process.poll() is None  # 进程仍在运行但无输出
+            ):
+                terminate_process_tree(process)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                if process.stdout is not None and not process.stdout.closed:
+                    process.stdout.close()
+                if process.stderr is not None and not process.stderr.closed:
+                    process.stderr.close()
+                stdout, stderr = _collect_stream_output(
+                    stdout_chunks, stderr_chunks, stdout_thread, stderr_thread,
+                )
+                raise subprocess.TimeoutExpired(
+                    command, timeout_seconds,
+                    output=f"{stdout}\n[静默超时 {_MAX_QUIET_SECONDS}s] 进程存活但超过 {_MAX_QUIET_SECONDS}s 无输出，已终止。",
+                    stderr=stderr,
+                ) from None
 
             if process.poll() is not None:
                 # 关闭管道写端：后台子进程（如 java -jar ... &）可能仍持有写端
@@ -262,8 +304,14 @@ def create_run_shell_command_tool(
             )
         except FileNotFoundError as exc:
             return f"❌ 命令执行环境不可用：{exc}"
-        except subprocess.TimeoutExpired:
-            return f"❌ 命令执行超时：{command}"
+        except subprocess.TimeoutExpired as exc:
+            detail = ""
+            if exc.output:
+                out = exc.output.strip()
+                if out:
+                    # 输出最后三行，包含静默超时等诊断信息
+                    detail = "\n" + "\n".join(out.splitlines()[-3:])
+            return f"❌ 命令执行超时：{command}{detail}"
         except ExecutionInterruptedError:
             raise
         except Exception as exc:
