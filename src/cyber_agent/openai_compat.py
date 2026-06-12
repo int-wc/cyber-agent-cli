@@ -106,47 +106,56 @@ def _extract_text_from_content(
 def _ensure_deepseek_reasoning_content(message: BaseMessage) -> BaseMessage:
     """将 DeepSeek 格式的 reasoning_content 嵌入消息纯文本中。
 
-    不再创建 list[dict] content blocks（type:thinking + type:text），
-    因为 clauses:
-      - 通过本地网关转发到 Claude 时，网关会自行处理 reasoning_content
-      - 直连 DeepSeek anthropic 端点时不支持 type:thinking block
-      - 直连 DeepSeek /v1 端点时 content 应为纯文本
-
-    改为将 reasoning 作为 <thinking> 标记嵌入文本开头，并剥离
-    additional_kwargs 中的 reasoning_content，避免 serialization 时
-    作为顶层字段残留导致不稳定。
+    - 保留 additional_kwargs 中的 reasoning_content——DeepSeek API 要求
+      助理消息携带此顶层字段；local gateway 转发到 Claude 时也会自行处理。
+    - 同时将 reasoning 作为 <thinking> 标记嵌入文本便于查看。
+    - 如果 content 中包含 type:thinking 的原始块（API 返回的原始格式），
+      则提取其中的 thinking 文本一并清理，避免 re-send 时 API 因 thinking 块
+      缺少 thinking/signature 字段而拒绝。
     """
     if not isinstance(message, AIMessage):
         return message
 
     reasoning_content = message.additional_kwargs.get("reasoning_content")
+    content = message.content
 
-    if reasoning_content is not None:
-        text_part = _extract_text_from_content(message.content)
-        # 将 reasoning 作为标记嵌入纯文本，不创建 content block
-        if reasoning_content:
-            merged = f"<thinking>\n{reasoning_content}\n</thinking>\n\n{text_part}" if text_part else f"<thinking>\n{reasoning_content}\n</thinking>"
-        else:
-            merged = text_part
+    # 从 content 块中提取 thinking 文本（处理原始 API 返回的 type:thinking 块）
+    thinking_text_from_blocks: str | None = None
+    if isinstance(content, list):
+        cleaned_blocks: list[dict | str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                # 提取 thinking 文本，可能缺少 thinking 字段
+                text = block.get("thinking", "")
+                if text:
+                    thinking_text_from_blocks = text
+                # 不保留 type:thinking 块，后续统一嵌入纯文本
+            elif isinstance(block, dict) and block.get("type") == "text":
+                cleaned_blocks.append(block.get("text", ""))
+            else:
+                cleaned_blocks.append(block)
+        text_part = _extract_text_from_content(cleaned_blocks)
+    else:
+        text_part = _extract_text_from_content(content)
 
-        additional_kwargs = {
-            k: v for k, v in message.additional_kwargs.items()
-            if k != "reasoning_content"
-        }
-        return AIMessage(
-            content=merged,
-            additional_kwargs=additional_kwargs,
-            tool_calls=list(message.tool_calls) if message.tool_calls else [],
-            id=message.id,
+    # 决定最终的 reasoning 文本
+    final_reasoning = reasoning_content or thinking_text_from_blocks or ""
+
+    if final_reasoning:
+        merged = (
+            f"<thinking>\n{final_reasoning}\n</thinking>\n\n{text_part}"
+            if text_part
+            else f"<thinking>\n{final_reasoning}\n</thinking>"
         )
+    else:
+        merged = text_part
 
-    # 工具调用消息：确保没有空 reasoning_content 残留
-    if message.tool_calls or "tool_calls" in message.additional_kwargs:
-        additional_kwargs = dict(message.additional_kwargs)
-        additional_kwargs.pop("reasoning_content", None)
-        return message.model_copy(update={"additional_kwargs": additional_kwargs})
-
-    return message
+    return AIMessage(
+        content=merged,
+        additional_kwargs=dict(message.additional_kwargs),
+        tool_calls=list(message.tool_calls) if message.tool_calls else [],
+        id=message.id,
+    )
 
 
 def _strip_reasoning_content(message: BaseMessage) -> BaseMessage:
