@@ -63,6 +63,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec("/auto-decision", "查看/切换自动决策模式 (on/off)", show_in_banner=True),
     BuiltinCommandSpec("/capabilities", "查看所有动态注册能力", show_in_banner=True),
     BuiltinCommandSpec("/session", "查看/管理多会话 (list/load/new/show)", show_in_banner=True),
+    BuiltinCommandSpec("/trace", "查看管线执行轨迹 (/trace list)", show_in_banner=True),
     BuiltinCommandSpec("/exit", "退出交互模式", show_in_banner=True),
 )
 

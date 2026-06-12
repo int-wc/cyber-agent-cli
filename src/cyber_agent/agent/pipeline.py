@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from datetime import datetime
 import json
 import re as _re_mod
 import threading
@@ -66,6 +67,10 @@ class FourPillarPipeline:
 
         # 熔断器状态
         self._consecutive_failures = 0
+
+        # 执行轨迹
+        self._trace: list[dict] = []
+        self._session_id: str = ""
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -148,6 +153,49 @@ class FourPillarPipeline:
             log_error("pipeline", f"{label} 调用失败：{exc}")
             return f"[{label} 调用失败: {exc}]"
 
+    # ── 执行轨迹 ──
+    def _record_trace(
+        self,
+        event: str,
+        *,
+        detail: str = "",
+        metadata: dict | None = None,
+    ) -> None:
+        """记录一条执行轨迹事件。"""
+        self._trace.append({
+            "event": event,
+            "timestamp": datetime.now().isoformat(),
+            "detail": detail,
+            "metadata": metadata or {},
+        })
+
+    def _save_trace(self) -> None:
+        """将执行轨迹保存到会话目录。"""
+        if not self._trace:
+            return
+        try:
+            storage_dir = Path.home() / ".cyber-agent-cli-traces"
+            storage_dir.mkdir(parents=True, exist_ok=True)
+            sid = self._session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+            trace_file = storage_dir / f"{sid}.trace.json"
+            trace_file.write_text(
+                json.dumps(self._trace, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            from ..logging import log_error
+            log_error("trace", f"保存执行轨迹失败：{exc}")
+
+    def _load_trace(self, session_id: str) -> list[dict] | None:
+        """加载指定会话的执行轨迹。"""
+        try:
+            trace_file = Path.home() / ".cyber-agent-cli-traces" / f"{session_id}.trace.json"
+            if not trace_file.exists():
+                return None
+            return json.loads(trace_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     # ── 超时与熔断 ──
     def _check_circuit_breaker(self) -> None:
         """检查熔断器：连续失败超过阈值则抛出异常。"""
@@ -187,6 +235,11 @@ class FourPillarPipeline:
                     if len(args_str) > 150:
                         args_str = args_str[:150] + "..."
                     elapsed = time_mod.monotonic() - subtask_start
+                    self._record_trace(
+                        "tool_call",
+                        detail=f"{name}({args_str[:300]})",
+                        metadata={"tool": name, "elapsed_s": round(elapsed)},
+                    )
                     if name == "run_shell_command":
                         # 暂存，TOOL_RESULT 时合并输出退出码
                         _pending_shell_call["name"] = name
@@ -199,20 +252,33 @@ class FourPillarPipeline:
                 content = data.get("content", "")
                 tool_name = data.get("tool_name", "")
                 lines = content.strip().split("\n")
+                # 提取退出码供 trace 使用
+                _exit_code = "?"
+                for _l in lines:
+                    if _l.startswith("退出码:"):
+                        _exit_code = _l.replace("退出码:", "").strip()
+                        break
+                self._record_trace(
+                    "tool_result",
+                    detail=f"{tool_name} → exit={_exit_code}",
+                    metadata={"tool": tool_name, "exit_code": _exit_code},
+                )
                 if tool_name == "run_shell_command":
                     # 将退出码合并在 🔧 行尾部，不单独输出结果行
-                    exit_code = "?"
-                    for line in lines:
-                        if line.startswith("退出码:"):
-                            exit_code = line.replace("退出码:", "").strip()
-                            break
+                    exit_code = _exit_code
                     elapsed = time_mod.monotonic() - subtask_start
-                    pinfo = _pending_shell_call
-                    renderer.console.print(
-                        f"      [dim]🔧 {pinfo['name']}({pinfo['args_str']})"
-                        f"  ({elapsed:.0f}s) [exit={exit_code}][/]"
-                    )
-                    _pending_shell_call.clear()
+                    # 防御：_pending_shell_call 可能因上一轮异常未正确清空
+                    if not _pending_shell_call:
+                        renderer.console.print(
+                            f"      [dim]  {tool_name} → [exit={exit_code}][/]"
+                        )
+                    else:
+                        pinfo = _pending_shell_call
+                        renderer.console.print(
+                            f"      [dim]🔧 {pinfo['name']}({pinfo['args_str']})"
+                            f"  ({elapsed:.0f}s) [exit={exit_code}][/]"
+                        )
+                        _pending_shell_call.clear()
                 else:
                     first_line = lines[0][:120] if lines else ""
                     if first_line:
@@ -400,20 +466,30 @@ class FourPillarPipeline:
         """执行完整的四柱管线。"""
         renderer = self._renderer
         self._consecutive_failures = 0
+        self._trace = []
+        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        self._record_trace("pipeline_start", detail=user_input[:500])
 
         try:
             self._run_phases(user_input, auto_decision)
+            self._record_trace("pipeline_complete")
         except PipelineCircuitBreakerError as exc:
             renderer.console.print()
             renderer.console.print(
                 f"  [bold red]⛔ 熔断中止: {exc}[/]"
             )
+            self._record_trace("pipeline_abort", detail=str(exc))
+        except Exception as exc:
+            self._record_trace("pipeline_error", detail=str(exc))
+            raise
         finally:
             # 同步 token 到 renderer
             self._renderer.add_token_usage(
                 self.cumulative_input_tokens,
                 self.cumulative_output_tokens,
             )
+            self._save_trace()
 
     def _run_phases(self, user_input: str, auto_decision: bool) -> None:
         """管线主逻辑，含超时保护和熔断机制。"""
@@ -434,6 +510,7 @@ class FourPillarPipeline:
         renderer.console.print(
             f"  [dim]{analysis[:200].replace(chr(10), ' ')}...[/]"
         )
+        self._record_trace("role_analyst", detail=analysis[:1000])
 
         # 2. 扩散者（路）
         renderer.console.print("  [dim]⏳ 扩散者 正在探索路径...[/]")
@@ -445,6 +522,7 @@ class FourPillarPipeline:
         renderer.console.print(
             f"  [dim green]✓ 扩散者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
         )
+        self._record_trace("role_diffuser", detail=diffusion[:1000])
 
         # 3. 迁跃者（辅）
         renderer.console.print("  [dim]⏳ 迁跃者 正在创造性跨越...[/]")
@@ -456,6 +534,7 @@ class FourPillarPipeline:
         renderer.console.print(
             f"  [dim green]✓ 迁跃者 完成[/] [dim]({(time_mod.monotonic()-t0)*1000:.0f}ms)[/]"
         )
+        self._record_trace("role_jumper", detail=jump[:1000])
 
         # 4. 反思者（主）—— 综合审视 + 制定执行计划
         renderer.console.print("  [dim]⏳ 反思者 正在综合审视...[/]")
@@ -483,6 +562,7 @@ class FourPillarPipeline:
         renderer.console.print(
             f"  [dim]{reflection[:500].replace(chr(10), ' ')}...[/]"
         )
+        self._record_trace("role_reflector", detail=reflection[:1000])
 
         # ── Phase 2: 执行循环（反思闭环）──
         max_iterations = 3
@@ -494,6 +574,7 @@ class FourPillarPipeline:
             renderer.console.print(
                 f"[dim bold]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
             )
+            self._record_trace("iteration_start", detail=f"第 {iteration} 轮")
 
             # 5. 决策者 → 分解子任务
             renderer.console.print("  [dim]⏳ 决策者 正在分解子任务...[/]")
@@ -576,6 +657,10 @@ class FourPillarPipeline:
                     f"  [dim]── [{role_str}] {desc[:80]}...[/]"
                 )
                 start = time_mod.monotonic()
+                self._record_trace(
+                    "subtask_start",
+                    detail=f"[{role_str}] {desc[:200]}",
+                )
 
                 subtask_prompt = (
                     f"你是{get_role_label(self._str_to_role(role_str))}。"
@@ -602,6 +687,7 @@ class FourPillarPipeline:
                     renderer.console.print(
                         f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
                     )
+                    self._record_trace("subtask_complete", detail=result[:500])
                     round_results.append(
                         f"## [{role_str}] {desc}\n{result}"
                     )
@@ -610,6 +696,7 @@ class FourPillarPipeline:
                 except TimeoutError as exc:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     self._consecutive_failures += 1
+                    self._record_trace("subtask_timeout", detail=str(exc))
                     renderer.console.print(
                         f"  [dim red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
                     )
@@ -654,6 +741,7 @@ class FourPillarPipeline:
                 except Exception as exc:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     self._consecutive_failures += 1
+                    self._record_trace("subtask_error", detail=f"{exc}")
                     renderer.console.print(
                         f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
                     )
@@ -681,6 +769,7 @@ class FourPillarPipeline:
                 ),
             )
             renderer.console.print("  [dim green]✓ 审计者 完成[/]")
+            self._record_trace("role_checker", detail=check[:500])
 
             # 9. 反思者审视 → 决定是否继续迭代
             if iteration < max_iterations:
@@ -704,14 +793,17 @@ class FourPillarPipeline:
                     renderer.console.print(
                         "  [dim green]✓ 反思者判定：执行完成[/]"
                     )
+                    self._record_trace("iteration_done", detail=f"第 {iteration} 轮：执行完成")
                     break
                 renderer.console.print(
                     "  [dim yellow]↻ 反思者判定：需继续迭代[/]"
                 )
+                self._record_trace("iteration_continue", detail=f"第 {iteration} 轮：继续迭代")
             else:
                 renderer.console.print(
                     "  [dim]已达最大迭代次数，结束循环。[/]"
                 )
+                self._record_trace("iteration_done", detail=f"已达最大迭代次数")
 
         # ── Phase 3: 聚合输出 ──
         renderer.console.print()

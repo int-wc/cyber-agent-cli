@@ -894,14 +894,18 @@ class AgentRunner:
 
         if self._tool_requires_approval(tool):
             if event_handler is not None:
-                event_handler(
-                    AgentEventType.APPROVAL_REQUEST,
-                    {
-                        "tool_name": tool_name,
-                        "tool_call": tool_call,
-                        "risk": self._get_tool_risk(tool),
-                    },
-                )
+                try:
+                    event_handler(
+                        AgentEventType.APPROVAL_REQUEST,
+                        {
+                            "tool_name": tool_name,
+                            "tool_call": tool_call,
+                            "risk": self._get_tool_risk(tool),
+                        },
+                    )
+                except Exception:
+                    from ..logging import log_error
+                    log_error("event_handler", f"APPROVAL_REQUEST handler 异常", exc_info=True)
 
             if approval_handler is None:
                 decision = ApprovalDecision(
@@ -912,14 +916,18 @@ class AgentRunner:
                 decision = approval_handler(tool, tool_call)
 
             if event_handler is not None:
-                event_handler(
-                    AgentEventType.APPROVAL_RESULT,
-                    {
-                        "tool_name": tool_name,
-                        "approved": decision.approved,
-                        "reason": decision.reason,
-                    },
-                )
+                try:
+                    event_handler(
+                        AgentEventType.APPROVAL_RESULT,
+                        {
+                            "tool_name": tool_name,
+                            "approved": decision.approved,
+                            "reason": decision.reason,
+                        },
+                    )
+                except Exception:
+                    from ..logging import log_error
+                    log_error("event_handler", f"APPROVAL_RESULT handler 异常", exc_info=True)
 
             if not decision.approved:
                 return ToolMessage(
@@ -950,13 +958,17 @@ class AgentRunner:
             log_tool_execution(tool_name, success=False, error=str(exc))
 
         if event_handler is not None:
-            event_handler(
-                AgentEventType.TOOL_RESULT,
-                {
-                    "tool_name": tool_name,
-                    "content": normalized_result,
-                },
-            )
+            try:
+                event_handler(
+                    AgentEventType.TOOL_RESULT,
+                    {
+                        "tool_name": tool_name,
+                        "content": normalized_result,
+                    },
+                )
+            except Exception:
+                from ..logging import log_error
+                log_error("event_handler", f"TOOL_RESULT handler 异常", exc_info=True)
 
         return ToolMessage(
             content=normalized_result,
@@ -964,6 +976,16 @@ class AgentRunner:
             tool_call_id=str(tool_call.get("id", "")),
         )
 
+
+    def _cleanup_tool_round(self, ai_message: AIMessage) -> None:
+        """清理本轮追加的 AIMessage(tool_calls) 和已部分执行的 ToolMessage，
+        防止 retry 时 API 端收到 tool_use 无对应 tool_result 的 400 错误。"""
+        for remove_idx in range(len(self.history) - 1, -1, -1):
+            if self.history[remove_idx] is ai_message:
+                del self.history[remove_idx:]
+                break
+        if self.history and isinstance(self.history[-1], HumanMessage):
+            self.history.pop()
 
     # ── 主执行循环 ──
     def run(
@@ -1019,7 +1041,18 @@ class AgentRunner:
 
                 if ai_message.tool_calls:
                     if event_handler is not None:
-                        event_handler(AgentEventType.TOOL_CALL, ai_message.tool_calls)
+                        try:
+                            event_handler(
+                                AgentEventType.TOOL_CALL,
+                                ai_message.tool_calls,
+                            )
+                        except Exception:
+                            from ..logging import log_error
+                            log_error(
+                                "event_handler",
+                                "TOOL_CALL handler 异常",
+                                exc_info=True,
+                            )
 
                     tool_registry = self._build_tool_registry()
                     round_tool_messages: list[ToolMessage] = []
@@ -1038,14 +1071,11 @@ class AgentRunner:
                         # 超时/中断后清理本轮追加的孤立 AIMessage(tool_calls) 和
                         # 已部分执行的 ToolMessage，防止 retry 时 API 端收到
                         # tool_use 无对应 tool_result 的 400 错误
-                        for remove_idx in range(len(self.history) - 1, -1, -1):
-                            if self.history[remove_idx] is ai_message:
-                                del self.history[remove_idx:]
-                                break
-                        # 同时移除本轮开始的 HumanMessage（line 987），
-                        # 将 history 恢复至调用 run() 前的状态
-                        if self.history and isinstance(self.history[-1], HumanMessage):
-                            self.history.pop()
+                        self._cleanup_tool_round(ai_message)
+                        raise
+                    except Exception:
+                        # 意外异常兜底：同样清理历史避免污染后续轮次
+                        self._cleanup_tool_round(ai_message)
                         raise
                     round_signature = build_tool_round_signature(
                         ai_message.tool_calls,

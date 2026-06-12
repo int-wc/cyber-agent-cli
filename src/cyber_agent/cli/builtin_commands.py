@@ -732,6 +732,87 @@ def _handle_capabilities(
     return True
 
 
+# ── 执行轨迹 ──
+
+def _handle_trace(
+    runner: "AgentRunner",
+    runtime_context: dict[str, object],
+    cli_renderer: "CliRenderer",
+    tokens: list[str],
+    raw_input: str,
+) -> bool:
+    """查看管线执行轨迹。"""
+    trace_dir = Path.home() / ".cyber-agent-cli-traces"
+    if not trace_dir.exists():
+        cli_renderer.print_info("尚无执行轨迹记录。")
+        return True
+
+    subcmd = tokens[1] if len(tokens) > 1 else ""
+
+    if subcmd == "list":
+        files = sorted(trace_dir.glob("*.trace.json"), reverse=True)[:20]
+        if not files:
+            cli_renderer.print_info("没有轨迹文件。")
+            return True
+        rows = []
+        for f in files:
+            sid = f.stem.replace(".trace", "")
+            size = f.stat().st_size
+            rows.append((sid, f"{size:,} 字节"))
+        cli_renderer.print_status(rows, title="执行轨迹列表")
+        return True
+
+    # 查看最新或指定轨迹
+    if subcmd:
+        target_id = subcmd
+    else:
+        files = sorted(trace_dir.glob("*.trace.json"), reverse=True)
+        target_id = files[0].stem.replace(".trace", "") if files else ""
+
+    if not target_id:
+        cli_renderer.print_info("没有轨迹文件。")
+        return True
+
+    trace_file = trace_dir / f"{target_id}.trace.json"
+    if not trace_file.exists():
+        cli_renderer.print_error(f"轨迹文件不存在：{target_id}")
+        return True
+
+    try:
+        import json
+        events = json.loads(trace_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        cli_renderer.print_error(f"读取轨迹失败：{exc}")
+        return True
+
+    # 渲染轨迹摘要
+    cli_renderer.print_info(f"[bold]== 执行轨迹: {target_id} ==[/]")
+    summary = {"角色": 0, "工具调用": 0, "子任务": 0, "迭代": 0}
+    for ev in events:
+        e = ev.get("event", "")
+        if e.startswith("role_"): summary["角色"] += 1
+        elif e == "tool_call": summary["工具调用"] += 1
+        elif e.startswith("subtask_"): summary["子任务"] += 1
+        elif e == "iteration_start": summary["迭代"] += 1
+
+    cli_renderer.print_info(
+        f"共 {len(events)} 条事件 | "
+        + " | ".join(f"{k}: {v}" for k, v in summary.items())
+    )
+
+    # 逐条显示（取 detail 摘要）
+    for ev in events:
+        e = ev.get("event", "")
+        ts = ev.get("timestamp", "")[11:19]  # HH:MM:SS
+        detail = ev.get("detail", "")[:160]
+        line = f"[{ts}] {e}"
+        if detail:
+            line += f": {detail}"
+        cli_renderer.print_info(f"  [dim]{line}[/]")
+
+    return True
+
+
 # ── 命令注册表 ──
 
 _COMMAND_REGISTRY: dict[str, CommandHandler] = {
@@ -756,6 +837,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/file": _handle_file,
     "/session": _handle_session,
     "/capabilities": _handle_capabilities,
+    "/trace": _handle_trace,
 }
 
 
