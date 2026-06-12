@@ -20,9 +20,14 @@ from .search import create_search_web_tool
 from .security import scan_port
 from .web_fetch import create_web_fetch_tool
 from .system import (
+    ProcessManager,
+    create_list_processes_tool,
+    create_read_process_output_tool,
     create_run_registered_tool_tool,
     create_run_shell_command_tool,
+    create_stop_process_tool,
     describe_command_registry,
+    get_process_manager,
     normalize_command_registry,
 )
 
@@ -96,6 +101,9 @@ def get_default_tools(
         create_replace_in_file_tool(allowed_roots),
         create_apply_unified_patch_tool(allowed_roots),
         create_run_shell_command_tool(allowed_roots, execution_controller),
+        create_read_process_output_tool(),
+        create_list_processes_tool(),
+        create_stop_process_tool(),
     ]
     if normalized_registry:
         tools.append(

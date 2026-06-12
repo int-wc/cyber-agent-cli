@@ -145,9 +145,10 @@ ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
 - 输出清晰的结果：做了什么、结果如何
 - 遇到阻碍时报告具体错误，不要猜测
 - 效率优先：一步到位，避免分批读取；不要用工具调用来记录思路
-- 后台进程（如 java -jar ... &）必须重定向输出到日志文件，格式：
-  `nohup 命令 > /tmp/进程名.log 2>&1 &`
-  否则后台进程的 stdout/stderr 会继承管道路径，导致管道无法关闭而卡死
+- 后台进程（如 java -jar、docker compose up、npm run dev 等需要持续运行的服务）
+  必须用 run_shell_command(detach=True, label="服务名") 启动，不要用 & 或 nohup。
+  detach=True 会立即返回进程句柄，不会阻塞后续操作。
+  启动后用 read_process_output(handle=句柄) 随时查看输出，用 stop_process 停止。
 - curl 类网络检查必须加 --connect-timeout 和 --max-time 参数，避免永久阻塞
 - 检查同类状态（如端口的进程监听情况）时一次完成，不要重复运行相同命令""",
 
