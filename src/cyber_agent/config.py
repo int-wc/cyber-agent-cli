@@ -155,6 +155,14 @@ class Settings(BaseSettings):
         default=8,
         validation_alias="MULTI_AGENT_MAX_WORKERS",
     )
+    pipeline_max_subagents: int = Field(
+        default=4,
+        validation_alias="PIPELINE_MAX_SUBAGENTS",
+    )
+    pipeline_subtask_concurrency: str = Field(
+        default="auto",
+        validation_alias="PIPELINE_SUBTASK_CONCURRENCY",
+    )
     pipeline_max_iterations: int = Field(
         default=20,
         validation_alias="PIPELINE_MAX_ITERATIONS",

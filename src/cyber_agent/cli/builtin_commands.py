@@ -532,9 +532,8 @@ def _handle_multi(
     if toggle in ("on", "enable", "yes", "true"):
         runtime_context["multi_agent_enabled"] = True
         cli_renderer.print_info(
-            "已启用多 Agent 并发模式（强制）。任务将始终分解并分配给 "
-            "checker/reader/analyst/runner/builder/decision-maker/"
-            "reflector/diffuser/jumper 角色并行执行。"
+            "已启用多 Agent 编排模式（强制）。任务将进入四柱管线；"
+            "子任务是否并发由 subtask_concurrency 和资源锁调度决定。"
         )
     elif toggle in ("off", "disable", "no", "false"):
         runtime_context["multi_agent_enabled"] = False

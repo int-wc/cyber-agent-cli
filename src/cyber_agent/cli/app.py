@@ -327,6 +327,8 @@ def build_runtime_context(
         "session_storage_dir": get_runtime_session_storage_dir(),
         "_stop_input_buffer": "",
         "multi_agent_enabled": "auto",
+        "subtask_concurrency": settings.pipeline_subtask_concurrency,
+        "max_subagents": settings.pipeline_max_subagents,
         "auto_decision": auto_decision,
         "_recent_inputs": [],  # 最近 50 条用户输入
     }
@@ -2126,6 +2128,16 @@ def hub_serve(
         "--multi-agent",
         help="Hub 多 Agent 编排策略，可选 off、auto、on；默认 off 以保持唯一 runner。",
     ),
+    subtask_concurrency: str = typer.Option(
+        "auto",
+        "--subtask-concurrency",
+        help="四柱子任务并发策略，可选 off、auto、force；默认 auto。",
+    ),
+    max_subagents: int = typer.Option(
+        4,
+        "--max-subagents",
+        help="四柱子任务最多并发的子 Agent 数量；1 表示实际顺序执行。",
+    ),
     feishu_broadcast_chat_ids: list[str] | None = typer.Option(
         None,
         "--feishu-broadcast-chat-id",
@@ -2155,11 +2167,20 @@ def hub_serve(
     if normalized_multi_agent not in {"off", "auto", "on"}:
         renderer.print_error("--multi-agent 仅支持 off、auto、on。")
         raise typer.Exit(code=1)
+    normalized_subtask_concurrency = subtask_concurrency.strip().lower()
+    if normalized_subtask_concurrency not in {"off", "auto", "force"}:
+        renderer.print_error("--subtask-concurrency 仅支持 off、auto、force。")
+        raise typer.Exit(code=1)
+    if max_subagents < 1:
+        renderer.print_error("--max-subagents 必须大于等于 1。")
+        raise typer.Exit(code=1)
     runtime_context["multi_agent_enabled"] = {
         "off": False,
         "auto": "auto",
         "on": True,
     }[normalized_multi_agent]
+    runtime_context["subtask_concurrency"] = normalized_subtask_concurrency
+    runtime_context["max_subagents"] = max_subagents
     resolved_storage_dir = (
         Path(storage_dir).expanduser().resolve()
         if storage_dir is not None

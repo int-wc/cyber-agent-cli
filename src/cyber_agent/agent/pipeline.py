@@ -139,6 +139,8 @@ class FourPillarPipeline:
         self._session_id: str = ""
         self._trace_id: str = ""
         self._final_summary: str = ""
+        self._trace_lock = threading.RLock()
+        self._usage_lock = threading.RLock()
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -237,7 +239,8 @@ class FourPillarPipeline:
             "detail": detail,
             "metadata": metadata or {},
         }
-        self._trace.append(trace_event)
+        with self._trace_lock:
+            self._trace.append(trace_event)
         self._append_session_event(f"pipeline.{event}", trace_event)
         if self._event_handler is not None:
             try:
@@ -464,6 +467,110 @@ class FourPillarPipeline:
         configured = int(raw_value if raw_value is not None else 20)
         return max(1, min(configured, 100))
 
+    def _resolve_max_subagents(self) -> int:
+        from ..config import settings
+
+        raw_value = self._runtime_context.get(
+            "max_subagents",
+            getattr(settings, "pipeline_max_subagents", 4),
+        )
+        try:
+            configured = int(raw_value)
+        except (TypeError, ValueError):
+            configured = 4
+        return max(1, min(configured, 16))
+
+    def _resolve_subtask_concurrency(self) -> str:
+        from ..config import settings
+
+        raw_value = str(
+            self._runtime_context.get(
+                "subtask_concurrency",
+                getattr(settings, "pipeline_subtask_concurrency", "auto"),
+            )
+        ).strip().lower()
+        if raw_value not in {"off", "auto", "force"}:
+            return "auto"
+        if self._resolve_max_subagents() <= 1:
+            return "off"
+        return raw_value
+
+    @staticmethod
+    def _extract_subtask_resource_keys(task: dict) -> set[str]:
+        """提取子任务涉及的资源锁，避免并发时互相踩同一目标。"""
+        text_parts = [
+            str(task.get("task_description", "")),
+            str(task.get("context", "")),
+        ]
+        text = "\n".join(text_parts)
+        lowered = text.lower()
+        keys: set[str] = set()
+
+        for match in _re_mod.findall(r"\bxben-\d+-\d+\b", lowered):
+            keys.add(f"challenge:{match}")
+
+        for match in _re_mod.findall(
+            r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b",
+            lowered,
+        ):
+            keys.add(f"host:{match}")
+
+        for match in _re_mod.findall(r"(?<!\w)/(?:[^\s'\"`<>|;&]+)", text):
+            keys.add(f"file:{match.rstrip('.,:;')}")
+
+        if any(word in lowered for word in ("session", "会话", "history", ".events.jsonl")):
+            keys.add("session:current")
+
+        if "tsecbench" in lowered or "/openapi/v1/challenges" in lowered:
+            keys.add("api:tsecbench")
+
+        if any(word in lowered for word in ("submit", "提交 flag", "提交flag")):
+            keys.add("api:tsecbench-submit")
+        if any(word in lowered for word in ("start", "启动")) and "xben-" in lowered:
+            keys.add("api:tsecbench-start")
+        if any(word in lowered for word in ("close", "关闭", "释放")) and "xben-" in lowered:
+            keys.add("api:tsecbench-close")
+
+        return keys
+
+    @staticmethod
+    def _is_subtask_sensitive(task: dict) -> bool:
+        """敏感操作强制顺序，优先保证外部状态一致。"""
+        text = (
+            f"{task.get('task_description', '')}\n{task.get('context', '')}"
+        ).lower()
+        sensitive_markers = (
+            "submit",
+            "提交 flag",
+            "提交flag",
+            "close",
+            "关闭容器",
+            "释放资源",
+            "/session",
+            "切换会话",
+            "save_session",
+            ".events.jsonl",
+        )
+        if any(marker in text for marker in sensitive_markers):
+            return True
+        if "start" in text and "xben-" in text:
+            return True
+        if "启动" in text and "xben-" in text:
+            return True
+        return False
+
+    def _subtask_parallel_decision(self, task: dict) -> tuple[bool, str]:
+        strategy = self._resolve_subtask_concurrency()
+        if strategy == "off":
+            return False, "concurrency_off"
+        if self._is_subtask_sensitive(task):
+            return False, "sensitive_operation"
+        if strategy == "force":
+            return True, "force"
+        if bool(task.get("parallel", False)):
+            return True, "llm_parallel"
+        return False, "not_marked_parallel"
+
     @staticmethod
     def _is_boundary_probe(tool_call: dict) -> str | None:
         tool_name = str(tool_call.get("name", ""))
@@ -640,8 +747,9 @@ class FourPillarPipeline:
                 ),
             )
             usage = event_handler.get_token_usage()
-            self.cumulative_input_tokens += usage["input_tokens"]
-            self.cumulative_output_tokens += usage["output_tokens"]
+            with self._usage_lock:
+                self.cumulative_input_tokens += usage["input_tokens"]
+                self.cumulative_output_tokens += usage["output_tokens"]
             return result
 
         for escalation in range(MAX_TIMEOUT_ESCALATIONS + 1):
@@ -781,7 +889,20 @@ class FourPillarPipeline:
         )
         self._record_trace("parallel_batch_start", detail=f"{n} 个子任务")
 
-        max_workers = min(n, 4)  # 最多 4 路并行，避免打满带宽
+        max_workers = min(n, self._resolve_max_subagents())
+        self._record_trace(
+            "parallel_batch_scheduled",
+            detail=f"{n} 个子任务，max_workers={max_workers}",
+            metadata={
+                "batch_size": n,
+                "max_workers": max_workers,
+                "strategy": self._resolve_subtask_concurrency(),
+                "resource_keys": [
+                    sorted(self._extract_subtask_resource_keys(task))
+                    for task in batch
+                ],
+            },
+        )
 
         def _run_one(seq: int, task: dict) -> dict:
             role_str = task.get("role", "runner")
@@ -810,8 +931,9 @@ class FourPillarPipeline:
                 )
                 # 收集并行子任务的 Token 用量（注意线程安全：每子任务独立 handler）
                 usage = event_handler.get_token_usage()
-                self.cumulative_input_tokens += usage["input_tokens"]
-                self.cumulative_output_tokens += usage["output_tokens"]
+                with self._usage_lock:
+                    self.cumulative_input_tokens += usage["input_tokens"]
+                    self.cumulative_output_tokens += usage["output_tokens"]
                 elapsed = (time_mod.monotonic() - sub_start) * 1000
                 self._record_trace(
                     "parallel_subtask_complete",
@@ -947,8 +1069,9 @@ class FourPillarPipeline:
                 "output_tokens": _estimate_tokens_from_text(self._extract_text(response)),
                 "total_tokens": _estimate_tokens_from_text(self._extract_text(response)),
             }
-        self.cumulative_input_tokens += usage["input_tokens"]
-        self.cumulative_output_tokens += usage["output_tokens"]
+        with self._usage_lock:
+            self.cumulative_input_tokens += usage["input_tokens"]
+            self.cumulative_output_tokens += usage["output_tokens"]
 
     def get_usage_summary(self) -> dict[str, int]:
         """返回累计 token 使用量。"""
@@ -1443,7 +1566,20 @@ class FourPillarPipeline:
                 f"[dim bold]🔧 执行 {len(selected_indices)} 个子任务[/]"
                 f" [dim](超时={BASE_SUBTASK_TIMEOUT}s"
                 f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s,"
-                f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS})[/]"
+                f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS},"
+                f" 并发={self._resolve_subtask_concurrency()},"
+                f" max_subagents={self._resolve_max_subagents()})[/]"
+            )
+            self._record_trace(
+                "subtask_scheduler_config",
+                detail=(
+                    f"strategy={self._resolve_subtask_concurrency()}, "
+                    f"max_subagents={self._resolve_max_subagents()}"
+                ),
+                metadata={
+                    "strategy": self._resolve_subtask_concurrency(),
+                    "max_subagents": self._resolve_max_subagents(),
+                },
             )
 
             round_results: list[str] = []
@@ -1470,22 +1606,61 @@ class FourPillarPipeline:
                     break
 
                 task = subtasks[idx]
-                is_parallel = bool(task.get("parallel", False))
+                is_parallel, parallel_reason = self._subtask_parallel_decision(task)
 
                 if is_parallel:
-                    # 收集连续 parallel 子任务形成一个并行批次
+                    # 收集连续且资源不冲突的候选子任务形成一个并行批次。
                     parallel_batch: list[dict] = []
+                    batch_resource_keys: set[str] = set()
+                    max_subagents = self._resolve_max_subagents()
                     while batch_i < len(selected_indices):
                         pidx = selected_indices[batch_i]
                         if pidx >= len(subtasks):
                             batch_i += 1
                             continue
                         ptask = subtasks[pidx]
-                        if not ptask.get("parallel", False):
+                        can_parallel, reason = self._subtask_parallel_decision(ptask)
+                        if not can_parallel:
+                            self._record_trace(
+                                "subtask_parallel_rejected",
+                                detail=str(ptask.get("task_description", str(ptask)))[:200],
+                                metadata={
+                                    "index": pidx,
+                                    "reason": reason,
+                                },
+                            )
+                            break
+                        resource_keys = self._extract_subtask_resource_keys(ptask)
+                        conflicting_keys = sorted(batch_resource_keys & resource_keys)
+                        if conflicting_keys:
+                            self._record_trace(
+                                "subtask_parallel_rejected",
+                                detail=str(ptask.get("task_description", str(ptask)))[:200],
+                                metadata={
+                                    "index": pidx,
+                                    "reason": "resource_conflict",
+                                    "resource_keys": sorted(resource_keys),
+                                    "conflicting_keys": conflicting_keys,
+                                },
+                            )
+                            break
+                        if len(parallel_batch) >= max_subagents:
+                            self._record_trace(
+                                "subtask_parallel_rejected",
+                                detail=str(ptask.get("task_description", str(ptask)))[:200],
+                                metadata={
+                                    "index": pidx,
+                                    "reason": "max_subagents_reached",
+                                    "max_subagents": max_subagents,
+                                },
+                            )
                             break
                         ptask_with_index = dict(ptask)
                         ptask_with_index["_task_index"] = pidx
+                        ptask_with_index["_resource_keys"] = sorted(resource_keys)
+                        ptask_with_index["_parallel_reason"] = reason
                         parallel_batch.append(ptask_with_index)
+                        batch_resource_keys.update(resource_keys)
                         self._print_subtask_status(
                             pidx,
                             str(ptask.get("role", "runner")),
@@ -1494,6 +1669,17 @@ class FourPillarPipeline:
                             parallel=True,
                         )
                         batch_i += 1
+
+                    if not parallel_batch:
+                        self._record_trace(
+                            "subtask_parallel_rejected",
+                            detail=str(task.get("task_description", str(task)))[:200],
+                            metadata={
+                                "index": idx,
+                                "reason": parallel_reason,
+                            },
+                        )
+                        continue
 
                     batch_results = self._run_parallel_batch(
                         parallel_batch,

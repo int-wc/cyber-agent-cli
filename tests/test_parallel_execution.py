@@ -375,6 +375,123 @@ class RunParallelBatchTestCase(unittest.TestCase):
             # 每个子任务应创建独立 handler
             self.assertEqual(len(created_handlers), 2)
 
+    def test_parallel_batch_respects_max_subagents(self):
+        """并行批次使用 runtime_context 中配置的最大子 Agent 数。"""
+        self.pipeline._runtime_context["max_subagents"] = 2
+
+        def _fake_create():
+            r = MagicMock()
+            r.run.return_value = "ok"
+            return r
+
+        with patch.object(self.pipeline, "_create_subtask_runner", _fake_create):
+            batch = [
+                {"role": "runner", "task_description": f"T{i}", "parallel": True}
+                for i in range(5)
+            ]
+            self.pipeline._run_parallel_batch(
+                batch,
+                user_input="测试",
+                reasoning="",
+                additional_context="",
+            )
+
+        scheduled = [
+            event for event in self.pipeline._trace
+            if event["event"] == "parallel_batch_scheduled"
+        ]
+        self.assertEqual(scheduled[-1]["metadata"]["max_workers"], 2)
+
+
+class SubtaskSchedulerTestCase(unittest.TestCase):
+    """测试四柱子任务并发调度规则。"""
+
+    def setUp(self):
+        runner = MagicMock()
+        runner.tools = []
+        runner.mode = AgentMode.STANDARD
+        runner.allowed_roots = []
+        runner.command_registry = {}
+        runner.extra_allowed_paths = []
+        runner.configured_registry = {}
+        runner.capability_registry = None
+        runner.file_skills = []
+        renderer = MagicMock()
+        renderer.console.print = MagicMock()
+        self.pipeline = FourPillarPipeline(
+            runner=runner,
+            runtime_context={
+                "service_name": "deepseek",
+                "model_name": "deepseek-chat",
+                "api_key": "sk-test",
+                "base_url": "http://test:8000/v1",
+            },
+            renderer=renderer,
+        )
+
+    def test_concurrency_off_rejects_parallel_tasks(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "off"
+
+        allowed, reason = self.pipeline._subtask_parallel_decision(
+            {"task_description": "读取两个独立文件", "parallel": True}
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "concurrency_off")
+
+    def test_auto_requires_llm_parallel_marker(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "auto"
+
+        allowed, reason = self.pipeline._subtask_parallel_decision(
+            {"task_description": "读取独立文件"}
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "not_marked_parallel")
+
+    def test_force_parallelizes_non_sensitive_tasks(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "force"
+
+        allowed, reason = self.pipeline._subtask_parallel_decision(
+            {"task_description": "读取独立文件"}
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "force")
+
+    def test_sensitive_benchmark_operations_stay_sequential(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "force"
+
+        allowed, reason = self.pipeline._subtask_parallel_decision(
+            {
+                "task_description": "POST submit xben-013-24 的 flag",
+                "parallel": True,
+            }
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "sensitive_operation")
+
+    def test_resource_keys_extract_challenge_host_and_file(self):
+        keys = self.pipeline._extract_subtask_resource_keys(
+            {
+                "task_description": (
+                    "分析 xben-013-24，访问 10.0.166.193:80，"
+                    "读取 /home/my/cyber/test/challenges.json"
+                )
+            }
+        )
+
+        self.assertIn("challenge:xben-013-24", keys)
+        self.assertIn("host:10.0.166.193:80", keys)
+        self.assertIn("file:/home/my/cyber/test/challenges.json", keys)
+
+    def test_max_subagents_one_disables_concurrency(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "force"
+        self.pipeline._runtime_context["max_subagents"] = 1
+
+        self.assertEqual(self.pipeline._resolve_subtask_concurrency(), "off")
+
 
 class SequentialSubtaskIsolationTestCase(unittest.TestCase):
     """测试顺序子任务不会污染主 runner 的对话历史。"""

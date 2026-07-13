@@ -218,6 +218,51 @@ class FeishuTraceCollector:
         if event_name == "subtask_status":
             return [cls._build_subtask_status_step(detail, metadata)]
 
+        if event_name == "subtask_scheduler_config":
+            strategy = str(metadata.get("strategy", "")).strip() or "auto"
+            max_subagents = metadata.get("max_subagents", "")
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_scheduler",
+                    title="子任务调度策略",
+                    detail=(
+                        f"- 并发策略：`{strategy}`\n"
+                        f"- 最大子 Agent：`{max_subagents}`"
+                    ),
+                )
+            ]
+
+        if event_name == "subtask_parallel_rejected":
+            reason = str(metadata.get("reason", "")).strip() or "unknown"
+            reason_label = {
+                "concurrency_off": "并发已关闭",
+                "sensitive_operation": "敏感操作需顺序执行",
+                "not_marked_parallel": "未标记为可并发",
+                "resource_conflict": "资源锁冲突",
+                "max_subagents_reached": "达到最大并发数",
+            }.get(reason, reason)
+            detail_lines = [f"- 原因：`{reason_label}`"]
+            resource_keys = metadata.get("conflicting_keys") or metadata.get("resource_keys")
+            if isinstance(resource_keys, Sequence) and not isinstance(resource_keys, (str, bytes)):
+                values = [str(item) for item in resource_keys[:6]]
+                if values:
+                    detail_lines.append("- 资源：" + "、".join(f"`{item}`" for item in values))
+            if detail:
+                detail_lines.append(
+                    "- 子任务："
+                    + cls._truncate_text(
+                        re.sub(r"\s+", " ", detail),
+                        max_chars=180,
+                    )
+                )
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_scheduler",
+                    title="子任务改为顺序执行",
+                    detail="\n".join(detail_lines),
+                )
+            ]
+
         if event_name in {"parallel_batch_start", "parallel_batch_end"}:
             title = "并行子任务批次开始" if event_name.endswith("start") else "并行子任务批次完成"
             return [
@@ -1391,7 +1436,12 @@ def _resolve_feishu_progress_template(step: FeishuTraceStep) -> str:
         return "indigo"
     if step.kind.startswith("pipeline_subtask_"):
         return "indigo"
-    if step.kind in {"pipeline_start", "pipeline_iteration", "pipeline_subtasks"}:
+    if step.kind in {
+        "pipeline_start",
+        "pipeline_iteration",
+        "pipeline_subtasks",
+        "pipeline_scheduler",
+    }:
         return "blue"
     if step.kind in {"pipeline_parallel", "pipeline_tool_call"}:
         return "indigo"
