@@ -230,8 +230,8 @@ def _handle_version(
     tokens: list[str],
     raw_input: str,
 ) -> bool | None:
-    from .. import __version__
-    cli_renderer.print_info(f"cyber-agent-cli {__version__}")
+    from ..version import get_version_display
+    cli_renderer.print_info(f"cyber-agent-cli {get_version_display()}")
     return True
 
 

@@ -11,6 +11,7 @@ from ..agent.mode import get_mode_label
 from ..config import settings
 from ..tools import describe_allowed_roots, describe_command_registry
 from ..tools.search import PLAYWRIGHT_AVAILABLE
+from ..version import get_build_revision, get_version_display
 from .interactive import InteractionUiMode, get_interaction_ui_mode_label
 from .prompting import PROMPT_TOOLKIT_IMPORT_ERROR
 from .tui import TEXTUAL_IMPORT_ERROR
@@ -159,7 +160,7 @@ def build_doctor_rows(
     return [
         ("诊断结论", str(payload["summary"]["status_text"])),
         ("诊断提醒", reminder_text),
-        ("项目版本", str(payload["project"]["version"])),
+        ("项目版本", str(payload["project"]["version_display"])),
         ("Python", str(payload["project"]["python_version"])),
         ("模式", str(payload["runtime"]["mode_label"])),
         ("审批策略", str(payload["runtime"]["approval_policy_label"])),
@@ -276,6 +277,8 @@ def build_doctor_payload(
         },
         "project": {
             "version": __version__,
+            "revision": get_build_revision(),
+            "version_display": get_version_display(),
             "python_version": sys.version.split()[0],
             "cwd": str(Path.cwd()),
         },

@@ -12,6 +12,7 @@ from cyber_agent import __version__
 from cyber_agent.cli.app import app
 from cyber_agent.config import settings
 from cyber_agent.session_store import save_session_history
+from cyber_agent.version import get_version_display
 
 
 class FakeChatOpenAI:
@@ -79,7 +80,7 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertIn("当前工作目录下还没有已保存的历史会话", result.output)
         self.assertIn("运行诊断", result.output)
         self.assertIn("项目版本", result.output)
-        self.assertIn(f"cyber-agent-cli {__version__}", result.output)
+        self.assertIn(f"cyber-agent-cli {get_version_display()}", result.output)
         self.assertIn("当前没有正在执行的任务", result.output)
         self.assertIn("当前状态", result.output)
         self.assertIn("本地配置文件", result.output)
@@ -433,6 +434,8 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         payload = json.loads(result.output)
         self.assertEqual(payload["project"]["version"], __version__)
+        self.assertEqual(payload["project"]["version_display"], get_version_display())
+        self.assertIn("revision", payload["project"])
         self.assertIn(payload["summary"]["status"], {"ok", "warning"})
         self.assertIn("dependencies", payload)
         self.assertIn("runtime", payload)
@@ -553,8 +556,9 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         self.assertEqual(version_command_result.exit_code, 0)
         self.assertEqual(version_option_result.exit_code, 0)
-        self.assertEqual(version_command_result.output.strip(), f"cyber-agent-cli {__version__}")
-        self.assertEqual(version_option_result.output.strip(), f"cyber-agent-cli {__version__}")
+        expected = f"cyber-agent-cli {get_version_display()}"
+        self.assertEqual(version_command_result.output.strip(), expected)
+        self.assertEqual(version_option_result.output.strip(), expected)
 
     def test_config_command_can_persist_allow_path_for_future_runs(self) -> None:
         """

@@ -288,6 +288,7 @@ class CliRenderer:
         model: str,
         cwd: Path,
         approval_policy: ApprovalPolicy,
+        version: str | None = None,
     ) -> None:
         """打印共享欢迎面板，确保 CLI 与 TUI 使用同一份欢迎区样式。"""
         self.print_renderable(
@@ -297,6 +298,7 @@ class CliRenderer:
                 model=model,
                 cwd=cwd,
                 approval_policy=approval_policy,
+                version=version,
             )
         )
 

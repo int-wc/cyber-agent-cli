@@ -112,10 +112,12 @@ def build_session_overview(
     service: str,
     model: str,
     cwd: str,
+    version: str,
 ) -> tuple[SessionOverviewItem, ...]:
     """构建欢迎区和状态面板共用的会话概览数据。"""
 
     return (
+        SessionOverviewItem("版本", version, "version"),
         SessionOverviewItem("当前模式", mode_value, mode_value),
         SessionOverviewItem("审批策略", approval_policy_value, approval_policy_value),
         SessionOverviewItem("模型服务", service, "service"),

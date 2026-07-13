@@ -32,6 +32,7 @@ from cyber_agent.cli.prompting import (
 )
 from cyber_agent.cli.render import CliRenderer
 from cyber_agent.cli.theme import USER_TEXT_COLOR
+from cyber_agent.version import get_version_display
 
 
 class PassiveFakeChatOpenAI:
@@ -181,6 +182,8 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
         self.assertLess(output.index(STARTUP_PANEL_TITLE), output.index("系统提示"))
         self.assertIn(STARTUP_TITLE, output)
         self.assertIn("Cyber Agent CLI 交互界面", output)
+        self.assertIn("版本", output)
+        self.assertIn(get_version_display(), output)
 
     def test_cli_banner_adds_visual_gap_between_title_and_overview(self) -> None:
         """
@@ -204,7 +207,8 @@ class CliInteractiveHelperTestCase(unittest.TestCase):
         )
 
         self.assertEqual(output_lines[title_index + 1].strip(" │"), "")
-        self.assertIn("当前模式", output_lines[title_index + 2])
+        self.assertIn("版本", output_lines[title_index + 2])
+        self.assertIn("当前模式", output_lines[title_index + 3])
 
     def test_builtin_command_renderables_keep_cli_help_panel_structure(self) -> None:
         """

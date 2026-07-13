@@ -13,6 +13,7 @@ from rich.text import Text
 
 from ..agent.approval import ApprovalPolicy, get_approval_policy_label
 from ..agent.mode import AgentMode, get_mode_description, get_mode_label
+from ..version import get_version_display
 from .branding import (
     STARTUP_ANIMATION_DELAY_SECONDS,
     STARTUP_ANIMATION_FRAMES,
@@ -56,6 +57,7 @@ def build_banner_body(
     model: str,
     cwd: Path,
     approval_policy: ApprovalPolicy,
+    version: str | None = None,
 ) -> Text:
     """构建 CLI 与 TUI 共用的欢迎面板正文。"""
     body = Text()
@@ -67,6 +69,7 @@ def build_banner_body(
         service=service,
         model=model,
         cwd=str(cwd),
+        version=version or get_version_display(),
     ):
         append_system_kv_line(
             body,
@@ -100,6 +103,7 @@ def build_banner_panel(
     model: str,
     cwd: Path,
     approval_policy: ApprovalPolicy,
+    version: str | None = None,
 ) -> Panel:
     """构建 CLI 与 TUI 共用的欢迎面板。"""
     return Panel(
@@ -109,6 +113,7 @@ def build_banner_panel(
             model=model,
             cwd=cwd,
             approval_policy=approval_policy,
+            version=version,
         ),
         box=box.ROUNDED,
         title=ROLE_STYLES["system"]["title"],
@@ -273,5 +278,4 @@ def build_approval_policy_notice_panel(
         title=title,
         border_style="yellow" if policy is ApprovalPolicy.PROMPT else "cyan",
     )
-
 

@@ -15,7 +15,6 @@ import typer
 from click.exceptions import Abort
 from rich.console import Console, RenderableType
 
-from .. import __version__
 from ..agent.approval import (
     ApprovalDecision,
     ApprovalPolicy,
@@ -32,6 +31,7 @@ from ..local_config import (
     load_local_cli_config,
     merge_allow_paths,
 )
+from ..version import get_version_display
 from .interactive import (
     EXIT_COMMANDS,
     InteractionUiMode,
@@ -212,7 +212,7 @@ def _print_version_and_exit(value: bool) -> None:
     """处理全局 --version 选项，便于脚本和排障快速查看版本。"""
     if not value:
         return
-    typer.echo(f"cyber-agent-cli {__version__}")
+    typer.echo(f"cyber-agent-cli {get_version_display()}")
     raise typer.Exit()
 
 
@@ -539,6 +539,7 @@ def print_banner(
         model=runner.model_name,
         cwd=Path.cwd(),
         approval_policy=runtime_context["approval_policy"],
+        version=get_version_display(),
     )
 
 
@@ -553,6 +554,7 @@ def print_runtime_banner(
         model=str(runtime_context["model_name"]),
         cwd=Path.cwd(),
         approval_policy=runtime_context["approval_policy"],
+        version=get_version_display(),
     )
 
 
@@ -615,6 +617,7 @@ def print_status(
     capability_lines = "\n".join(describe_capability_lines(capability_registry))
     cli_renderer.print_status(
         [
+            ("版本", get_version_display()),
             ("模式", f"{get_mode_label(runner.mode)} ({runner.mode.value})"),
             (
                 "审批策略",
@@ -1963,7 +1966,7 @@ def version() -> None:
     """
     输出当前 CLI 版本。
     """
-    typer.echo(f"cyber-agent-cli {__version__}")
+    typer.echo(f"cyber-agent-cli {get_version_display()}")
 
 
 def main() -> None:
