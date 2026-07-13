@@ -200,11 +200,15 @@ class FourPillarPipeline:
         label = get_role_label(role)
         system_prompt = get_role_prompt(role)
         system_context = self._build_system_context()
+        execution_guidance = self._build_execution_profile_guidance()
 
         full_system = f"""{system_prompt}
 
 ## 系统环境
-{system_context}"""
+{system_context}
+
+## 执行姿态
+{execution_guidance}"""
 
         user_content = f"## 用户任务\n{user_input}"
         if context:
@@ -844,6 +848,7 @@ class FourPillarPipeline:
         *,
         ctx: str = "",
         reasoning: str = "",
+        aggressive: bool = False,
     ) -> str:
         """构建单条子任务的 prompt 文本。"""
         prompt = (
@@ -861,6 +866,17 @@ class FourPillarPipeline:
             "\n- 一步到位，避免分批读取——能一次读完的就不要分多次"
             "\n- 不需要用 run_shell_command 执行 # 注释来记录思路，直接在回复中说明"
             "\n- 每个工具有明确目的，不做多余的探测"
+        )
+        if aggressive:
+            prompt += (
+                "\n\n激进授权执行要求："
+                "\n- 不要把已可由工具验证的事项改成询问用户；先检查文件、进程、网络、接口真实状态"
+                "\n- 若已发现 VPN 配置、API 文档、token、base URL，直接基于这些信息执行当前子任务"
+                "\n- Benchmark/CTF/靶场任务不要输出“请选择 A/B/C 路径”后停止；除非接口返回明确阻塞，否则继续推进标准流程"
+                "\n- 需要连接 VPN、curl API、启动/关闭容器、提交 flag 时，按用户授权和文档约束执行，并报告真实结果"
+                "\n- 只有遇到凭证无效、任务结束、资源持续不可用、破坏性不可逆操作或权限真实不足时，才停止请求用户决策"
+            )
+        prompt += (
             "\n\n任务边界："
             "\n- 只围绕当前子任务、用户给出的目标、当前工作目录和明确提供的靶场地址/API 操作"
             "\n- 不要为了寻找线索去读取 cyber-agent 本地源码、历史会话、桌面端代码、.env 或凭证配置"
@@ -913,7 +929,11 @@ class FourPillarPipeline:
             role_label = get_role_label(self._str_to_role(role_str))
 
             subtask_prompt = self._build_subtask_prompt(
-                role_label, desc, ctx=ctx, reasoning=reasoning,
+                role_label,
+                desc,
+                ctx=ctx,
+                reasoning=reasoning,
+                aggressive=self._is_aggressive_execution(),
             )
             sub_runner = self._create_subtask_runner()
             sub_renderer = renderer
@@ -1081,8 +1101,78 @@ class FourPillarPipeline:
             "total_tokens": self.cumulative_input_tokens + self.cumulative_output_tokens,
         }
 
-    @staticmethod
-    def _build_system_context() -> str:
+    def _resolve_execution_profile(self) -> str:
+        configured = str(
+            self._runtime_context.get(
+                "resolved_execution_profile",
+                self._runtime_context.get("execution_profile", "auto"),
+            )
+        ).strip().lower()
+        if configured in {"conservative", "aggressive"}:
+            return configured
+        mode = self._runtime_context.get("mode")
+        mode_value = getattr(mode, "value", str(mode))
+        approval_policy = self._runtime_context.get("approval_policy")
+        approval_value = getattr(approval_policy, "value", str(approval_policy))
+        has_root = False
+        for key in ("allowed_roots", "extra_allowed_paths"):
+            value = self._runtime_context.get(key)
+            if isinstance(value, list):
+                for raw_path in value:
+                    try:
+                        if Path(raw_path).expanduser().resolve() == Path("/"):
+                            has_root = True
+                            break
+                    except (OSError, TypeError, ValueError):
+                        continue
+            if has_root:
+                break
+        if (
+            mode_value == "authorized"
+            and approval_value == "auto"
+            and bool(self._runtime_context.get("auto_decision", False))
+            and has_root
+        ):
+            return "aggressive"
+        return "conservative"
+
+    def _is_aggressive_execution(self) -> bool:
+        return self._resolve_execution_profile() == "aggressive"
+
+    def _build_execution_profile_guidance(self) -> str:
+        if self._is_aggressive_execution():
+            return (
+                "当前为 aggressive（授权执行优先）模式：用户已通过授权模式、自动审批、"
+                "根路径授权或等价权限、自动决策表达执行意图。除非遇到真实阻塞、"
+                "不可逆破坏性操作、凭证外传、越权外部目标或任务已结束，否则不要把"
+                "可自行验证的事项改成询问用户。优先读取现有文件、检查环境、执行命令、"
+                "连接用户提供的 VPN 配置、按文档调用 API，并根据真实输出继续推进。"
+                "Benchmark/CTF/靶场任务中，如果已发现 token、base URL、VPN 配置或 API 文档，"
+                "应直接按标准流程执行：VPN/连通预检、列题、启动容器、解题、提交、关闭；"
+                "不要退化为模拟方案、路径 A/B/C 选择题或要求用户再次确认已提供的信息。"
+            )
+        return (
+            "当前为 conservative（确认优先）模式：缺少明确授权或自动审批时，"
+            "对可能改变系统状态、网络状态或外部服务状态的操作先解释并在必要时请求确认。"
+        )
+
+    def _aggressive_planning_instruction(self) -> str:
+        if not self._is_aggressive_execution():
+            return ""
+        return (
+            "\n\n## 激进执行规划约束\n"
+            "- 不要把“请求用户确认/请选择路径/请提供已存在文件内容”作为子任务，"
+            "除非工具已验证确实缺少必要信息。\n"
+            "- 计划必须优先包含可执行动作：读取文档、检查 VPN 客户端、连接 VPN、"
+            "执行连通预检、curl API、解析题目、启动/关闭容器、提交结果等。\n"
+            "- 已在工作目录发现的文件、token、base URL、VPN 配置视为用户已提供，直接使用。\n"
+            "- 对 Benchmark/CTF/靶场任务，默认目标是按标准流程推进拿分，"
+            "不要退化为模拟推演或让用户在 A/B/C 路径中选择。\n"
+            "- 只有遇到 token 无效、任务结束、VPN 不可达、资源持续不可用、"
+            "权限不足或破坏性不可逆操作时，才停止并请求用户决策。"
+        )
+
+    def _build_system_context(self) -> str:
         from datetime import datetime, timezone
         import os
         now = datetime.now(timezone.utc).astimezone()
@@ -1090,6 +1180,7 @@ class FourPillarPipeline:
             f"当前日期时间: {now.strftime('%Y年%m月%d日 %H:%M')} "
             f"({now.strftime('%A')}, ISO {now.strftime('%Y-%m-%d')})\n"
             f"当前工作目录: {os.getcwd()}\n"
+            f"执行姿态: {self._resolve_execution_profile()}\n"
         )
 
     @staticmethod
@@ -1246,6 +1337,14 @@ class FourPillarPipeline:
 
         self._append_pipeline_user_message(user_input)
         self._record_trace("pipeline_start", detail=user_input)
+        self._record_trace(
+            "execution_profile",
+            detail=self._resolve_execution_profile(),
+            metadata={
+                "execution_profile": self._resolve_execution_profile(),
+                "auto_decision": bool(self._runtime_context.get("auto_decision", False)),
+            },
+        )
 
         try:
             self._run_phases(user_input, auto_decision)
@@ -1442,6 +1541,7 @@ class FourPillarPipeline:
             extra_instruction=(
                 "请综合以上三个角色的输出，做出最终判断。"
                 "输出执行计划时要具体、可操作，每个子任务分配明确的执行角色（runner/reader/builder）。"
+                + self._aggressive_planning_instruction()
             ),
         )
         elapsed = (time_mod.monotonic() - t0) * 1000
@@ -1514,6 +1614,10 @@ class FourPillarPipeline:
             plan_json = self._call_role_with_timeout(
                 AgentRole.DECISION_MAKER, user_input,
                 context=f"## 反思者执行计划\n{iter_context}",
+                extra_instruction=(
+                    "请把计划分解为可以直接执行的工具子任务，避免生成无谓询问用户的子任务。"
+                    + self._aggressive_planning_instruction()
+                ),
             )
             self._record_role_progress(
                 "decision_maker",
@@ -1712,7 +1816,11 @@ class FourPillarPipeline:
                     )
 
                     subtask_prompt = self._build_subtask_prompt(
-                        role_str, desc, ctx=ctx, reasoning=reasoning,
+                        role_str,
+                        desc,
+                        ctx=ctx,
+                        reasoning=reasoning,
+                        aggressive=self._is_aggressive_execution(),
                     )
 
                     try:
@@ -1866,6 +1974,7 @@ class FourPillarPipeline:
                         "请判断当前结果是否已满足用户需求。"
                         "如果已满足，第一行写「执行完成」。"
                         "如果还需改进，第一行写「继续迭代」，并给出具体改进方向。"
+                        + self._aggressive_planning_instruction()
                     ),
                 )
                 self._record_role_progress(

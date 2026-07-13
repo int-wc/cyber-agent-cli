@@ -163,6 +163,10 @@ class Settings(BaseSettings):
         default="auto",
         validation_alias="PIPELINE_SUBTASK_CONCURRENCY",
     )
+    pipeline_execution_profile: str = Field(
+        default="auto",
+        validation_alias="PIPELINE_EXECUTION_PROFILE",
+    )
     pipeline_max_iterations: int = Field(
         default=20,
         validation_alias="PIPELINE_MAX_ITERATIONS",

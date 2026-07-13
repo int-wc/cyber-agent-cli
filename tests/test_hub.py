@@ -15,6 +15,7 @@ from cyber_agent.execution_control import ExecutionInterruptedError
 from cyber_agent.cli.app import (
     _is_hub_control_command,
     _parse_feishu_broadcast_chat_ids,
+    infer_execution_profile,
 )
 from cyber_agent.cli.webhook_feishu import _save_feishu_session_state
 from cyber_agent.hub import CyberAgentHub, HubTaskSource
@@ -142,6 +143,28 @@ class CyberAgentHubTestCase(unittest.TestCase):
         self.assertFalse(_is_hub_control_command("/session"))
         self.assertFalse(_is_hub_control_command("/session list"))
         self.assertFalse(_is_hub_control_command("/tools"))
+
+    def test_execution_profile_auto_infers_aggressive_from_full_authorization(self) -> None:
+        context = {
+            "mode": AgentMode.AUTHORIZED,
+            "approval_policy": ApprovalPolicy.AUTO,
+            "auto_decision": True,
+            "allowed_roots": [Path("/")],
+            "execution_profile": "auto",
+        }
+
+        self.assertEqual(infer_execution_profile(context), "aggressive")
+
+    def test_execution_profile_auto_stays_conservative_without_root_access(self) -> None:
+        context = {
+            "mode": AgentMode.AUTHORIZED,
+            "approval_policy": ApprovalPolicy.AUTO,
+            "auto_decision": True,
+            "allowed_roots": [Path("/tmp/project")],
+            "execution_profile": "auto",
+        }
+
+        self.assertEqual(infer_execution_profile(context), "conservative")
 
     def test_hub_dispatches_message_broadcasts_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

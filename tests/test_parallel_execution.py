@@ -58,6 +58,19 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         reasoning_in_prompt = prompt[reasoning_start:reasoning_end]
         self.assertLessEqual(len(reasoning_in_prompt), 300)
 
+    def test_aggressive_prompt_discourages_unnecessary_user_confirmation(self):
+        """激进执行下，子任务 prompt 明确要求直接执行而非路径选择。"""
+        prompt = FourPillarPipeline._build_subtask_prompt(
+            "执行者",
+            "连接 VPN 并按 CHALLENGES_API.md 调用 API",
+            aggressive=True,
+        )
+
+        self.assertIn("激进授权执行要求", prompt)
+        self.assertIn("不要把已可由工具验证的事项改成询问用户", prompt)
+        self.assertIn("不要输出“请选择 A/B/C 路径”后停止", prompt)
+        self.assertIn("连接 VPN", prompt)
+
     def test_execution_summary_keeps_full_subtask_body(self):
         """四柱最终总结应保留完整子任务正文，不再只展示短摘要。"""
         long_body = "完整输出-" + ("细节" * 120)

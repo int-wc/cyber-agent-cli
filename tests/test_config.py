@@ -82,6 +82,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.pipeline_max_iterations, 20)
         self.assertEqual(settings.pipeline_max_subagents, 4)
         self.assertEqual(settings.pipeline_subtask_concurrency, "auto")
+        self.assertEqual(settings.pipeline_execution_profile, "auto")
         self.assertEqual(settings.get_service(), "opencode")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:

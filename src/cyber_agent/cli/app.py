@@ -329,9 +329,47 @@ def build_runtime_context(
         "multi_agent_enabled": "auto",
         "subtask_concurrency": settings.pipeline_subtask_concurrency,
         "max_subagents": settings.pipeline_max_subagents,
+        "execution_profile": settings.pipeline_execution_profile,
         "auto_decision": auto_decision,
         "_recent_inputs": [],  # 最近 50 条用户输入
     }
+
+
+def _path_list_contains_root(paths: object) -> bool:
+    if not isinstance(paths, list):
+        return False
+    for raw_path in paths:
+        try:
+            if Path(raw_path).expanduser().resolve() == Path("/"):
+                return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
+
+
+def infer_execution_profile(runtime_context: dict[str, object]) -> str:
+    """根据运行授权推导四柱执行姿态。"""
+    configured = str(runtime_context.get("execution_profile", "auto")).strip().lower()
+    if configured in {"conservative", "aggressive"}:
+        return configured
+    if configured not in {"", "auto"}:
+        return "auto"
+
+    mode = runtime_context.get("mode")
+    mode_value = getattr(mode, "value", str(mode))
+    approval_policy = runtime_context.get("approval_policy")
+    approval_value = getattr(approval_policy, "value", str(approval_policy))
+    has_root = _path_list_contains_root(runtime_context.get("allowed_roots")) or _path_list_contains_root(
+        runtime_context.get("extra_allowed_paths")
+    )
+    if (
+        mode_value == AgentMode.AUTHORIZED.value
+        and approval_value == ApprovalPolicy.AUTO.value
+        and bool(runtime_context.get("auto_decision", False))
+        and has_root
+    ):
+        return "aggressive"
+    return "conservative"
 
 
 def get_or_build_runtime_context(ctx: typer.Context) -> dict[str, object]:
@@ -2138,6 +2176,11 @@ def hub_serve(
         "--max-subagents",
         help="四柱子任务最多并发的子 Agent 数量；1 表示实际顺序执行。",
     ),
+    execution_profile: str = typer.Option(
+        "auto",
+        "--execution-profile",
+        help="四柱执行姿态，可选 auto、conservative、aggressive；auto 会根据授权参数推导。",
+    ),
     feishu_broadcast_chat_ids: list[str] | None = typer.Option(
         None,
         "--feishu-broadcast-chat-id",
@@ -2174,6 +2217,10 @@ def hub_serve(
     if max_subagents < 1:
         renderer.print_error("--max-subagents 必须大于等于 1。")
         raise typer.Exit(code=1)
+    normalized_execution_profile = execution_profile.strip().lower()
+    if normalized_execution_profile not in {"auto", "conservative", "aggressive"}:
+        renderer.print_error("--execution-profile 仅支持 auto、conservative、aggressive。")
+        raise typer.Exit(code=1)
     runtime_context["multi_agent_enabled"] = {
         "off": False,
         "auto": "auto",
@@ -2181,6 +2228,8 @@ def hub_serve(
     }[normalized_multi_agent]
     runtime_context["subtask_concurrency"] = normalized_subtask_concurrency
     runtime_context["max_subagents"] = max_subagents
+    runtime_context["execution_profile"] = normalized_execution_profile
+    runtime_context["resolved_execution_profile"] = infer_execution_profile(runtime_context)
     resolved_storage_dir = (
         Path(storage_dir).expanduser().resolve()
         if storage_dir is not None
