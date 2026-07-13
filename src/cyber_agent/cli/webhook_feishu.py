@@ -49,6 +49,9 @@ class FeishuTraceCollector:
         payload: object,
     ) -> list[FeishuTraceStep]:
         """把运行器事件转换成适合飞书展示的步骤列表。"""
+        if event_type.startswith("pipeline.") and isinstance(payload, Mapping):
+            return cls._build_pipeline_steps(event_type, payload)
+
         if event_type == "tool_call" and isinstance(payload, list):
             steps: list[FeishuTraceStep] = []
             for tool_call in payload:
@@ -116,6 +119,234 @@ class FeishuTraceCollector:
             ]
 
         return []
+
+    @classmethod
+    def _build_pipeline_steps(
+        cls,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> list[FeishuTraceStep]:
+        """把四柱管线事件转换成飞书进度步骤。"""
+        event_name = event_type.removeprefix("pipeline.")
+        detail = str(payload.get("detail", "")).strip()
+        raw_metadata = payload.get("metadata", {})
+        metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+
+        if event_name == "pipeline_start":
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_start",
+                    title="启动四柱 Agent 管线",
+                    detail="- 阶段：`分析为底 → 扩展为路 → 迁跃为辅 → 反思为主`",
+                )
+            ]
+
+        if event_name == "pipeline_complete":
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_done",
+                    title="四柱管线执行完成",
+                    detail="",
+                )
+            ]
+
+        if event_name in {"pipeline_abort", "pipeline_error"}:
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_error",
+                    title="四柱管线中止",
+                    detail=f"- 原因：{cls._truncate_text(detail, max_chars=240)}",
+                )
+            ]
+
+        if event_name == "role_progress":
+            label = str(metadata.get("label", "子 Agent")).strip() or "子 Agent"
+            status = str(metadata.get("status", "")).strip()
+            action = str(metadata.get("action", "")).strip()
+            phase = str(metadata.get("phase", "")).strip()
+            status_label = {
+                "start": "开始",
+                "done": "完成",
+                "error": "异常",
+            }.get(status, status or "更新")
+            detail_lines: list[str] = []
+            if phase:
+                detail_lines.append(f"- 阶段：`{phase}`")
+            if action:
+                detail_lines.append(f"- 动作：{action}")
+            elapsed_ms = metadata.get("elapsed_ms")
+            if isinstance(elapsed_ms, (int, float)):
+                detail_lines.append(f"- 耗时：`{elapsed_ms:.0f}ms`")
+            if detail:
+                detail_lines.append(
+                    "- 摘要："
+                    + cls._truncate_text(
+                        re.sub(r"\s+", " ", detail),
+                        max_chars=260,
+                    )
+                )
+            return [
+                FeishuTraceStep(
+                    kind=f"pipeline_role_{status or 'update'}",
+                    title=f"{label} {status_label}",
+                    detail="\n".join(detail_lines),
+                )
+            ]
+
+        if event_name == "iteration_start":
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_iteration",
+                    title=f"执行循环开始：{detail or '新一轮'}",
+                    detail="",
+                )
+            ]
+
+        if event_name in {"iteration_done", "iteration_continue"}:
+            title = "执行循环完成" if event_name == "iteration_done" else "继续下一轮迭代"
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_iteration",
+                    title=title,
+                    detail=f"- 结论：{detail}" if detail else "",
+                )
+            ]
+
+        if event_name == "subtasks_selected":
+            return [cls._build_subtasks_selected_step(detail, metadata)]
+
+        if event_name == "subtask_status":
+            return [cls._build_subtask_status_step(detail, metadata)]
+
+        if event_name in {"parallel_batch_start", "parallel_batch_end"}:
+            title = "并行子任务批次开始" if event_name.endswith("start") else "并行子任务批次完成"
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_parallel",
+                    title=title,
+                    detail=f"- 范围：{detail}" if detail else "",
+                )
+            ]
+
+        if event_name == "tool_call":
+            tool_name = str(metadata.get("tool", "unknown")).strip() or "unknown"
+            args_text = cls._serialize_object(metadata.get("args", {}))
+            detail_lines = []
+            elapsed_s = metadata.get("elapsed_s")
+            if isinstance(elapsed_s, (int, float)):
+                detail_lines.append(f"- 子任务耗时：`{elapsed_s:.0f}s`")
+            if args_text:
+                detail_lines.append(cls._build_code_block(args_text, language="json"))
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_tool_call",
+                    title=f"子任务调用工具 `{tool_name}`",
+                    detail="\n".join(detail_lines),
+                )
+            ]
+
+        if event_name == "tool_result":
+            tool_name = str(metadata.get("tool", "unknown")).strip() or "unknown"
+            status = str(metadata.get("status", "")).strip()
+            content = str(metadata.get("content", "")).strip()
+            detail_lines = []
+            if status:
+                detail_lines.append(f"- 状态：`{status}`")
+            exit_code = str(metadata.get("exit_code", "")).strip()
+            if exit_code:
+                detail_lines.append(f"- 退出码：`{exit_code}`")
+            if content:
+                normalized_content = _normalize_cli_output_for_feishu(content) or content
+                detail_lines.append(cls._build_tool_result_detail(normalized_content))
+            return [
+                FeishuTraceStep(
+                    kind="pipeline_tool_result",
+                    title=f"子任务工具结果 `{tool_name}`",
+                    detail="\n\n".join(detail_lines),
+                )
+            ]
+
+        return []
+
+    @classmethod
+    def _build_subtasks_selected_step(
+        cls,
+        detail: str,
+        metadata: Mapping[str, object],
+    ) -> FeishuTraceStep:
+        raw_subtasks = metadata.get("subtasks", [])
+        subtasks = (
+            raw_subtasks
+            if isinstance(raw_subtasks, Sequence)
+            and not isinstance(raw_subtasks, (str, bytes))
+            else []
+        )
+        selected = [
+            task for task in subtasks
+            if isinstance(task, Mapping) and bool(task.get("selected", False))
+        ]
+        iteration = metadata.get("iteration")
+        detail_lines = []
+        if iteration:
+            detail_lines.append(f"- 轮次：`第 {iteration} 轮`")
+        if subtasks:
+            detail_lines.append(f"- 已选择：`{len(selected)}/{len(subtasks)}`")
+        for task in selected[:8]:
+            index = cls._safe_int(task.get("index", 0)) + 1
+            role = str(task.get("role", "runner")).strip() or "runner"
+            mode = "并行" if bool(task.get("parallel", False)) else "顺序"
+            desc = re.sub(r"\s+", " ", str(task.get("description", ""))).strip()
+            detail_lines.append(
+                f"- `#{index:02d}` `{role} Agent` `{mode}` "
+                f"{cls._truncate_text(desc, max_chars=120)}"
+            )
+        if len(selected) > 8:
+            detail_lines.append(f"- 其余 `{len(selected) - 8}` 个子任务已省略。")
+        if not detail_lines and detail:
+            detail_lines.append(f"- {detail}")
+        return FeishuTraceStep(
+            kind="pipeline_subtasks",
+            title="子 Agent 任务清单",
+            detail="\n".join(detail_lines),
+        )
+
+    @classmethod
+    def _build_subtask_status_step(
+        cls,
+        detail: str,
+        metadata: Mapping[str, object],
+    ) -> FeishuTraceStep:
+        index = cls._safe_int(metadata.get("index", 0)) + 1
+        agent_label = str(metadata.get("agent_label", "")).strip()
+        if not agent_label:
+            role = str(metadata.get("role", "runner")).strip() or "runner"
+            agent_label = f"{role} Agent"
+        status = str(metadata.get("status", "")).strip()
+        status_label = str(metadata.get("status_label", "")).strip() or status or "更新"
+        mode = str(metadata.get("mode", "")).strip()
+        extra_detail = str(metadata.get("detail", "")).strip()
+        desc = re.sub(r"\s+", " ", detail).strip()
+        detail_lines = []
+        if mode:
+            detail_lines.append(f"- 模式：`{mode}`")
+        if desc:
+            detail_lines.append(
+                f"- 子任务：{cls._truncate_text(desc, max_chars=240)}"
+            )
+        if extra_detail:
+            detail_lines.append(f"- 详情：{extra_detail}")
+        return FeishuTraceStep(
+            kind=f"pipeline_subtask_{status or 'update'}",
+            title=f"#{index:02d} {agent_label} {status_label}",
+            detail="\n".join(detail_lines),
+        )
+
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _serialize_object(value: object) -> str:
@@ -307,6 +538,11 @@ class FeishuProgressMessageEmitter:
             reason = str(payload.get("reason", "")).strip()
             if reason:
                 latest_status_detail = f"- 说明：{reason}"
+        elif event_type.startswith("pipeline.") and isinstance(payload, Mapping):
+            steps = FeishuTraceCollector.build_steps(event_type, payload)
+            if steps:
+                latest_status_title = steps[-1].title
+                latest_status_detail = steps[-1].detail
 
         with self._lock:
             if self._closed:
@@ -1145,6 +1381,22 @@ def _resolve_feishu_progress_template(step: FeishuTraceStep) -> str:
         return "blue"
     if step.kind == "heartbeat":
         return "orange"
+    if step.kind == "pipeline_error":
+        return "red"
+    if step.kind in {"pipeline_done", "pipeline_role_done", "pipeline_subtask_done"}:
+        return "green"
+    if step.kind in {"pipeline_role_error", "pipeline_subtask_fail"}:
+        return "red"
+    if step.kind.startswith("pipeline_role_"):
+        return "indigo"
+    if step.kind.startswith("pipeline_subtask_"):
+        return "indigo"
+    if step.kind in {"pipeline_start", "pipeline_iteration", "pipeline_subtasks"}:
+        return "blue"
+    if step.kind in {"pipeline_parallel", "pipeline_tool_call"}:
+        return "indigo"
+    if step.kind == "pipeline_tool_result":
+        return "turquoise"
     if step.kind == "tool_call":
         return "indigo"
     if step.kind == "tool_result":

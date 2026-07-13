@@ -102,7 +102,7 @@ def _build_hub(base_dir: Path) -> tuple[CyberAgentHub, _FakeRunner, dict[str, ob
         runtime_context=runtime_context,
         approval_handler_factory=lambda context: None,
         detect_task_complexity=lambda text: False,
-        run_multi_agent_turn=lambda text, runner, context: None,
+        run_multi_agent_turn=lambda text, runner, context, event_handler=None: None,
         renderless_event_handler_factory=lambda runner, context, inner: inner,
         base_dir=base_dir,
     )
@@ -125,7 +125,7 @@ def _build_hub_with_runner(
         runtime_context=runtime_context,
         approval_handler_factory=lambda context: None,
         detect_task_complexity=lambda text: False,
-        run_multi_agent_turn=lambda text, runner, context: None,
+        run_multi_agent_turn=lambda text, runner, context, event_handler=None: None,
         renderless_event_handler_factory=lambda runner, context, inner: inner,
         base_dir=base_dir,
     )
@@ -275,6 +275,61 @@ class CyberAgentHubTestCase(unittest.TestCase):
                 chat_ids,
                 ["oc_option", "oc_config_a", "oc_config_b", "oc_persisted"],
             )
+
+    def test_multi_agent_pipeline_events_are_broadcast(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _FakeRunner()
+            runtime_context: dict[str, object] = {
+                "session_id": "test-session",
+                "session_source_id": None,
+                "approval_policy": ApprovalPolicy.AUTO,
+                "_recent_inputs": [],
+                "multi_agent_enabled": True,
+            }
+
+            def fake_multi_agent_turn(text, runner, context, event_handler=None):
+                _ = context
+                runner.history.append(HumanMessage(content=text))
+                if event_handler is not None:
+                    event_handler(
+                        "pipeline.subtask_status",
+                        {
+                            "event": "subtask_status",
+                            "detail": "执行测试子任务",
+                            "metadata": {
+                                "index": 0,
+                                "role": "runner",
+                                "agent_label": "runner Agent",
+                                "status": "start",
+                                "status_label": "开始",
+                                "mode": "顺序",
+                            },
+                        },
+                    )
+                runner.history.append(AIMessage(content="pipeline reply"))
+
+            hub = CyberAgentHub(
+                runner=runner,
+                runtime_context=runtime_context,
+                approval_handler_factory=lambda context: None,
+                detect_task_complexity=lambda text: True,
+                run_multi_agent_turn=fake_multi_agent_turn,
+                renderless_event_handler_factory=lambda runner, context, inner: inner,
+                base_dir=Path(tmp),
+            )
+            events = []
+            hub.subscribe(events.append)
+
+            hub.start()
+            hub.submit("complex task", source=HubTaskSource("cli", "cli"))
+
+            self.assertTrue(hub.wait_until_idle(2.0))
+            hub.stop()
+
+            event_types = [event.type for event in events]
+            self.assertIn("pipeline.subtask_status", event_types)
+            finished = next(event for event in events if event.type == "task_finished")
+            self.assertEqual(finished.payload["reply_text"], "pipeline reply")
 
 
 if __name__ == "__main__":

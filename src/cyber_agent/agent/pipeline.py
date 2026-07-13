@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from collections.abc import Callable
 from datetime import datetime
 import json
 from pathlib import Path
@@ -118,10 +119,12 @@ class FourPillarPipeline:
         runner: AgentRunner,
         runtime_context: dict[str, object],
         renderer: Any,
+        event_handler: Callable[[str, object], None] | None = None,
     ) -> None:
         self._runner = runner
         self._runtime_context = runtime_context
         self._renderer = renderer
+        self._event_handler = event_handler
         self._llm: Any = None
 
         # 累计 token（供 renderer 读取）
@@ -236,6 +239,38 @@ class FourPillarPipeline:
         }
         self._trace.append(trace_event)
         self._append_session_event(f"pipeline.{event}", trace_event)
+        if self._event_handler is not None:
+            try:
+                self._event_handler(f"pipeline.{event}", trace_event)
+            except Exception as exc:
+                from ..logging import log_warning
+                log_warning("pipeline", f"转发管线事件失败：{exc}")
+
+    def _record_role_progress(
+        self,
+        role_key: str,
+        label: str,
+        status: str,
+        *,
+        action: str = "",
+        detail: str = "",
+        elapsed_ms: float | None = None,
+        phase: str = "",
+    ) -> None:
+        metadata: dict[str, object] = {
+            "role": role_key,
+            "label": label,
+            "status": status,
+            "action": action,
+            "phase": phase,
+        }
+        if elapsed_ms is not None:
+            metadata["elapsed_ms"] = round(elapsed_ms)
+        self._record_trace(
+            "role_progress",
+            detail=detail,
+            metadata=metadata,
+        )
 
     def _append_session_event(self, event: str, payload: object) -> None:
         """把管线事件同步写入当前会话事件流。"""
@@ -1009,6 +1044,26 @@ class FourPillarPipeline:
                     selected=index in selected_set,
                 )
             )
+        self._record_trace(
+            "subtasks_selected",
+            detail=f"第 {iteration} 轮选择 {len(selected_indices)}/{len(subtasks)} 个子任务",
+            metadata={
+                "iteration": iteration,
+                "selected_indices": selected_indices,
+                "subtasks": [
+                    {
+                        "index": index,
+                        "role": str(task.get("role", "runner")),
+                        "description": str(
+                            task.get("task_description", str(task))
+                        ),
+                        "parallel": bool(task.get("parallel", False)),
+                        "selected": index in selected_set,
+                    }
+                    for index, task in enumerate(subtasks)
+                ],
+            },
+        )
 
     def _print_subtask_status(
         self,
@@ -1033,6 +1088,20 @@ class FourPillarPipeline:
             f"  [{style}]{icon}[/] #{index + 1:02d} "
             f"[cyan]{self._format_subtask_agent_label(role_str)}[/] "
             f"[dim]({mode})[/] {label}: {desc[:90]}{suffix}"
+        )
+        self._record_trace(
+            "subtask_status",
+            detail=desc,
+            metadata={
+                "index": index,
+                "role": role_str,
+                "agent_label": self._format_subtask_agent_label(role_str),
+                "status": status,
+                "status_label": label,
+                "detail": detail,
+                "parallel": parallel,
+                "mode": mode,
+            },
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -1098,19 +1167,49 @@ class FourPillarPipeline:
 
         # 1. 分析者（底）
         renderer.console.print("  [dim]⏳ 分析者 正在深度分析...[/]")
+        self._record_role_progress(
+            "analyst",
+            "分析者",
+            "start",
+            action="正在深度分析",
+            phase="thinking",
+        )
         t0 = time_mod.monotonic()
         analysis = self._call_role_with_timeout(AgentRole.ANALYST, user_input)
         elapsed_ms = (time_mod.monotonic() - t0) * 1000
         if _is_role_error(analysis):
             renderer.console.print(f"  [bold red]✗ 分析者 异常 ({elapsed_ms:.0f}ms): {analysis[:100]}[/]")
             phase1_failed = True
+            self._record_role_progress(
+                "analyst",
+                "分析者",
+                "error",
+                detail=analysis[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         else:
             renderer.console.print(f"  [dim green]✓ 分析者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
             renderer.console.print(f"  [dim]{analysis[:200].replace(chr(10), ' ')}...[/]")
+            self._record_role_progress(
+                "analyst",
+                "分析者",
+                "done",
+                detail=analysis[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         self._record_trace("role_analyst", detail=analysis[:1000])
 
         # 2. 扩散者（路）
         renderer.console.print("  [dim]⏳ 扩散者 正在探索路径...[/]")
+        self._record_role_progress(
+            "diffuser",
+            "扩散者",
+            "start",
+            action="正在探索路径",
+            phase="thinking",
+        )
         t0 = time_mod.monotonic()
         ctx_for_diffuser = (
             f"## 分析结论\n{analysis}"
@@ -1125,12 +1224,35 @@ class FourPillarPipeline:
         if _is_role_error(diffusion):
             renderer.console.print(f"  [bold red]✗ 扩散者 异常 ({elapsed_ms:.0f}ms): {diffusion[:100]}[/]")
             phase1_failed = True
+            self._record_role_progress(
+                "diffuser",
+                "扩散者",
+                "error",
+                detail=diffusion[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         else:
             renderer.console.print(f"  [dim green]✓ 扩散者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
+            self._record_role_progress(
+                "diffuser",
+                "扩散者",
+                "done",
+                detail=diffusion[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         self._record_trace("role_diffuser", detail=diffusion[:1000])
 
         # 3. 迁跃者（辅）
         renderer.console.print("  [dim]⏳ 迁跃者 正在创造性跨越...[/]")
+        self._record_role_progress(
+            "jumper",
+            "迁跃者",
+            "start",
+            action="正在创造性跨越",
+            phase="thinking",
+        )
         t0 = time_mod.monotonic()
         analysis_ok = not _is_role_error(analysis)
         diffusion_ok = not _is_role_error(diffusion)
@@ -1148,12 +1270,35 @@ class FourPillarPipeline:
         if _is_role_error(jump):
             renderer.console.print(f"  [bold red]✗ 迁跃者 异常 ({elapsed_ms:.0f}ms): {jump[:100]}[/]")
             phase1_failed = True
+            self._record_role_progress(
+                "jumper",
+                "迁跃者",
+                "error",
+                detail=jump[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         else:
             renderer.console.print(f"  [dim green]✓ 迁跃者 完成[/] [dim]({elapsed_ms:.0f}ms)[/]")
+            self._record_role_progress(
+                "jumper",
+                "迁跃者",
+                "done",
+                detail=jump[:500],
+                elapsed_ms=elapsed_ms,
+                phase="thinking",
+            )
         self._record_trace("role_jumper", detail=jump[:1000])
 
         # 4. 反思者（主）—— 综合审视 + 制定执行计划
         renderer.console.print("  [dim]⏳ 反思者 正在综合审视...[/]")
+        self._record_role_progress(
+            "reflector",
+            "反思者",
+            "start",
+            action="正在综合审视",
+            phase="thinking",
+        )
         t0 = time_mod.monotonic()
         # 构建反思者上下文，跳过已失败的角色输出
         reflector_parts = []
@@ -1180,8 +1325,24 @@ class FourPillarPipeline:
         if _is_role_error(reflection):
             renderer.console.print(f"  [bold red]✗ 反思者 异常 ({elapsed:.0f}ms): {reflection[:100]}[/]")
             phase1_failed = True
+            self._record_role_progress(
+                "reflector",
+                "反思者",
+                "error",
+                detail=reflection[:500],
+                elapsed_ms=elapsed,
+                phase="thinking",
+            )
         else:
             renderer.console.print(f"  [dim green]✓ 反思者 完成[/] [dim]({elapsed:.0f}ms)[/]")
+            self._record_role_progress(
+                "reflector",
+                "反思者",
+                "done",
+                detail=reflection[:500],
+                elapsed_ms=elapsed,
+                phase="thinking",
+            )
 
         if phase1_failed:
             renderer.console.print()
@@ -1213,6 +1374,13 @@ class FourPillarPipeline:
 
             # 5. 决策者 → 分解子任务
             renderer.console.print("  [dim]⏳ 决策者 正在分解子任务...[/]")
+            self._record_role_progress(
+                "decision_maker",
+                "决策者",
+                "start",
+                action="正在分解子任务",
+                phase="execution",
+            )
             iter_context = reflection
             if all_results:
                 # 展示最近一轮执行结果（从按迭代分组的数据中取最后一轮）
@@ -1223,6 +1391,13 @@ class FourPillarPipeline:
             plan_json = self._call_role_with_timeout(
                 AgentRole.DECISION_MAKER, user_input,
                 context=f"## 反思者执行计划\n{iter_context}",
+            )
+            self._record_role_progress(
+                "decision_maker",
+                "决策者",
+                "done",
+                detail=plan_json[:500],
+                phase="execution",
             )
             plan = self._parse_json(plan_json)
             subtasks = plan.get("subtasks", [])
@@ -1457,6 +1632,13 @@ class FourPillarPipeline:
 
             # 8. 审计者验证
             renderer.console.print("  [dim]⏳ 审计者 正在验证结果...[/]")
+            self._record_role_progress(
+                "checker",
+                "审计者",
+                "start",
+                action="正在验证结果",
+                phase="execution",
+            )
             check = self._call_role_with_timeout(
                 AgentRole.CHECKER, user_input,
                 context=(
@@ -1467,11 +1649,25 @@ class FourPillarPipeline:
                 ),
             )
             renderer.console.print("  [dim green]✓ 审计者 完成[/]")
+            self._record_role_progress(
+                "checker",
+                "审计者",
+                "done",
+                detail=check[:500],
+                phase="execution",
+            )
             self._record_trace("role_checker", detail=check[:500])
 
             # 9. 反思者审视 → 决定是否继续迭代
             if iteration < max_iterations:
                 renderer.console.print("  [dim]⏳ 反思者 正在审视是否需要迭代...[/]")
+                self._record_role_progress(
+                    "reflector",
+                    "反思者",
+                    "start",
+                    action="正在审视是否需要迭代",
+                    phase="execution",
+                )
                 reflection = self._call_role_with_timeout(
                     AgentRole.REFLECTOR, user_input,
                     context=(
@@ -1485,6 +1681,13 @@ class FourPillarPipeline:
                         "如果已满足，第一行写「执行完成」。"
                         "如果还需改进，第一行写「继续迭代」，并给出具体改进方向。"
                     ),
+                )
+                self._record_role_progress(
+                    "reflector",
+                    "反思者",
+                    "done",
+                    detail=reflection[:500],
+                    phase="execution",
                 )
                 if "执行完成" in reflection or self._consecutive_failures > 0:
                     # 有失败时不再迭代，直接收尾

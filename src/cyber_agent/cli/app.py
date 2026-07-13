@@ -1725,6 +1725,9 @@ class HubFeishuBridge:
         if normalized_event is not None:
             self._broadcast_progress(event, normalized_event)
             return
+        if event.type.startswith("pipeline."):
+            self._broadcast_progress(event, event.type)
+            return
         if event.type == "task_finished":
             self._finish_task(event, str(self._payload(event).get("reply_text", "")).strip())
             return
@@ -1781,7 +1784,11 @@ class HubFeishuBridge:
             emitter = self._get_progress_emitter(key, target)
             emitter.start(user_input)
 
-    def _broadcast_progress(self, event, event_type: AgentEventType) -> None:
+    def _broadcast_progress(
+        self,
+        event,
+        event_type: str | AgentEventType,
+    ) -> None:
         key = self._task_key(event)
         with self._lock:
             targets = list(self._task_targets.get(key, []))

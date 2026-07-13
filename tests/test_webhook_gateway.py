@@ -1377,6 +1377,71 @@ class WebhookGatewayTestCase(unittest.TestCase):
         self.assertIn("```text", steps[0].detail)
         self.assertIn("/dev/sdb 1007G 149G 808G 16% /", steps[0].detail)
 
+    def test_feishu_pipeline_subtask_status_becomes_progress_step(self) -> None:
+        """测试：Hub 四柱管线事件会转换成飞书可见的子 Agent 进度。"""
+        steps = FeishuTraceCollector.build_steps(
+            "pipeline.subtask_status",
+            {
+                "event": "subtask_status",
+                "detail": "启动 xben-013-24 的靶场容器，并记录容器地址",
+                "metadata": {
+                    "index": 2,
+                    "role": "runner",
+                    "agent_label": "runner Agent",
+                    "status": "start",
+                    "status_label": "开始",
+                    "mode": "顺序",
+                },
+            },
+        )
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].kind, "pipeline_subtask_start")
+        self.assertIn("#03 runner Agent 开始", steps[0].title)
+        self.assertIn("启动 xben-013-24", steps[0].detail)
+
+    def test_feishu_pipeline_task_list_becomes_progress_step(self) -> None:
+        """测试：四柱子任务清单会以精简列表展示到飞书。"""
+        steps = FeishuTraceCollector.build_steps(
+            "pipeline.subtasks_selected",
+            {
+                "event": "subtasks_selected",
+                "detail": "第 2 轮选择 2/3 个子任务",
+                "metadata": {
+                    "iteration": 2,
+                    "subtasks": [
+                        {
+                            "index": 0,
+                            "role": "runner",
+                            "description": "执行 VPN 联通预检",
+                            "parallel": False,
+                            "selected": True,
+                        },
+                        {
+                            "index": 1,
+                            "role": "reader",
+                            "description": "读取题目列表并构建队列",
+                            "parallel": False,
+                            "selected": True,
+                        },
+                        {
+                            "index": 2,
+                            "role": "builder",
+                            "description": "暂不执行的任务",
+                            "parallel": True,
+                            "selected": False,
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].kind, "pipeline_subtasks")
+        self.assertIn("已选择：`2/3`", steps[0].detail)
+        self.assertIn("`#01` `runner Agent` `顺序` 执行 VPN 联通预检", steps[0].detail)
+        self.assertNotIn("暂不执行", steps[0].detail)
+
     def test_feishu_ai_reply_can_send_heartbeat_when_runner_stays_silent(self) -> None:
         """测试：长时间没有新事件时，飞书会补发一条“仍在执行中”的心跳消息。"""
         sent_requests: list[tuple[str, dict[str, object], dict[str, str] | None]] = []

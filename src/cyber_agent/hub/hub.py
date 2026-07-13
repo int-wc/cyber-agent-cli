@@ -61,7 +61,10 @@ class CyberAgentHub:
         runtime_context: dict[str, object],
         approval_handler_factory: Callable[[dict[str, object]], Any],
         detect_task_complexity: Callable[[str], bool],
-        run_multi_agent_turn: Callable[[str, Any, dict[str, object]], None],
+        run_multi_agent_turn: Callable[
+            [str, Any, dict[str, object], Callable[[str | AgentEventType, object], None] | None],
+            None,
+        ],
         renderless_event_handler_factory: Callable[
             [Any, dict[str, object], Callable[[str | AgentEventType, object], None]],
             Callable[[str | AgentEventType, object], None],
@@ -242,7 +245,12 @@ class CyberAgentHub:
                 if multi_setting is True or (
                     multi_setting == "auto" and self.detect_task_complexity(task.text)
                 ):
-                    self.run_multi_agent_turn(task.text, self.runner, self.runtime_context)
+                    self.run_multi_agent_turn(
+                        task.text,
+                        self.runner,
+                        self.runtime_context,
+                        inner_event_handler,
+                    )
                     reply_text = self._last_ai_text()
                 else:
                     reply_text = str(

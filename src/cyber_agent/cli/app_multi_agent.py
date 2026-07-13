@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ def _run_multi_agent_turn(
     user_input: str,
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    event_handler: Callable[[str, object], None] | None = None,
 ) -> None:
     """四柱管线：分析→扩散→迁跃→反思→执行→审计→反思闭环。
 
@@ -87,6 +89,7 @@ def _run_multi_agent_turn(
         runner=runner,
         runtime_context=runtime_context,
         renderer=renderer,
+        event_handler=event_handler,
     )
 
     pipeline.run(user_input, auto_decision=auto_decision)
