@@ -8,9 +8,12 @@ DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-5.4",
     "deepseek": "deepseek-v4-flash",
+    "opencode": "deepseek-v4-flash-free",
     "mimo": "mimo-v2.5-pro",
-    "claude": "claude-opus-4-6"
+    "claude": "claude-opus-4-6",
 }
+DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
+ANTHROPIC_TOKEN_SERVICES = frozenset({"deepseek", "mimo", "claude"})
 # DeepSeek V4 Pro [1m] 上下文窗口参数
 DEEPSEEK_MAX_CONTEXT_TOKENS = 1_000_000
 DEEPSEEK_AUTO_COMPACT_WINDOW = 400_000
@@ -23,7 +26,7 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_API_KEY",
     )
     gateway_default_model: str = Field(
-        default="deepseek-v4-flash",
+        default=DEFAULT_MODELS["opencode"],
         validation_alias="GATEWAY_DEFAULT_MODEL",
     )
     gateway_base_url: str | None = Field(
@@ -31,7 +34,7 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_BASE_URL",
     )
     gateway_default_service: str = Field(
-        default="deepseek",
+        default="opencode",
         validation_alias="GATEWAY_DEFAULT_SERVICE",
     )
 
@@ -75,6 +78,20 @@ class Settings(BaseSettings):
     mimo_base_url: str | None = Field(
         default=None,
         validation_alias="MIMO_BASE_URL",
+    )
+
+    # ── OpenCode Zen 专属 ──
+    opencode_api_key: str | None = Field(
+        default=None,
+        validation_alias="OPENCODE_API_KEY",
+    )
+    opencode_model: str = Field(
+        default=DEFAULT_MODELS["opencode"],
+        validation_alias="OPENCODE_MODEL",
+    )
+    opencode_base_url: str | None = Field(
+        default=DEFAULT_OPENCODE_BASE_URL,
+        validation_alias="OPENCODE_BASE_URL",
     )
 
     # ── 搜索工具 ──
@@ -158,7 +175,8 @@ class Settings(BaseSettings):
     ) -> str:
         """返回当前默认模型名称。
 
-        优先级：显式传入 > GATEWAY_DEFAULT_MODEL_<SERVICE> > GATEWAY_DEFAULT_MODEL > 服务商默认。
+        优先级：显式传入 > GATEWAY_DEFAULT_MODEL_<SERVICE> > 服务商专属模型 >
+        GATEWAY_DEFAULT_MODEL > 服务商默认。
         """
         import os
 
@@ -170,6 +188,14 @@ class Settings(BaseSettings):
         env_model = os.getenv(env_key, "").strip()
         if env_model:
             return env_model
+        service_models: dict[str, str | None] = {
+            "deepseek": self.deepseek_model,
+            "mimo": self.mimo_model,
+            "opencode": self.opencode_model,
+        }
+        service_model = (service_models.get(normalized_service_name) or "").strip()
+        if service_model:
+            return service_model
         # 全局默认模型
         global_default = self.gateway_default_model.strip()
         if global_default:
@@ -194,19 +220,24 @@ class Settings(BaseSettings):
         service_keys: dict[str, str | None] = {
             "deepseek": self.deepseek_api_key,
             "mimo": self.mimo_api_key,
+            "opencode": self.opencode_api_key,
         }
         specific_key = service_keys.get(normalized)
         if specific_key and specific_key.strip():
             return specific_key.strip()
-        # Anthropic 兼容 API token（DeepSeek/MiMo 都支持）
-        if self.anthropic_auth_token and self.anthropic_auth_token.strip():
+        # Anthropic 兼容 API token（DeepSeek/MiMo/Claude 等支持）
+        if (
+            normalized in ANTHROPIC_TOKEN_SERVICES
+            and self.anthropic_auth_token
+            and self.anthropic_auth_token.strip()
+        ):
             return self.anthropic_auth_token.strip()
         # 默认 gateway key
         resolved = (self.gateway_api_key or "").strip()
         if not resolved:
             raise ValueError(
                 f"服务商 {normalized} 的 API Key 未配置。"
-                f" 请设置 ANTHROPIC_AUTH_TOKEN 或 DEEPSEEK_API_KEY 或 GATEWAY_API_KEY。"
+                f" 请设置 {normalized.upper()}_API_KEY 或 GATEWAY_API_KEY。"
             )
         return resolved
 
@@ -244,6 +275,7 @@ class Settings(BaseSettings):
         service_urls: dict[str, str | None] = {
             "deepseek": self.deepseek_base_url,
             "mimo": self.mimo_base_url,
+            "opencode": self.opencode_base_url,
         }
         specific_url = service_urls.get(normalized)
         if specific_url and specific_url.strip():

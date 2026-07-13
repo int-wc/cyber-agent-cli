@@ -10,6 +10,7 @@ EnvKeys = tuple[str, ...]
 CONFIG_ENV_KEYS: EnvKeys = (
     "GATEWAY_API_KEY",
     "GATEWAY_DEFAULT_MODEL",
+    "GATEWAY_DEFAULT_MODEL_OPENCODE",
     "GATEWAY_BASE_URL",
     "GATEWAY_DEFAULT_SERVICE",
     "DEEPSEEK_API_KEY",
@@ -21,6 +22,9 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "MIMO_API_KEY",
     "MIMO_MODEL",
     "MIMO_BASE_URL",
+    "OPENCODE_API_KEY",
+    "OPENCODE_MODEL",
+    "OPENCODE_BASE_URL",
 )
 
 
@@ -61,11 +65,11 @@ class SettingsTestCase(unittest.TestCase):
             settings = config_module.Settings(_env_file=None)
 
         self.assertEqual(settings.gateway_api_key, "test-key")
-        self.assertEqual(settings.gateway_default_model, "deepseek-v4-flash")
+        self.assertEqual(settings.gateway_default_model, "deepseek-v4-flash-free")
         self.assertIsNone(settings.gateway_base_url)
-        self.assertEqual(settings.resolve_base_url(), "http://127.0.0.1:8317/v1")
+        self.assertEqual(settings.resolve_base_url(), "https://opencode.ai/zen/v1")
         self.assertEqual(settings.max_context_tokens, 400_000)
-        self.assertEqual(settings.get_service(), "deepseek")
+        self.assertEqual(settings.get_service(), "opencode")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:
         """
@@ -127,6 +131,48 @@ class SettingsTestCase(unittest.TestCase):
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
         # DEEPSEEK_BASE_URL 优先于 GATEWAY_BASE_URL
         self.assertEqual(kwargs["base_url"], "https://deepseek.example/v1")
+
+    def test_opencode_can_use_service_specific_key_model_and_base_url(self) -> None:
+        """
+        测试：OpenCode Zen 供应商可使用专属 key、模型和基址。
+        """
+        with temporary_config_env(
+            GATEWAY_API_KEY="gateway-key",
+            GATEWAY_DEFAULT_MODEL="global-model",
+            GATEWAY_BASE_URL="https://gateway.example/v1",
+            GATEWAY_DEFAULT_SERVICE="opencode",
+            OPENCODE_API_KEY="opencode-key",
+            OPENCODE_MODEL="deepseek-v4-flash-free",
+            OPENCODE_BASE_URL="https://opencode.ai/zen/v1",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(settings.get_service(), "opencode")
+        self.assertEqual(kwargs["model"], "deepseek-v4-flash-free")
+        self.assertEqual(kwargs["api_key"], "opencode-key")
+        self.assertEqual(kwargs["base_url"], "https://opencode.ai/zen/v1")
+        self.assertEqual(kwargs["extra_body"], {"provider": "opencode"})
+
+    def test_opencode_model_can_be_overridden_by_gateway_service_model(self) -> None:
+        """
+        测试：GATEWAY_DEFAULT_MODEL_<SERVICE> 仍可覆盖服务商专属模型。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="opencode",
+            GATEWAY_DEFAULT_MODEL_OPENCODE="custom-opencode-model",
+            OPENCODE_API_KEY="opencode-key",
+            OPENCODE_MODEL="deepseek-v4-flash-free",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+            self.assertEqual(
+                settings.get_chat_openai_kwargs(settings.get_service())["model"],
+                "custom-opencode-model",
+            )
 
     def test_deepseek_thinking_mode_can_be_enabled_explicitly(self) -> None:
         """

@@ -7,7 +7,7 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-const PROVIDERS = ["openai", "deepseek", "claude", "mimo"];
+const PROVIDERS = ["opencode", "openai", "deepseek", "claude", "mimo"];
 
 export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const { config, setConfig } = useSessionStore();

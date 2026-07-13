@@ -18,6 +18,8 @@ def pytest_configure(config: object) -> None:
         "DEEPSEEK_API_KEY",
         "MIMO_BASE_URL",
         "MIMO_API_KEY",
+        "OPENCODE_BASE_URL",
+        "OPENCODE_API_KEY",
     ):
         os.environ.pop(key, None)
     # 设置测试用网关基址，确保 resolve_base_url 走 OpenAI 路径

@@ -356,8 +356,8 @@ class CliBuiltinCommandTestCase(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0)
         self.assertIn("模型服务：deepseek", result.output)
-        # gateway_default_model 置空后，回退到 DEFAULT_MODELS["deepseek"]
-        self.assertIn("模型名称：deepseek-v4-pro", result.output)
+        # gateway_default_model 置空后，优先使用服务商专属模型配置
+        self.assertIn("模型名称：deepseek-chat", result.output)
 
     def test_ui_tui_mode_can_launch_tui_entry(self) -> None:
         """
