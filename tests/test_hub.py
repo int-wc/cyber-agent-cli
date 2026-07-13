@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+from cyber_agent.agent.approval import ApprovalPolicy
+from cyber_agent.agent.events import AgentEventType
+from cyber_agent.agent.mode import AgentMode
+from cyber_agent.execution_control import ExecutionInterruptedError
+from cyber_agent.hub import CyberAgentHub, HubTaskSource
+from cyber_agent.session_store import load_session_history, save_session_history
+
+
+class _FakeExecutionController:
+    def __init__(self) -> None:
+        self.stop_reasons: list[str] = []
+        self.stop_event = threading.Event()
+
+    def request_stop(self, reason: str) -> bool:
+        self.stop_reasons.append(reason)
+        self.stop_event.set()
+        return True
+
+
+class _FakeRunner:
+    def __init__(self) -> None:
+        self.mode = AgentMode.STANDARD
+        self.history: list = []
+        self.execution_controller = _FakeExecutionController()
+        self.run_inputs: list[str] = []
+        self.reset_count = 0
+        self.restored_messages: list | None = None
+
+    def run(self, text, *, verbose, event_handler, approval_handler):
+        _ = verbose, approval_handler
+        self.run_inputs.append(text)
+        self.history.append(HumanMessage(content=text))
+        event_handler(AgentEventType.TURN_START, {"input": text})
+        event_handler(AgentEventType.RESPONSE_BEGIN, {})
+        event_handler(AgentEventType.RESPONSE_TOKEN, "reply")
+        reply = f"reply: {text}"
+        self.history.append(AIMessage(content=reply))
+        event_handler(
+            AgentEventType.RESPONSE_END,
+            {"content": reply, "has_tool_calls": False},
+        )
+        event_handler(AgentEventType.HISTORY_UPDATED, {"message_type": "ai"})
+        event_handler(AgentEventType.TURN_END, {"input_tokens": 1, "output_tokens": 1})
+        return reply
+
+    def get_history_snapshot(self):
+        return list(self.history)
+
+    def get_turn_count(self):
+        return len(self.run_inputs)
+
+    def reset(self):
+        self.reset_count += 1
+        self.history = []
+
+    def restore_history(self, messages):
+        self.restored_messages = list(messages)
+        self.history = list(messages)
+
+
+class _BlockingRunner(_FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+
+    def run(self, text, *, verbose, event_handler, approval_handler):
+        _ = verbose, approval_handler
+        self.run_inputs.append(text)
+        self.history.append(HumanMessage(content=text))
+        self.started.set()
+        if not self.execution_controller.stop_event.wait(timeout=2.0):
+            raise AssertionError("blocking runner was not stopped")
+        raise ExecutionInterruptedError("stopped for session switch")
+
+
+def _build_hub(base_dir: Path) -> tuple[CyberAgentHub, _FakeRunner, dict[str, object]]:
+    runner = _FakeRunner()
+    runtime_context: dict[str, object] = {
+        "session_id": "test-session",
+        "session_source_id": None,
+        "approval_policy": ApprovalPolicy.AUTO,
+        "_recent_inputs": [],
+        "multi_agent_enabled": False,
+    }
+    hub = CyberAgentHub(
+        runner=runner,
+        runtime_context=runtime_context,
+        approval_handler_factory=lambda context: None,
+        detect_task_complexity=lambda text: False,
+        run_multi_agent_turn=lambda text, runner, context: None,
+        renderless_event_handler_factory=lambda runner, context, inner: inner,
+        base_dir=base_dir,
+    )
+    return hub, runner, runtime_context
+
+
+def _build_hub_with_runner(
+    base_dir: Path,
+    runner: _FakeRunner,
+) -> tuple[CyberAgentHub, dict[str, object]]:
+    runtime_context: dict[str, object] = {
+        "session_id": "test-session",
+        "session_source_id": None,
+        "approval_policy": ApprovalPolicy.AUTO,
+        "_recent_inputs": [],
+        "multi_agent_enabled": False,
+    }
+    hub = CyberAgentHub(
+        runner=runner,
+        runtime_context=runtime_context,
+        approval_handler_factory=lambda context: None,
+        detect_task_complexity=lambda text: False,
+        run_multi_agent_turn=lambda text, runner, context: None,
+        renderless_event_handler_factory=lambda runner, context, inner: inner,
+        base_dir=base_dir,
+    )
+    return hub, runtime_context
+
+
+class CyberAgentHubTestCase(unittest.TestCase):
+    def test_hub_dispatches_message_broadcasts_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, runner, runtime_context = _build_hub(Path(tmp))
+            events = []
+            hub.subscribe(events.append)
+
+            hub.start()
+            hub.submit("hello", source=HubTaskSource("cli", "cli"))
+
+            self.assertTrue(hub.wait_until_idle(2.0))
+            hub.stop()
+
+            self.assertEqual(runner.run_inputs, ["hello"])
+            event_types = [event.type for event in events]
+            self.assertIn("task_queued", event_types)
+            self.assertIn("task_started", event_types)
+            self.assertIn(AgentEventType.RESPONSE_TOKEN.value, event_types)
+            self.assertIn("task_finished", event_types)
+            finished = next(event for event in events if event.type == "task_finished")
+            self.assertEqual(finished.payload["reply_text"], "reply: hello")
+
+            stored = load_session_history("test-session", base_dir=Path(tmp))
+            self.assertEqual(stored.summary.turn_count, 1)
+            self.assertEqual(runtime_context["_recent_inputs"], ["hello"])
+            event_log = Path(tmp) / ".cyber-agent-cli-sessions" / "test-session.events.jsonl"
+            self.assertTrue(event_log.exists())
+            self.assertIn("user_input_received", event_log.read_text(encoding="utf-8"))
+
+    def test_stop_is_immediate_and_not_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, runner, _ = _build_hub(Path(tmp))
+            events = []
+            hub.subscribe(events.append)
+
+            hub.submit("/stop", source=HubTaskSource("feishu", "chat"))
+
+            self.assertEqual(runner.run_inputs, [])
+            self.assertEqual(runner.execution_controller.stop_reasons, ["feishu 请求停止当前任务"])
+            self.assertIn("task_stop_requested", [event.type for event in events])
+
+    def test_session_new_resets_runner_and_broadcasts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, runner, runtime_context = _build_hub(Path(tmp))
+            events = []
+            hub.subscribe(events.append)
+            runner.history.append(AIMessage(content="old"))
+
+            hub.submit("/new", source=HubTaskSource("cli", "cli"))
+
+            self.assertEqual(runner.reset_count, 1)
+            self.assertNotEqual(runtime_context["session_id"], "test-session")
+            self.assertEqual(runtime_context["_recent_inputs"], [])
+            self.assertIn("session_switched", [event.type for event in events])
+
+    def test_session_use_restores_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            save_session_history(
+                "stored-session",
+                [HumanMessage(content="old question"), AIMessage(content="old answer")],
+                mode=AgentMode.STANDARD.value,
+                approval_policy=ApprovalPolicy.AUTO.value,
+                recent_inputs=["old question"],
+                base_dir=base_dir,
+            )
+            hub, runner, runtime_context = _build_hub(base_dir)
+
+            hub.submit("/session use stored-session", source=HubTaskSource("cli", "cli"))
+
+            self.assertEqual(runtime_context["session_id"], "stored-session")
+            self.assertEqual(runtime_context["_recent_inputs"], ["old question"])
+            self.assertIsNotNone(runner.restored_messages)
+            self.assertEqual(len(runner.history), 2)
+
+    def test_session_new_during_active_task_interrupts_and_drains_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _BlockingRunner()
+            hub, runtime_context = _build_hub_with_runner(Path(tmp), runner)
+            events = []
+            hub.subscribe(events.append)
+            hub.start()
+
+            hub.submit("long task", source=HubTaskSource("cli", "cli"))
+            self.assertTrue(runner.started.wait(timeout=2.0))
+            hub.submit("queued before switch", source=HubTaskSource("cli", "cli"))
+
+            switch_thread = threading.Thread(
+                target=lambda: hub.submit("/new", source=HubTaskSource("feishu", "chat")),
+            )
+            switch_thread.start()
+            switch_thread.join(timeout=2.0)
+            self.assertFalse(switch_thread.is_alive())
+            hub.stop()
+
+            self.assertEqual(runner.run_inputs, ["long task"])
+            self.assertEqual(runner.reset_count, 1)
+            self.assertNotEqual(runtime_context["session_id"], "test-session")
+            event_types = [event.type for event in events]
+            self.assertIn("task_interrupted", event_types)
+            self.assertIn("task_queue_drained", event_types)
+            drained = next(event for event in events if event.type == "task_queue_drained")
+            self.assertEqual(drained.payload["count"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

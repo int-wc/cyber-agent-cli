@@ -225,11 +225,13 @@ class FeishuLongConnectionDispatcher:
         gateway: WebhookGateway,
         cli_renderer: CliRenderer,
         *,
+        event_consumer: Callable[[WebhookEvent], WebhookHttpResponse | None] | None = None,
         dedup_window_seconds: float = FEISHU_LONG_CONNECTION_DEDUP_WINDOW_SECONDS,
     ) -> None:
         self.route = route
         self.gateway = gateway
         self.cli_renderer = cli_renderer
+        self.event_consumer = event_consumer
         self.dedup_window_seconds = max(1.0, dedup_window_seconds)
         self._queue: Queue[WebhookEvent] = Queue()
         self._message_seen_at: dict[str, float] = {}
@@ -237,6 +239,8 @@ class FeishuLongConnectionDispatcher:
         self._worker_thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self.event_consumer is not None:
+            return
         if self._worker_thread is not None and self._worker_thread.is_alive():
             return
         self._worker_thread = threading.Thread(
@@ -286,6 +290,9 @@ class FeishuLongConnectionDispatcher:
             f"text={_normalize_preview_text(outcome.event.text)} "
             "status=queued"
         )
+        if self.event_consumer is not None:
+            self._consume_event_directly(outcome.event)
+            return
         self.submit_event(outcome.event)
 
     def submit_event(self, event: WebhookEvent) -> None:
@@ -298,10 +305,30 @@ class FeishuLongConnectionDispatcher:
                 event=event,
             )
             return
+        if self.event_consumer is not None:
+            self._consume_event_directly(event)
+            return
         self._queue.put(event)
+
+    def _consume_event_directly(self, event: WebhookEvent) -> None:
+        if self.event_consumer is None:
+            return
+        response = self.event_consumer(event)
+        if response is None:
+            response = WebhookHttpResponse(
+                status_code=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {"status": "queued", "provider": event.provider},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+            )
+        _report_gateway_response(response, self.cli_renderer, event=event)
 
     def _handle_priority_event(self, event: WebhookEvent) -> WebhookHttpResponse | None:
         """优先处理 /stop 等控制事件，避免排在长任务后面失效。"""
+        if self.event_consumer is not None:
+            return None
         priority_handler = getattr(self.gateway, "handle_priority_event", None)
         if not callable(priority_handler):
             return None
@@ -336,7 +363,19 @@ class FeishuLongConnectionDispatcher:
         while True:
             event = self._queue.get()
             try:
-                response = self.gateway.handle_event(self.route, event)
+                if self.event_consumer is None:
+                    response = self.gateway.handle_event(self.route, event)
+                else:
+                    response = self.event_consumer(event)
+                    if response is None:
+                        response = WebhookHttpResponse(
+                            status_code=200,
+                            content_type="application/json",
+                            body=json.dumps(
+                                {"status": "queued", "provider": event.provider},
+                                ensure_ascii=False,
+                            ).encode("utf-8"),
+                        )
                 _report_gateway_response(
                     response,
                     self.cli_renderer,
@@ -392,6 +431,7 @@ def serve_feishu_long_connection(
     cli_renderer: CliRenderer | None = None,
     base_dir: Path | None = None,
     reply_timeout_seconds: float = DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
+    event_consumer: Callable[[WebhookEvent], WebhookHttpResponse | None] | None = None,
 ) -> None:
     lark_module = _ensure_lark_oapi_available()
     if route.provider != "feishu":
@@ -413,7 +453,12 @@ def serve_feishu_long_connection(
         base_dir=base_dir,
         reply_timeout_seconds=reply_timeout_seconds,
     )
-    dispatcher = FeishuLongConnectionDispatcher(route, gateway, cli_renderer)
+    dispatcher = FeishuLongConnectionDispatcher(
+        route,
+        gateway,
+        cli_renderer,
+        event_consumer=event_consumer,
+    )
     dispatcher.start()
 
     def _on_message_receive(data: object) -> None:

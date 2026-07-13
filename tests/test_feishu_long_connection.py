@@ -239,6 +239,83 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
             msg=f"未找到处理完成提示：{renderer.infos}",
         )
 
+    def test_dispatcher_event_consumer_bypasses_gateway_queue(self) -> None:
+        """测试：Hub 模式下长连接直接转交 event_consumer，不再调用旧网关。"""
+        route = WebhookRouteConfig(
+            provider="feishu",
+            path="/webhook/feishu",
+        )
+        gateway = _FakeGateway()
+        renderer = _RecordingRenderer()
+        consumed_events = []
+
+        def consume(event):
+            consumed_events.append(event)
+            return build_json_http_response(
+                {
+                    "status": "queued",
+                    "session_id": "hub-session",
+                    "delivery": {"method": "hub"},
+                }
+            )
+
+        dispatcher = FeishuLongConnectionDispatcher(
+            route,
+            gateway,
+            renderer,
+            event_consumer=consume,
+        )
+        dispatcher.start()
+
+        dispatcher.submit_payload(_build_message_payload())
+
+        self.assertTrue(dispatcher.wait_until_idle())
+        self.assertEqual(gateway.events, [])
+        self.assertEqual(len(consumed_events), 1)
+        self.assertEqual(consumed_events[0].text, "你好，飞书长连接")
+        self.assertTrue(
+            any("飞书消息已处理并完成回复" in info for info in renderer.infos),
+            msg=f"未找到处理完成提示：{renderer.infos}",
+        )
+
+    def test_dispatcher_event_consumer_handles_slash_command_once(self) -> None:
+        """测试：Hub 模式下 slash 命令只交给 event_consumer 一次。"""
+        route = WebhookRouteConfig(
+            provider="feishu",
+            path="/webhook/feishu",
+        )
+        gateway = _FakeGateway()
+        renderer = _RecordingRenderer()
+        consumed_events = []
+
+        def consume(event):
+            consumed_events.append(event)
+            return None
+
+        dispatcher = FeishuLongConnectionDispatcher(
+            route,
+            gateway,
+            renderer,
+            event_consumer=consume,
+        )
+
+        dispatcher.submit_event(
+            WebhookEvent(
+                provider="feishu",
+                session_key="oc_test_chat",
+                sender_id="ou_test_user",
+                sender_name="ou_test_user",
+                message_id="stop-hub-001",
+                text="/stop",
+                metadata={"chat_id": "oc_test_chat"},
+            )
+        )
+
+        self.assertEqual(gateway.events, [])
+        self.assertEqual(gateway.priority_events, [])
+        self.assertEqual(len(consumed_events), 1)
+        self.assertEqual(consumed_events[0].text, "/stop")
+
     def test_serve_registers_bot_p2p_chat_entered_handler(self) -> None:
         """测试：注册机器人进入单聊事件处理器，避免 SDK 报 processor not found。"""
         registered_handlers: list[str] = []

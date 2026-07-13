@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -73,8 +74,13 @@ webhook_app = typer.Typer(
     add_completion=False,
     help="通过 webhook 接入飞书、钉钉、企微、邮件等移动端消息桥接。",
 )
+hub_app = typer.Typer(
+    add_completion=False,
+    help="启动 CLI/飞书共享同一 AgentRunner 的 Cyber Agent Hub。",
+)
 app.add_typer(history_app, name="history")
 app.add_typer(webhook_app, name="webhook")
+app.add_typer(hub_app, name="hub")
 
 TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 renderer = CliRenderer()
@@ -1545,6 +1551,474 @@ def prompt_chat_input() -> str:
                     renderer.print_error(f"CLI 补全已降级为基础输入：{exc}")
 
     return typer.prompt("›")
+
+
+def _load_hub_support():
+    """按需加载 Hub 支持，避免普通命令导入额外桥接代码。"""
+    from ..hub import CyberAgentHub, HubEvent, HubTaskSource
+
+    return CyberAgentHub, HubEvent, HubTaskSource
+
+
+def build_hub(
+    runtime_context: dict[str, object],
+    *,
+    base_dir: Path | None = None,
+):
+    """创建持有唯一 AgentRunner 的本地 Hub。"""
+    CyberAgentHub, _, _ = _load_hub_support()
+    if base_dir is not None:
+        runtime_context["session_base_dir"] = base_dir
+        runtime_context["session_storage_dir"] = get_runtime_session_storage_dir(base_dir)
+    ensure_runtime_capabilities(runtime_context)
+    runner = create_runner(runtime_context)
+    _try_persist(runner, runtime_context, force=True)
+    return CyberAgentHub(
+        runner=runner,
+        runtime_context=runtime_context,
+        approval_handler_factory=create_approval_handler,
+        detect_task_complexity=_detect_task_complexity,
+        run_multi_agent_turn=_run_multi_agent_turn,
+        renderless_event_handler_factory=create_persisting_event_handler,
+        base_dir=base_dir,
+    )
+
+
+def _normalize_hub_agent_event(event_type: str) -> AgentEventType | None:
+    try:
+        return AgentEventType(event_type)
+    except ValueError:
+        return None
+
+
+def subscribe_cli_to_hub(hub) -> Any:
+    """把 Hub 事件渲染到当前 CLI。"""
+
+    def _subscriber(event) -> None:
+        normalized_event = _normalize_hub_agent_event(event.type)
+        if normalized_event is not None:
+            render_agent_event(normalized_event, event.payload)
+            return
+
+        source_label = ""
+        if event.source is not None:
+            source_label = f"[{event.source.kind}] "
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type == "hub_started":
+            renderer.print_info(f"Hub 已启动，会话：{payload.get('session_id', 'unknown')}")
+        elif event.type == "hub_stopped":
+            renderer.print_info(f"Hub 已停止，会话：{payload.get('session_id', 'unknown')}")
+        elif event.type == "task_queued":
+            renderer.print_info(
+                f"{source_label}任务已入队，队列长度：{payload.get('queue_size', 0)}"
+            )
+        elif event.type == "task_started":
+            renderer.print_info(f"{source_label}开始执行：{payload.get('text', '')}")
+        elif event.type == "task_finished":
+            renderer.print_info(f"{source_label}任务完成，会话：{payload.get('session_id', '')}")
+        elif event.type == "task_interrupted":
+            renderer.print_info(str(payload.get("message", "当前任务已被停止。")))
+        elif event.type == "task_error":
+            renderer.print_error(str(payload.get("message", "Hub 任务执行失败。")))
+        elif event.type == "task_stop_requested":
+            renderer.print_info(str(payload.get("reason", "已请求停止当前任务。")))
+        elif event.type == "session_switched":
+            renderer.print_info(
+                f"{source_label}已切换会话：{payload.get('session_id', '')}"
+            )
+        elif event.type == "session_switch_failed":
+            renderer.print_error(str(payload.get("reason", "会话切换失败。")))
+
+    return hub.subscribe(_subscriber)
+
+
+class HubFeishuBridge:
+    """把 Hub 事件桥接到飞书，并把飞书输入提交给 Hub。"""
+
+    def __init__(
+        self,
+        *,
+        hub: Any,
+        route: Any,
+        runtime_context: dict[str, object],
+        base_dir: Path | None,
+        reply_timeout_seconds: float,
+    ) -> None:
+        from .webhook import WebhookGateway
+
+        self.hub = hub
+        self.route = route
+        self.gateway = WebhookGateway(
+            [route],
+            runtime_context,
+            create_runner,
+            cli_renderer=renderer,
+            base_dir=base_dir,
+            reply_timeout_seconds=reply_timeout_seconds,
+        )
+        self._known_events_by_chat: dict[str, Any] = {}
+        self._task_targets: dict[int, list[Any]] = {}
+        self._progress_emitters: dict[tuple[int, str], Any] = {}
+        self._synthetic_counter = 0
+        self._lock = threading.RLock()
+        self._delivery_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="cyber-agent-hub-feishu",
+        )
+
+    def consume_event(self, event) -> Any:
+        from .webhook import FEISHU_CREATE_API_MODE, build_json_http_response
+        _, _, HubTaskSource = _load_hub_support()
+
+        event.metadata.setdefault("feishu_delivery_mode", FEISHU_CREATE_API_MODE)
+        chat_id = str(event.metadata.get("chat_id", "")).strip()
+        if chat_id:
+            with self._lock:
+                self._known_events_by_chat.setdefault(chat_id, event)
+        self.hub.submit(
+            event.text,
+            source=HubTaskSource(
+                "feishu",
+                event.sender_name or event.sender_id,
+                {
+                    "event": event,
+                    "chat_id": chat_id,
+                    "message_id": event.message_id,
+                    "route_path": self.route.path,
+                },
+            ),
+        )
+        return build_json_http_response(
+            {
+                "status": "queued",
+                "provider": event.provider,
+                "session_id": self.hub.session_id,
+            }
+        )
+
+    def __call__(self, event) -> None:
+        normalized_event = _normalize_hub_agent_event(event.type)
+        if event.type == "task_started":
+            self._start_task(event)
+            return
+        if normalized_event is not None:
+            self._broadcast_progress(event, normalized_event)
+            return
+        if event.type == "task_finished":
+            self._finish_task(event, str(self._payload(event).get("reply_text", "")).strip())
+            return
+        if event.type == "task_interrupted":
+            message = str(
+                self._payload(event).get("reply_text")
+                or self._payload(event).get("message")
+                or "当前任务已被停止。"
+            )
+            self._finish_task(event, message)
+            return
+        if event.type == "task_error":
+            message = str(
+                self._payload(event).get("reply_text")
+                or self._payload(event).get("message")
+                or "Hub 任务执行失败。"
+            )
+            self._finish_task(event, message)
+            return
+        if event.type == "task_stop_requested":
+            self._send_control_notice(event, "已收到 /stop，正在请求停止当前任务。")
+            return
+        if event.type == "session_switched":
+            session_id = str(self._payload(event).get("session_id", ""))
+            self._send_control_notice(event, f"已切换会话：{session_id}")
+            return
+        if event.type == "session_switch_failed":
+            reason = str(self._payload(event).get("reason", "会话切换失败。"))
+            self._send_control_notice(event, reason)
+
+    @staticmethod
+    def _payload(event) -> dict[str, object]:
+        return event.payload if isinstance(event.payload, dict) else {}
+
+    def _task_key(self, event) -> int:
+        return id(event.source) if event.source is not None else 0
+
+    def _source_feishu_event(self, event) -> Any | None:
+        metadata = getattr(event.source, "metadata", {}) if event.source is not None else {}
+        candidate = metadata.get("event") if isinstance(metadata, dict) else None
+        if getattr(candidate, "provider", None) == "feishu":
+            return candidate
+        return None
+
+    def _start_task(self, event) -> None:
+        targets = self._resolve_targets(event, create_for_broadcast=True)
+        if not targets:
+            return
+        key = self._task_key(event)
+        with self._lock:
+            self._task_targets[key] = targets
+        user_input = str(self._payload(event).get("text", ""))
+        for target in targets:
+            emitter = self._get_progress_emitter(key, target)
+            emitter.start(user_input)
+
+    def _broadcast_progress(self, event, event_type: AgentEventType) -> None:
+        key = self._task_key(event)
+        with self._lock:
+            targets = list(self._task_targets.get(key, []))
+        if not targets:
+            return
+        for target in targets:
+            self._get_progress_emitter(key, target)(event_type, event.payload)
+
+    def _finish_task(self, event, reply_text: str) -> None:
+        key = self._task_key(event)
+        with self._lock:
+            targets = self._task_targets.pop(key, [])
+        if not targets:
+            targets = self._resolve_targets(event, create_for_broadcast=False)
+        if not targets:
+            logger.warning("Hub 飞书任务结束但没有可投递目标，结果已保留在本地会话。")
+            return
+        reply_text = reply_text.strip() or "（空回复）"
+        for target in targets:
+            self._close_progress_emitter(key, target)
+            self._deliver_reply(target, reply_text)
+
+    def _send_control_notice(self, event, message: str) -> None:
+        for target in self._resolve_targets(event, create_for_broadcast=True):
+            self._deliver_reply(target, message, rich=False)
+
+    def _resolve_targets(self, event, *, create_for_broadcast: bool) -> list[Any]:
+        source_event = self._source_feishu_event(event)
+        if source_event is not None:
+            return [source_event]
+        with self._lock:
+            known_events = list(self._known_events_by_chat.values())
+        if not create_for_broadcast:
+            return known_events
+        return [self._synthetic_event(base_event, event) for base_event in known_events]
+
+    def _synthetic_event(self, base_event, event):
+        from .webhook import FEISHU_CREATE_API_MODE, WebhookEvent
+
+        with self._lock:
+            self._synthetic_counter += 1
+            counter = self._synthetic_counter
+        metadata = dict(base_event.metadata)
+        metadata["feishu_delivery_mode"] = FEISHU_CREATE_API_MODE
+        chat_id = str(metadata.get("chat_id", "")).strip()
+        return WebhookEvent(
+            provider="feishu",
+            session_key=base_event.session_key,
+            sender_id=base_event.sender_id,
+            sender_name=base_event.sender_name,
+            message_id=f"hub-{self.hub.session_id}-{counter}",
+            text=str(self._payload(event).get("text", "")),
+            reply_webhook_url=base_event.reply_webhook_url,
+            metadata={**metadata, "chat_id": chat_id},
+        )
+
+    def _get_progress_emitter(self, task_key: int, event):
+        from .webhook_feishu import FeishuProgressMessageEmitter
+
+        emitter_key = (task_key, event.message_id)
+        with self._lock:
+            emitter = self._progress_emitters.get(emitter_key)
+            if emitter is not None:
+                return emitter
+            emitter = FeishuProgressMessageEmitter(
+                lambda step, step_index, target=event: self._delivery_executor.submit(
+                    self.gateway._emit_feishu_progress_message,
+                    self.route,
+                    target,
+                    step,
+                    step_index,
+                )
+            )
+            self._progress_emitters[emitter_key] = emitter
+            return emitter
+
+    def _close_progress_emitter(self, task_key: int, event) -> None:
+        emitter_key = (task_key, event.message_id)
+        with self._lock:
+            emitter = self._progress_emitters.pop(emitter_key, None)
+        if emitter is not None:
+            emitter.close()
+
+    def _deliver_reply(self, event, reply_text: str, *, rich: bool = True) -> None:
+        from .webhook import WEBHOOK_PROVIDER_ADAPTERS
+        from .webhook_models import WebhookAgentReply
+        from .webhook_feishu import _build_feishu_ai_reply_payload
+
+        def _send() -> None:
+            try:
+                payload_override = (
+                    _build_feishu_ai_reply_payload(reply_text)
+                    if rich
+                    else None
+                )
+                self.gateway._deliver_reply(
+                    self.route,
+                    WEBHOOK_PROVIDER_ADAPTERS[self.route.provider],
+                    event,
+                    WebhookAgentReply(
+                        session_id=self.hub.session_id,
+                        reply_text=reply_text,
+                        reply_payload_override=payload_override,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - 飞书投递失败不应影响 Hub 主循环
+                renderer.print_error(
+                    "Hub 飞书消息发送失败："
+                    f"chat_id={event.metadata.get('chat_id', '') or 'unknown'} "
+                    f"reason={exc}"
+                )
+
+        self._delivery_executor.submit(_send)
+
+    def close(self) -> None:
+        self._delivery_executor.shutdown(wait=False, cancel_futures=True)
+
+
+def run_hub_cli_loop(hub, *, subscribe: bool = True) -> None:
+    """运行 Hub 模式下的 CLI 前端。"""
+    _, _, HubTaskSource = _load_hub_support()
+    unsubscribe = subscribe_cli_to_hub(hub) if subscribe else None
+    try:
+        while True:
+            try:
+                user_input = prompt_chat_input().strip()
+            except (Abort, EOFError, KeyboardInterrupt):
+                renderer.print_info("\n👋 再见！")
+                break
+            if not user_input:
+                continue
+            renderer.print_user_message(user_input)
+            if user_input.strip().lower() in EXIT_COMMANDS:
+                renderer.print_info("\n👋 再见！")
+                break
+            hub.submit(user_input, source=HubTaskSource("cli", "cli"))
+    finally:
+        if unsubscribe is not None:
+            unsubscribe()
+
+
+@hub_app.command("serve")
+def hub_serve(
+    ctx: typer.Context,
+    feishu_config_path: str | None = typer.Option(
+        None,
+        "--feishu-config",
+        help="可选：飞书长连接复用的 webhook JSON 配置文件路径。",
+    ),
+    feishu_route_path: str | None = typer.Option(
+        None,
+        "--feishu-path",
+        help="当配置中存在多条 feishu 路由时，用于指定要复用的路由路径。",
+    ),
+    storage_dir: str | None = typer.Option(
+        None,
+        "--storage-dir",
+        help="Hub 会话历史落盘使用的工作根目录；省略时默认使用当前工作目录。",
+    ),
+    reply_timeout_seconds: float = typer.Option(
+        DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
+        "--reply-timeout-seconds",
+        help="调用飞书官方回复接口时的超时时间（秒）。",
+    ),
+    no_cli: bool = typer.Option(
+        False,
+        "--no-cli",
+        help="只启动 Hub/飞书前端，不进入本地 CLI 输入循环。",
+    ),
+    multi_agent: str = typer.Option(
+        "off",
+        "--multi-agent",
+        help="Hub 多 Agent 编排策略，可选 off、auto、on；默认 off 以保持唯一 runner。",
+    ),
+) -> None:
+    """
+    启动 Cyber Agent Hub，让 CLI 和飞书共享同一个 runner、队列和会话。
+    """
+    runtime_context = get_or_build_runtime_context(ctx)
+    normalized_multi_agent = multi_agent.strip().lower()
+    if normalized_multi_agent not in {"off", "auto", "on"}:
+        renderer.print_error("--multi-agent 仅支持 off、auto、on。")
+        raise typer.Exit(code=1)
+    runtime_context["multi_agent_enabled"] = {
+        "off": False,
+        "auto": "auto",
+        "on": True,
+    }[normalized_multi_agent]
+    resolved_storage_dir = (
+        Path(storage_dir).expanduser().resolve()
+        if storage_dir is not None
+        else None
+    )
+    hub = build_hub(runtime_context, base_dir=resolved_storage_dir)
+    unsubscribe_cli = subscribe_cli_to_hub(hub)
+    feishu_bridge: HubFeishuBridge | None = None
+    hub.start()
+    feishu_thread: threading.Thread | None = None
+    try:
+        if feishu_config_path is not None:
+            select_feishu_long_connection_route, serve_feishu_long_connection = (
+                _load_feishu_long_connection_support()
+            )
+            webhook_support = _load_webhook_support()
+            routes = webhook_support["load_webhook_routes_from_file"](feishu_config_path)
+            resolved_route = select_feishu_long_connection_route(
+                routes,
+                feishu_route_path,
+            )
+            feishu_bridge = HubFeishuBridge(
+                hub=hub,
+                route=resolved_route,
+                runtime_context=runtime_context,
+                base_dir=resolved_storage_dir,
+                reply_timeout_seconds=reply_timeout_seconds,
+            )
+            hub.subscribe(feishu_bridge)
+
+            def _serve_feishu() -> None:
+                try:
+                    serve_feishu_long_connection(
+                        resolved_route,
+                        runtime_context,
+                        create_runner,
+                        cli_renderer=renderer,
+                        base_dir=resolved_storage_dir,
+                        reply_timeout_seconds=reply_timeout_seconds,
+                        event_consumer=feishu_bridge.consume_event,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 后台前端失败需要显式提示
+                    renderer.print_error(f"Hub 飞书前端退出：{exc}")
+
+            feishu_thread = threading.Thread(
+                target=_serve_feishu,
+                name="cyber-agent-hub-feishu",
+                daemon=True,
+            )
+            feishu_thread.start()
+            renderer.print_info("Hub 飞书前端已启动。")
+
+        renderer.print_startup_splash()
+        print_banner(hub.runner, runtime_context)
+        if no_cli:
+            renderer.print_info("Hub 正在后台运行，按 Ctrl+C 停止。")
+            while True:
+                time.sleep(1.0)
+        else:
+            run_hub_cli_loop(hub, subscribe=False)
+    except (ModuleNotFoundError, ValueError) as exc:
+        renderer.print_error(f"运行失败：{exc}")
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        renderer.print_info("\nHub 已收到退出请求。")
+    finally:
+        unsubscribe_cli()
+        if feishu_bridge is not None:
+            feishu_bridge.close()
+        hub.stop()
 
 
 @app.callback(invoke_without_command=True)
