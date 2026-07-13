@@ -319,6 +319,7 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
     def test_serve_registers_bot_p2p_chat_entered_handler(self) -> None:
         """测试：注册机器人进入单聊事件处理器，避免 SDK 报 processor not found。"""
         registered_handlers: list[str] = []
+        created_clients = []
 
         class FakeBuilder:
             def register_p2_im_message_receive_v1(self, handler):
@@ -356,6 +357,7 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
             def __init__(self, *args, **kwargs) -> None:
                 self.args = args
                 self.kwargs = kwargs
+                created_clients.append(self)
 
             def start(self) -> None:
                 return None
@@ -384,6 +386,9 @@ class FeishuLongConnectionTestCase(unittest.TestCase):
                 cli_renderer=renderer,
             )
 
+        self.assertEqual(len(created_clients), 1)
+        self.assertIn("connected_event", created_clients[0].kwargs)
+        self.assertEqual(created_clients[0].kwargs["log_level"], "info")
         self.assertIn(
             "im.chat.access_event.bot_p2p_chat_entered_v1",
             registered_handlers,

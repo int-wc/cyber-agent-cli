@@ -396,11 +396,13 @@ def _build_observable_lark_client_class(lark_module: Any) -> Any:
             *args,
             cli_renderer: CliRenderer,
             route: WebhookRouteConfig,
+            connected_event: threading.Event | None = None,
             **kwargs,
         ) -> None:
             super().__init__(*args, **kwargs)
             self._cli_renderer = cli_renderer
             self._route = route
+            self._connected_event = connected_event
             self._has_connected_once = False
 
         async def _connect(self) -> None:
@@ -419,6 +421,8 @@ def _build_observable_lark_client_class(lark_module: Any) -> Any:
                     f"路由={self._route.path}，向机器人发送文本即可触发处理，按 Ctrl+C 可退出。"
                 )
                 self._has_connected_once = True
+            if self._connected_event is not None:
+                self._connected_event.set()
 
     return _ObservableLarkClient
 
@@ -432,6 +436,7 @@ def serve_feishu_long_connection(
     base_dir: Path | None = None,
     reply_timeout_seconds: float = DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS,
     event_consumer: Callable[[WebhookEvent], WebhookHttpResponse | None] | None = None,
+    connected_event: threading.Event | None = None,
 ) -> None:
     lark_module = _ensure_lark_oapi_available()
     if route.provider != "feishu":
@@ -522,9 +527,10 @@ def serve_feishu_long_connection(
         app_id,
         app_secret,
         event_handler=event_handler,
-        log_level=lark_module.LogLevel.INFO,
+        log_level=getattr(lark_module.LogLevel, "WARNING", lark_module.LogLevel.INFO),
         cli_renderer=cli_renderer,
         route=route,
+        connected_event=connected_event,
     )
     try:
         client.start()

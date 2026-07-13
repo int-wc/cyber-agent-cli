@@ -1643,6 +1643,7 @@ class HubFeishuBridge:
         runtime_context: dict[str, object],
         base_dir: Path | None,
         reply_timeout_seconds: float,
+        broadcast_chat_ids: list[str] | None = None,
     ) -> None:
         from .webhook import WebhookGateway
 
@@ -1665,6 +1666,8 @@ class HubFeishuBridge:
             max_workers=4,
             thread_name_prefix="cyber-agent-hub-feishu",
         )
+        for chat_id in broadcast_chat_ids or []:
+            self._register_known_chat_event(chat_id)
 
     def consume_event(self, event) -> Any:
         from .webhook import FEISHU_CREATE_API_MODE, build_json_http_response
@@ -1673,8 +1676,7 @@ class HubFeishuBridge:
         event.metadata.setdefault("feishu_delivery_mode", FEISHU_CREATE_API_MODE)
         chat_id = str(event.metadata.get("chat_id", "")).strip()
         if chat_id:
-            with self._lock:
-                self._known_events_by_chat.setdefault(chat_id, event)
+            self._remember_chat_event(chat_id, event)
         self.hub.submit(
             event.text,
             source=HubTaskSource(
@@ -1776,7 +1778,6 @@ class HubFeishuBridge:
         if not targets:
             targets = self._resolve_targets(event, create_for_broadcast=False)
         if not targets:
-            logger.warning("Hub 飞书任务结束但没有可投递目标，结果已保留在本地会话。")
             return
         reply_text = reply_text.strip() or "（空回复）"
         for target in targets:
@@ -1878,6 +1879,56 @@ class HubFeishuBridge:
     def close(self) -> None:
         self._delivery_executor.shutdown(wait=False, cancel_futures=True)
 
+    def has_broadcast_targets(self) -> bool:
+        with self._lock:
+            return bool(self._known_events_by_chat)
+
+    def _remember_chat_event(self, chat_id: str, event: Any) -> None:
+        with self._lock:
+            self._known_events_by_chat.setdefault(chat_id, event)
+
+    def _register_known_chat_event(self, chat_id: str) -> None:
+        from .webhook import FEISHU_CREATE_API_MODE, WebhookEvent
+
+        normalized_chat_id = chat_id.strip()
+        if not normalized_chat_id:
+            return
+        event = WebhookEvent(
+            provider="feishu",
+            session_key=normalized_chat_id,
+            sender_id="hub",
+            sender_name="Cyber Agent Hub",
+            message_id=f"hub-default-{normalized_chat_id}",
+            text="",
+            metadata={
+                "chat_id": normalized_chat_id,
+                "message_type": "hub_default_target",
+                "feishu_delivery_mode": FEISHU_CREATE_API_MODE,
+            },
+        )
+        self._remember_chat_event(normalized_chat_id, event)
+
+
+def _parse_feishu_broadcast_chat_ids(
+    route: Any,
+    option_values: list[str] | None,
+) -> list[str]:
+    raw_values: list[str] = []
+    raw_values.extend(option_values or [])
+    provider_options = getattr(route, "provider_options", {}) or {}
+    for key in ("hub_broadcast_chat_id", "hub_broadcast_chat_ids"):
+        value = str(provider_options.get(key, "")).strip()
+        if value:
+            raw_values.append(value)
+
+    chat_ids: list[str] = []
+    for raw_value in raw_values:
+        for item in str(raw_value).replace("\n", ",").split(","):
+            chat_id = item.strip()
+            if chat_id and chat_id not in chat_ids:
+                chat_ids.append(chat_id)
+    return chat_ids
+
 
 def run_hub_cli_loop(hub, *, subscribe: bool = True) -> None:
     """运行 Hub 模式下的 CLI 前端。"""
@@ -1897,6 +1948,8 @@ def run_hub_cli_loop(hub, *, subscribe: bool = True) -> None:
                 renderer.print_info("\n👋 再见！")
                 break
             hub.submit(user_input, source=HubTaskSource("cli", "cli"))
+            while not hub.wait_until_idle(0.2):
+                pass
     finally:
         if unsubscribe is not None:
             unsubscribe()
@@ -1935,6 +1988,16 @@ def hub_serve(
         "--multi-agent",
         help="Hub 多 Agent 编排策略，可选 off、auto、on；默认 off 以保持唯一 runner。",
     ),
+    feishu_broadcast_chat_ids: list[str] | None = typer.Option(
+        None,
+        "--feishu-broadcast-chat-id",
+        help="CLI 任务默认同步通知的飞书 chat_id，可重复传入；也可写入 provider_options.hub_broadcast_chat_ids。",
+    ),
+    feishu_connect_timeout_seconds: float = typer.Option(
+        15.0,
+        "--feishu-connect-timeout-seconds",
+        help="进入 CLI 交互前等待飞书长连接建立的最长秒数。",
+    ),
 ) -> None:
     """
     启动 Cyber Agent Hub，让 CLI 和飞书共享同一个 runner、队列和会话。
@@ -1970,14 +2033,20 @@ def hub_serve(
                 routes,
                 feishu_route_path,
             )
+            broadcast_chat_ids = _parse_feishu_broadcast_chat_ids(
+                resolved_route,
+                feishu_broadcast_chat_ids,
+            )
             feishu_bridge = HubFeishuBridge(
                 hub=hub,
                 route=resolved_route,
                 runtime_context=runtime_context,
                 base_dir=resolved_storage_dir,
                 reply_timeout_seconds=reply_timeout_seconds,
+                broadcast_chat_ids=broadcast_chat_ids,
             )
             hub.subscribe(feishu_bridge)
+            feishu_connected_event = threading.Event()
 
             def _serve_feishu() -> None:
                 try:
@@ -1989,6 +2058,7 @@ def hub_serve(
                         base_dir=resolved_storage_dir,
                         reply_timeout_seconds=reply_timeout_seconds,
                         event_consumer=feishu_bridge.consume_event,
+                        connected_event=feishu_connected_event,
                     )
                 except Exception as exc:  # noqa: BLE001 - 后台前端失败需要显式提示
                     renderer.print_error(f"Hub 飞书前端退出：{exc}")
@@ -1999,7 +2069,19 @@ def hub_serve(
                 daemon=True,
             )
             feishu_thread.start()
-            renderer.print_info("Hub 飞书前端已启动。")
+            renderer.print_info("Hub 飞书前端已启动，正在等待长连接建立。")
+            if feishu_connected_event.wait(max(0.0, feishu_connect_timeout_seconds)):
+                if feishu_bridge.has_broadcast_targets():
+                    renderer.print_info("飞书同步通知已启用。")
+                else:
+                    renderer.print_info(
+                        "飞书长连接已就绪。CLI 发起的任务会在飞书端先给机器人发送一条消息后同步；"
+                        "如需启动即同步，请传入 --feishu-broadcast-chat-id。"
+                    )
+            else:
+                renderer.print_error(
+                    "飞书长连接尚未确认建立，仍将进入 CLI；连接完成后飞书端会继续可用。"
+                )
 
         renderer.print_startup_splash()
         print_banner(hub.runner, runtime_context)
