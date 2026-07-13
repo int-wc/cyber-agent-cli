@@ -692,6 +692,23 @@ def _handle_session(
     return True
 
 
+def _handle_new(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    cli_renderer: CliRenderer,
+    tokens: list[str],
+    raw_input: str,
+) -> bool | None:
+    """/new 是 /session new 的短别名。"""
+    return _handle_session(
+        runner,
+        runtime_context,
+        cli_renderer,
+        ["/session", "new"],
+        "/session new",
+    )
+
+
 # ── /capabilities ──
 
 def _handle_capabilities(
@@ -910,6 +927,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/auto-decision": _handle_auto_decision,
     "/file": _handle_file,
     "/session": _handle_session,
+    "/new": _handle_new,
     "/capabilities": _handle_capabilities,
     "/trace": _handle_trace,
     "/pipeline": _handle_pipeline,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -48,6 +49,7 @@ SUPPORTED_WEBHOOK_PROVIDERS = ("feishu", "dingtalk", "wecom", "email")
 DEFAULT_WEBHOOK_HOST = "0.0.0.0"
 DEFAULT_WEBHOOK_PORT = 8787
 DEFAULT_WEBHOOK_REPLY_TIMEOUT_SECONDS = 10.0
+logger = logging.getLogger(__name__)
 SESSION_STORAGE_DIRNAME = ".cyber-agent-cli-sessions"
 RUNTIME_CAPABILITY_REQUIRED_KEYS = (
     "execution_controller",
@@ -837,6 +839,11 @@ def start_fresh_visible_runtime_session(
     )
     runtime_context["_recent_inputs"] = []
     runtime_context["__clear_visible_session"] = True
+    try:
+        session_store = _load_session_store_support()
+        session_store["clear_interrupt_checkpoint"]()
+    except Exception as exc:
+        logger.warning("清理中断快照失败: %s", exc)
     return session_id
 
 

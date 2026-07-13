@@ -438,6 +438,56 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn(".env", decision.reason)
 
+    def test_boundary_approval_blocks_reading_root_cyber_claude_file(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "TSec Benchmark 获取题目列表",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "read_text_file",
+                "args": {"path": "/home/my/cyber/CLAUDE.md"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("cyber-agent 本地源码", decision.reason)
+
+    def test_boundary_approval_blocks_environment_dump(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "TSec Benchmark 获取题目列表",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {"command": "env | sort"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("环境变量", decision.reason)
+
+    def test_boundary_approval_does_not_treat_session_as_debug_task(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "获取 session 题目列表并读取 challenge history",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "grep -rn 'BENCHMARK_TOKEN' "
+                        "/home/my/cyber/pentest/cyber-agent-cli/.cyber/sessions"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("禁止", decision.reason)
+
     def test_boundary_approval_allows_cyber_agent_debug_task(self):
         handler = self.pipeline._make_subtask_approval_handler(
             "调试 cyber-agent 的 FourPillarPipeline history 污染问题",

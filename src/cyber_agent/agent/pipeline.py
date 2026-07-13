@@ -50,9 +50,18 @@ class PipelineCircuitBreakerError(RuntimeError):
 
 LOCAL_PROJECT_PROBE_PATTERNS = (
     "/cyber-agent-cli",
+    "/home/my/cyber/claude.md",
+    ".cyber-agent-cli",
     ".cyber-agent-cli-sessions",
+    ".cyber-agent-cli-capabilities",
+    ".cyber-agent-cli-history",
+    ".cyber-agent-cli.json",
     ".cyber/sessions",
+    ".cyber/",
+    ".claude/",
     ".claude/settings",
+    "claude.md",
+    "webhook-routes.json",
     "/desktop/",
     "/src/cyber_agent/",
     "/tests/",
@@ -70,6 +79,13 @@ BROAD_LOCAL_SEARCH_PATTERNS = (
     "grep -rn",
     "cat /home",
 )
+LOCAL_ENV_PROBE_PATTERNS = (
+    "env |",
+    "env|",
+    "printenv",
+    "set |",
+    "set|",
+)
 CYBER_AGENT_TASK_KEYWORDS = (
     "cyber-agent",
     "cyber_agent",
@@ -77,8 +93,6 @@ CYBER_AGENT_TASK_KEYWORDS = (
     "fourpillarpipeline",
     "四柱",
     "上下文压缩",
-    "history",
-    "session",
 )
 
 
@@ -278,6 +292,13 @@ class FourPillarPipeline:
             pattern in haystack for pattern in BROAD_LOCAL_SEARCH_PATTERNS
         ):
             return "禁止在内部子任务中对本机 /home 或根目录做大范围搜索。"
+
+        if tool_name == "run_shell_command":
+            probes_env = any(
+                pattern in haystack for pattern in LOCAL_ENV_PROBE_PATTERNS
+            )
+            if probes_env:
+                return "禁止在内部子任务中探测本机环境变量。"
 
         return None
 
