@@ -120,6 +120,26 @@ class SubtaskChecklistTestCase(unittest.TestCase):
         self.assertIn("未选择", printed)
 
 
+class PipelineIterationLimitTestCase(unittest.TestCase):
+    """测试四柱执行循环的轮数配置。"""
+
+    def test_default_iteration_limit_is_long_task_friendly(self):
+        self.assertGreaterEqual(FourPillarPipeline._resolve_max_iterations(), 20)
+
+    def test_iteration_limit_is_clamped_to_positive_range(self):
+        from cyber_agent.config import settings
+
+        original = settings.pipeline_max_iterations
+        try:
+            settings.pipeline_max_iterations = 0
+            self.assertEqual(FourPillarPipeline._resolve_max_iterations(), 1)
+
+            settings.pipeline_max_iterations = 101
+            self.assertEqual(FourPillarPipeline._resolve_max_iterations(), 100)
+        finally:
+            settings.pipeline_max_iterations = original
+
+
 class CreateSubtaskRunnerTestCase(unittest.TestCase):
     """测试 _create_subtask_runner 克隆逻辑。"""
 
@@ -487,6 +507,37 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("禁止", decision.reason)
+
+    def test_boundary_prompt_text_does_not_enable_project_probe(self):
+        prompt = FourPillarPipeline._build_subtask_prompt(
+            "runner",
+            "启动 xben-013-24 靶场容器",
+        )
+        handler = self.pipeline._make_subtask_approval_handler(prompt)
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "read_text_file",
+                "args": {
+                    "path": "/home/my/cyber/pentest/cyber-agent-cli/.env",
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn(".env", decision.reason)
+
+    def test_cyber_agent_mention_without_debug_intent_is_not_debug_task(self):
+        self.assertFalse(
+            FourPillarPipeline._is_cyber_agent_debug_task(
+                "不要为了寻找线索去读取 cyber-agent 本地源码"
+            )
+        )
+        self.assertTrue(
+            FourPillarPipeline._is_cyber_agent_debug_task(
+                "调试 cyber-agent 的 FourPillarPipeline history 污染问题"
+            )
+        )
 
     def test_boundary_approval_allows_cyber_agent_debug_task(self):
         handler = self.pipeline._make_subtask_approval_handler(

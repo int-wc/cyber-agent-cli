@@ -7,7 +7,7 @@
     3. 迁跃者 JUMPER    → 创造跨越 —— 为辅
     4. 反思者 REFLECTOR → 综合审视 + 制定执行计划 —— 为主
 
-  Phase 2 - 执行循环（反思闭环，最多 3 轮）
+  Phase 2 - 执行循环（反思闭环，默认最多 20 轮，可通过 PIPELINE_MAX_ITERATIONS 配置）
     5. 决策者 DECISION_MAKER → 分解子任务
     6. 思考者 THINKER / 用户  → 选择子任务
     7. 执行者 RUNNER/READER/BUILDER → 使用隔离 runner 顺序/并行执行子任务
@@ -93,6 +93,19 @@ CYBER_AGENT_TASK_KEYWORDS = (
     "fourpillarpipeline",
     "四柱",
     "上下文压缩",
+)
+CYBER_AGENT_DEBUG_INTENT_KEYWORDS = (
+    "调试",
+    "排查",
+    "修复",
+    "修改",
+    "实现",
+    "开发",
+    "测试",
+    "debug",
+    "fix",
+    "bug",
+    "review",
 )
 
 
@@ -263,8 +276,22 @@ class FourPillarPipeline:
 
     @staticmethod
     def _is_cyber_agent_debug_task(task_text: str) -> bool:
-        lowered = task_text.lower()
-        return any(keyword in lowered for keyword in CYBER_AGENT_TASK_KEYWORDS)
+        lowered = task_text.lower().split("任务边界", 1)[0]
+        mentions_project = any(
+            keyword in lowered for keyword in CYBER_AGENT_TASK_KEYWORDS
+        )
+        has_debug_intent = any(
+            keyword in lowered for keyword in CYBER_AGENT_DEBUG_INTENT_KEYWORDS
+        )
+        return mentions_project and has_debug_intent
+
+    @staticmethod
+    def _resolve_max_iterations() -> int:
+        from ..config import settings
+
+        raw_value = getattr(settings, "pipeline_max_iterations", 20)
+        configured = int(raw_value if raw_value is not None else 20)
+        return max(1, min(configured, 100))
 
     @staticmethod
     def _is_boundary_probe(tool_call: dict) -> str | None:
@@ -427,7 +454,7 @@ class FourPillarPipeline:
                 subtask_prompt, verbose=False,
                 event_handler=event_handler,
                 approval_handler=self._make_subtask_approval_handler(
-                    f"{role_label}\n{desc}\n{subtask_prompt}"
+                    f"{role_label}\n{desc}"
                 ),
             )
             usage = event_handler.get_token_usage()
@@ -596,7 +623,7 @@ class FourPillarPipeline:
                     verbose=False,
                     event_handler=event_handler,
                     approval_handler=self._make_subtask_approval_handler(
-                        f"{role_str}\n{desc}\n{subtask_prompt}"
+                        f"{role_str}\n{desc}\n{ctx}"
                     ),
                 )
                 # 收集并行子任务的 Token 用量（注意线程安全：每子任务独立 handler）
@@ -1017,7 +1044,7 @@ class FourPillarPipeline:
         self._record_trace("role_reflector", detail=reflection[:1000])
 
         # ── Phase 2: 执行循环（反思闭环）──
-        max_iterations = 3
+        max_iterations = self._resolve_max_iterations()
         all_results: list[list[str]] = []
         iteration = 0  # 在循环外声明，供 Phase 3 引用
 

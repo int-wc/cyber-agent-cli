@@ -712,7 +712,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   <div class="section-head">
     <span class="badge p2">Phase 2</span>
     <h2>⚡ 执行循环</h2>
-    <span class="hint">反思闭环 · 最多 3 轮 · 支持并行子任务</span>
+    <span class="hint">反思闭环 · 默认最多 20 轮 · 支持并行子任务</span>
     <span class="line"></span>
   </div>
   <div class="pipeline-track p2-track" id="trackP2"></div>
@@ -809,7 +809,7 @@ function renderTrack(containerId, roles, phaseId) {
   if (phaseId === 'p2') {
     const loop = document.createElement('div');
     loop.style.cssText = 'width:100%;display:flex;justify-content:center;margin:4px 0;';
-    loop.innerHTML = '<div class="loop-ring"><span class="lr-icon">🔄</span><span>反思闭环 · 最多 3 轮迭代</span></div>';
+    loop.innerHTML = '<div class="loop-ring"><span class="lr-icon">🔄</span><span>反思闭环 · 默认最多 20 轮迭代</span></div>';
     c.appendChild(loop);
   }
 }

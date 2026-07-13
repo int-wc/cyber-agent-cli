@@ -79,6 +79,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.subagent_model, "deepseek-v4-flash-free")
         self.assertEqual(settings.max_context_chars, 4_000_000)
         self.assertEqual(settings.max_context_tokens, 4_000_000)
+        self.assertEqual(settings.pipeline_max_iterations, 20)
         self.assertEqual(settings.get_service(), "opencode")
 
     def test_module_level_settings_can_be_used_by_callers(self) -> None:

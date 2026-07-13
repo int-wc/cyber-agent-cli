@@ -155,6 +155,10 @@ class Settings(BaseSettings):
         default=8,
         validation_alias="MULTI_AGENT_MAX_WORKERS",
     )
+    pipeline_max_iterations: int = Field(
+        default=20,
+        validation_alias="PIPELINE_MAX_ITERATIONS",
+    )
     agent_effort_level: str = Field(
         default="max",
         validation_alias="AGENT_EFFORT_LEVEL",
