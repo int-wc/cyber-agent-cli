@@ -28,6 +28,7 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "OPENCODE_MODEL",
     "OPENCODE_BASE_URL",
     "OPENCODE_PROXY_URL",
+    "SUBAGENT_MODEL",
     "CYBER_AGENT_HOME",
 )
 
@@ -73,6 +74,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertIsNone(settings.gateway_base_url)
         self.assertEqual(settings.resolve_base_url(), "https://opencode.ai/zen/v1")
         self.assertEqual(settings.resolve_proxy_url(), "http://192.168.31.47:7892")
+        self.assertEqual(settings.subagent_model, "deepseek-v4-flash-free")
         self.assertEqual(settings.max_context_tokens, 400_000)
         self.assertEqual(settings.get_service(), "opencode")
 

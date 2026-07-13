@@ -147,7 +147,7 @@ class Settings(BaseSettings):
 
     # ── 多 Agent 架构 ──
     subagent_model: str = Field(
-        default="deepseek-v4-flash",
+        default=DEFAULT_MODELS["opencode"],
         validation_alias="SUBAGENT_MODEL",
     )
     multi_agent_max_workers: int = Field(
