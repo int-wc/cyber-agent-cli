@@ -10,7 +10,7 @@
   Phase 2 - 执行循环（反思闭环，最多 3 轮）
     5. 决策者 DECISION_MAKER → 分解子任务
     6. 思考者 THINKER / 用户  → 选择子任务
-    7. 执行者 RUNNER/READER/BUILDER → 顺序执行（runner.run()，已验证的工具链路）
+    7. 执行者 RUNNER/READER/BUILDER → 使用隔离 runner 顺序/并行执行子任务
     8. 审计者 CHECKER    → 验证结果
     9. 反思者 REFLECTOR  → 审视结果，决定循环继续或结束
 """
@@ -312,18 +312,22 @@ class FourPillarPipeline:
     ) -> str:
         """带动态叠加超时的子任务执行。
 
-        基础超时 180s，每次超时叠加 60s，最多叠加 5 次（最大 480s）。
+        基础超时 300s，每次超时叠加 60s，最多叠加 3 次（最大 480s）。
         达到最大叠加次数仍未完成时，告知调用方需要重规划。
         """
-        controller = getattr(self._runner, "execution_controller", None)
         renderer = self._renderer
 
-        if controller is None:
-            return self._runner.run(
+        def _run_once_with_runner(sub_runner: Any) -> str:
+            event_handler = self._make_subtask_event_handler(renderer)
+            result = sub_runner.run(
                 subtask_prompt, verbose=False,
-                event_handler=self._make_subtask_event_handler(renderer),
+                event_handler=event_handler,
                 approval_handler=self._auto_approval_handler,
             )
+            usage = event_handler.get_token_usage()
+            self.cumulative_input_tokens += usage["input_tokens"]
+            self.cumulative_output_tokens += usage["output_tokens"]
+            return result
 
         for escalation in range(MAX_TIMEOUT_ESCALATIONS + 1):
             timeout = BASE_SUBTASK_TIMEOUT + escalation * TIMEOUT_ESCALATION_STEP
@@ -332,6 +336,11 @@ class FourPillarPipeline:
                     f"    [dim yellow]↻ 第 {escalation} 次超时叠加，"
                     f"新超时={timeout}s，重试同一子任务...[/]"
                 )
+
+            sub_runner = self._create_subtask_runner()
+            controller = getattr(sub_runner, "execution_controller", None)
+            if controller is None:
+                return _run_once_with_runner(sub_runner)
 
             timer_fired = threading.Event()
 
@@ -344,17 +353,7 @@ class FourPillarPipeline:
             timer.start()
 
             try:
-                event_handler = self._make_subtask_event_handler(renderer)
-                result = self._runner.run(
-                    subtask_prompt,
-                    verbose=False,
-                    event_handler=event_handler,
-                    approval_handler=self._auto_approval_handler,
-                )
-                # 收集本轮 Token 用量并累加到管线总计
-                usage = event_handler.get_token_usage()
-                self.cumulative_input_tokens += usage["input_tokens"]
-                self.cumulative_output_tokens += usage["output_tokens"]
+                result = _run_once_with_runner(sub_runner)
                 if escalation > 0:
                     renderer.console.print(
                         f"    [dim green]✓ 叠加重试成功[/]"

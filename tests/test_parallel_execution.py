@@ -12,6 +12,8 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+from langchain_core.messages import HumanMessage
+
 from cyber_agent.agent.pipeline import (
     BASE_SUBTASK_TIMEOUT,
     CIRCUIT_BREAKER_CONSECUTIVE_FAILS,
@@ -232,6 +234,78 @@ class RunParallelBatchTestCase(unittest.TestCase):
             )
             # 每个子任务应创建独立 handler
             self.assertEqual(len(created_handlers), 2)
+
+
+class SequentialSubtaskIsolationTestCase(unittest.TestCase):
+    """测试顺序子任务不会污染主 runner 的对话历史。"""
+
+    def setUp(self):
+        self.main_runner = MagicMock()
+        self.main_runner.run.side_effect = AssertionError(
+            "sequential subtasks must not use the main runner"
+        )
+        self.main_runner.history = [
+            HumanMessage(content="当前文件夹有什么"),
+            HumanMessage(content="请你链接VPN"),
+        ]
+        self.main_runner.tools = []
+        self.main_runner.mode = "standard"
+        self.main_runner.allowed_roots = []
+        self.main_runner.command_registry = {}
+        self.main_runner.extra_allowed_paths = []
+        self.main_runner.configured_registry = {}
+        self.main_runner.capability_registry = None
+        self.main_runner.file_skills = []
+        self.main_runner.system_prompt = "系统提示"
+        self.main_runner.execution_controller = MagicMock()
+        self.main_runner.max_context_chars = None
+        self.main_runner.max_context_tokens = None
+        self.main_runner.context_keep_recent_messages = None
+        self.main_runner.context_summary_max_chars = None
+
+        self.renderer = MagicMock()
+        self.renderer.console.print = MagicMock()
+        self.pipeline = FourPillarPipeline(
+            runner=self.main_runner,
+            runtime_context={
+                "service_name": "deepseek",
+                "model_name": "deepseek-chat",
+                "api_key": "sk-test",
+                "base_url": "http://test:8000/v1",
+            },
+            renderer=self.renderer,
+        )
+
+    def test_sequential_subtask_uses_isolated_runner_history(self):
+        sub_runner = MagicMock()
+        sub_runner.execution_controller = None
+        sub_runner.history = []
+
+        def _sub_run(user_input, **_kwargs):
+            sub_runner.history.append(HumanMessage(content=user_input))
+            return "子任务结果"
+
+        sub_runner.run.side_effect = _sub_run
+        prompt = FourPillarPipeline._build_subtask_prompt(
+            "runner", "执行VPN联通预检",
+        )
+
+        with patch.object(
+            self.pipeline, "_create_subtask_runner", return_value=sub_runner,
+        ):
+            result = self.pipeline._run_subtask_with_escalating_timeout(
+                prompt,
+                "执行者",
+                "执行VPN联通预检",
+            )
+
+        self.assertEqual(result, "子任务结果")
+        self.main_runner.run.assert_not_called()
+        self.assertEqual(len(sub_runner.history), 1)
+        self.assertIn("请完成以下子任务", sub_runner.history[0].content)
+        self.assertFalse(
+            any("请完成以下子任务" in msg.content for msg in self.main_runner.history)
+        )
 
 
 class SubtaskGroupingTestCase(unittest.TestCase):
