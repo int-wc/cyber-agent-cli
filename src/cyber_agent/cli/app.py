@@ -2019,6 +2019,16 @@ class QuietInfoRenderer:
         self._inner.print_error(content)
 
 
+def _is_hub_control_command(user_input: str) -> bool:
+    normalized = user_input.strip().lower()
+    return (
+        normalized == "/stop"
+        or normalized in {"/new", "/clear", "/session new"}
+        or normalized.startswith("/session use ")
+        or normalized.startswith("/session load ")
+    )
+
+
 def run_hub_cli_loop(
     hub,
     *,
@@ -2050,6 +2060,24 @@ def run_hub_cli_loop(
             if user_input.strip().lower() in EXIT_COMMANDS:
                 renderer.print_info("\n👋 再见！")
                 break
+
+            if _is_hub_control_command(user_input):
+                hub.submit(user_input, source=HubTaskSource("cli", "cli"))
+                while not hub.wait_until_idle(0.2):
+                    pass
+                continue
+
+            builtin_result = handle_builtin_command(
+                user_input,
+                hub.runner,
+                hub.runtime_context,
+            )
+            if builtin_result is False:
+                break
+            if builtin_result is True:
+                hub.runtime_context.pop("__clear_visible_session", None)
+                continue
+
             hub.submit(user_input, source=HubTaskSource("cli", "cli"))
             while not hub.wait_until_idle(0.2):
                 pass

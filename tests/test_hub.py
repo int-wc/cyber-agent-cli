@@ -12,7 +12,10 @@ from cyber_agent.agent.approval import ApprovalPolicy
 from cyber_agent.agent.events import AgentEventType
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.execution_control import ExecutionInterruptedError
-from cyber_agent.cli.app import _parse_feishu_broadcast_chat_ids
+from cyber_agent.cli.app import (
+    _is_hub_control_command,
+    _parse_feishu_broadcast_chat_ids,
+)
 from cyber_agent.cli.webhook_feishu import _save_feishu_session_state
 from cyber_agent.hub import CyberAgentHub, HubTaskSource
 from cyber_agent.session_store import load_session_history, save_session_history
@@ -130,6 +133,16 @@ def _build_hub_with_runner(
 
 
 class CyberAgentHubTestCase(unittest.TestCase):
+    def test_hub_control_command_classifier_keeps_session_list_builtin(self) -> None:
+        self.assertTrue(_is_hub_control_command("/stop"))
+        self.assertTrue(_is_hub_control_command("/new"))
+        self.assertTrue(_is_hub_control_command("/session new"))
+        self.assertTrue(_is_hub_control_command("/session load abc"))
+        self.assertTrue(_is_hub_control_command("/session use abc"))
+        self.assertFalse(_is_hub_control_command("/session"))
+        self.assertFalse(_is_hub_control_command("/session list"))
+        self.assertFalse(_is_hub_control_command("/tools"))
+
     def test_hub_dispatches_message_broadcasts_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hub, runner, runtime_context = _build_hub(Path(tmp))
