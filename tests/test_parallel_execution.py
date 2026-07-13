@@ -58,6 +58,68 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         self.assertLessEqual(len(reasoning_in_prompt), 300)
 
 
+class SubtaskChecklistTestCase(unittest.TestCase):
+    """测试子 Agent 任务清单展示。"""
+
+    def setUp(self):
+        self.runner = MagicMock()
+        self.renderer = MagicMock()
+        self.renderer.console.print = MagicMock()
+        self.pipeline = FourPillarPipeline(
+            runner=self.runner,
+            runtime_context={
+                "service_name": "deepseek",
+                "model_name": "deepseek-chat",
+                "api_key": "sk-test",
+                "base_url": "http://test:8000/v1",
+            },
+            renderer=self.renderer,
+        )
+
+    def test_format_subtask_checklist_line(self):
+        line = FourPillarPipeline._format_subtask_checklist_line(
+            1,
+            {
+                "role": "reader",
+                "task_description": "读取题目列表",
+                "parallel": True,
+            },
+            selected=True,
+        )
+
+        self.assertIn("#02", line)
+        self.assertIn("reader Agent", line)
+        self.assertIn("并行", line)
+        self.assertIn("待执行", line)
+        self.assertIn("读取题目列表", line)
+
+    def test_print_subtask_checklist_includes_all_tasks(self):
+        subtasks = [
+            {"role": "runner", "task_description": "VPN 预检"},
+            {"role": "builder", "task_description": "构建队列", "parallel": True},
+        ]
+
+        self.pipeline._print_subtask_checklist(
+            subtasks,
+            [0],
+            iteration=2,
+        )
+
+        printed = "\n".join(
+            str(call.args[0])
+            for call in self.renderer.console.print.call_args_list
+            if call.args
+        )
+        self.assertIn("子 Agent 任务清单", printed)
+        self.assertIn("第 2 轮", printed)
+        self.assertIn("#01", printed)
+        self.assertIn("runner Agent", printed)
+        self.assertIn("待执行", printed)
+        self.assertIn("#02", printed)
+        self.assertIn("builder Agent", printed)
+        self.assertIn("未选择", printed)
+
+
 class CreateSubtaskRunnerTestCase(unittest.TestCase):
     """测试 _create_subtask_runner 克隆逻辑。"""
 

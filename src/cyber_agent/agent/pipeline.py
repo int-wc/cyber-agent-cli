@@ -589,6 +589,7 @@ class FourPillarPipeline:
                 )
                 return {
                     "seq": seq,
+                    "task_index": task.get("_task_index", seq),
                     "role": role_str,
                     "desc": desc,
                     "result": result,
@@ -602,6 +603,7 @@ class FourPillarPipeline:
                 )
                 return {
                     "seq": seq,
+                    "task_index": task.get("_task_index", seq),
                     "role": role_str,
                     "desc": desc,
                     "result": "",
@@ -622,6 +624,7 @@ class FourPillarPipeline:
                     seq = futures[future]
                     results.append({
                         "seq": seq,
+                        "task_index": batch[seq].get("_task_index", seq),
                         "role": batch[seq].get("role", "runner"),
                         "desc": batch[seq].get("task_description", str(batch[seq])),
                         "result": "",
@@ -633,10 +636,19 @@ class FourPillarPipeline:
         results.sort(key=lambda r: r["seq"])
         out: list[str] = []
         for r in results:
+            task_index = int(r.get("task_index", r["seq"]))
             if r["error"]:
                 renderer.console.print(
                     f"    [dim red]✗ [{r['role']}] {r['desc'][:60]}... "
                     f"({r['elapsed_ms']:.0f}ms) 失败: {r['error']}[/]"
+                )
+                self._print_subtask_status(
+                    task_index,
+                    str(r["role"]),
+                    str(r["desc"]),
+                    "fail",
+                    detail=str(r["error"])[:80],
+                    parallel=True,
                 )
                 out.append(f"## [{r['role']}] {r['desc']}\n❌ 失败: {r['error']}")
                 self._consecutive_failures += 1
@@ -644,6 +656,14 @@ class FourPillarPipeline:
                 renderer.console.print(
                     f"    [dim green]✓ [{r['role']}] {r['desc'][:60]}... "
                     f"({r['elapsed_ms']:.0f}ms, {len(r['result'])}字)[/]"
+                )
+                self._print_subtask_status(
+                    task_index,
+                    str(r["role"]),
+                    str(r["desc"]),
+                    "done",
+                    detail=f"{r['elapsed_ms']:.0f}ms, {len(r['result'])}字",
+                    parallel=True,
                 )
                 out.append(f"## [{r['role']}] {r['desc']}\n{r['result']}")
                 self._consecutive_failures = 0
@@ -749,6 +769,76 @@ class FourPillarPipeline:
                 except json.JSONDecodeError:
                     pass
         return {}
+
+    @staticmethod
+    def _format_subtask_agent_label(role_str: str) -> str:
+        normalized_role = role_str or "runner"
+        return f"{normalized_role} Agent"
+
+    @classmethod
+    def _format_subtask_checklist_line(
+        cls,
+        index: int,
+        task: dict,
+        *,
+        selected: bool,
+    ) -> str:
+        role_str = str(task.get("role", "runner"))
+        desc = str(task.get("task_description", str(task))).replace("\n", " ")
+        mode = "并行" if task.get("parallel", False) else "顺序"
+        marker = "○" if selected else "－"
+        status = "待执行" if selected else "未选择"
+        return (
+            f"  [dim]{marker}[/] #{index + 1:02d} "
+            f"[cyan]{cls._format_subtask_agent_label(role_str)}[/] "
+            f"[dim]({mode}, {status})[/] {desc[:120]}"
+        )
+
+    def _print_subtask_checklist(
+        self,
+        subtasks: list[dict],
+        selected_indices: list[int],
+        *,
+        iteration: int,
+    ) -> None:
+        selected_set = set(selected_indices)
+        self._renderer.console.print()
+        self._renderer.console.print(
+            f"[dim bold]📋 子 Agent 任务清单 · 第 {iteration} 轮[/]"
+        )
+        for index, task in enumerate(subtasks):
+            self._renderer.console.print(
+                self._format_subtask_checklist_line(
+                    index,
+                    task,
+                    selected=index in selected_set,
+                )
+            )
+
+    def _print_subtask_status(
+        self,
+        index: int,
+        role_str: str,
+        desc: str,
+        status: str,
+        *,
+        detail: str = "",
+        parallel: bool = False,
+    ) -> None:
+        status_styles = {
+            "start": ("⏳", "yellow", "开始"),
+            "done": ("✓", "green", "完成"),
+            "fail": ("✗", "red", "失败"),
+            "skip": ("－", "dim", "跳过"),
+        }
+        icon, style, label = status_styles.get(status, ("•", "dim", status))
+        mode = "并行" if parallel else "顺序"
+        suffix = f" [dim]{detail}[/]" if detail else ""
+        self._renderer.console.print(
+            f"  [{style}]{icon}[/] #{index + 1:02d} "
+            f"[cyan]{self._format_subtask_agent_label(role_str)}[/] "
+            f"[dim]({mode})[/] {label}: {desc[:90]}{suffix}"
+        )
 
     # ══════════════════════════════════════════════════════════════
     # 管线主入口
@@ -962,6 +1052,11 @@ class FourPillarPipeline:
             renderer.console.print(
                 f"  [dim]已选择 {len(selected_indices)}/{len(subtasks)} 个子任务[/]"
             )
+            self._print_subtask_checklist(
+                subtasks,
+                selected_indices,
+                iteration=iteration,
+            )
 
             # 7. 顺序执行子任务（动态叠加超时 + 熔断 + 超时重规划）
             renderer.console.print()
@@ -1009,7 +1104,16 @@ class FourPillarPipeline:
                         ptask = subtasks[pidx]
                         if not ptask.get("parallel", False):
                             break
-                        parallel_batch.append(ptask)
+                        ptask_with_index = dict(ptask)
+                        ptask_with_index["_task_index"] = pidx
+                        parallel_batch.append(ptask_with_index)
+                        self._print_subtask_status(
+                            pidx,
+                            str(ptask.get("role", "runner")),
+                            str(ptask.get("task_description", str(ptask))),
+                            "start",
+                            parallel=True,
+                        )
                         batch_i += 1
 
                     batch_results = self._run_parallel_batch(
@@ -1030,6 +1134,12 @@ class FourPillarPipeline:
                     renderer.console.print(
                         f"  [dim]── [{role_str}] {desc[:80]}...[/]"
                     )
+                    self._print_subtask_status(
+                        idx,
+                        role_str,
+                        desc,
+                        "start",
+                    )
                     start = time_mod.monotonic()
                     self._record_trace(
                         "subtask_start",
@@ -1048,6 +1158,13 @@ class FourPillarPipeline:
                         renderer.console.print(
                             f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
                         )
+                        self._print_subtask_status(
+                            idx,
+                            role_str,
+                            desc,
+                            "done",
+                            detail=f"{elapsed:.0f}ms, {len(result)}字",
+                        )
                         self._record_trace("subtask_complete", detail=result[:500])
                         round_results.append(
                             f"## [{role_str}] {desc}\n{result}"
@@ -1060,6 +1177,13 @@ class FourPillarPipeline:
                         self._record_trace("subtask_timeout", detail=str(exc))
                         renderer.console.print(
                             f"  [dim red]⏰ 全部叠加超时[/] [dim]({elapsed:.0f}ms)[/]"
+                        )
+                        self._print_subtask_status(
+                            idx,
+                            role_str,
+                            desc,
+                            "fail",
+                            detail=f"超时 {elapsed:.0f}ms",
                         )
                         # 重规划：让决策者将此子任务拆分为更小粒度的子任务
                         replanned = self._replan_single_task(
@@ -1105,6 +1229,13 @@ class FourPillarPipeline:
                         self._record_trace("subtask_error", detail=f"{exc}")
                         renderer.console.print(
                             f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
+                        )
+                        self._print_subtask_status(
+                            idx,
+                            role_str,
+                            desc,
+                            "fail",
+                            detail=str(exc)[:80],
                         )
                         round_results.append(
                             f"## [{role_str}] {desc}\n❌ 失败: {exc}"
