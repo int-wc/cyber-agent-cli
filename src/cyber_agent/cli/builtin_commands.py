@@ -119,9 +119,10 @@ def _handle_context(
     raw_input: str,
 ) -> bool | None:
     if len(tokens) >= 2 and tokens[1] == "clear":
-        from .app import start_new_runtime_session
+        from .app import start_fresh_visible_runtime_session
         runner.reset()
-        start_new_runtime_session(runtime_context)
+        start_fresh_visible_runtime_session(runtime_context)
+        cli_renderer.clear_screen()
         cli_renderer.print_info("会话上下文已清空，并已开始新的会话。")
         return True
     from .app import print_context
@@ -416,9 +417,10 @@ def _handle_clear(
     tokens: list[str],
     raw_input: str,
 ) -> bool | None:
-    from .app import start_new_runtime_session
+    from .app import start_fresh_visible_runtime_session
     runner.reset()
-    start_new_runtime_session(runtime_context)
+    start_fresh_visible_runtime_session(runtime_context)
+    cli_renderer.clear_screen()
     cli_renderer.print_info("会话上下文已清空，并已开始新的会话。")
     return True
 
@@ -631,7 +633,7 @@ def _handle_session(
         load_history_session_into_runner,
         print_history_list,
         show_history_session,
-        start_new_runtime_session,
+        start_fresh_visible_runtime_session,
         sync_runtime_context_from_runner,
         _load_session_store_support,
     )
@@ -654,8 +656,9 @@ def _handle_session(
 
     if sub == "new":
         runner.reset()
-        start_new_runtime_session(runtime_context)
+        start_fresh_visible_runtime_session(runtime_context)
         sync_runtime_context_from_runner(runtime_context, runner)
+        cli_renderer.clear_screen()
         cli_renderer.print_info(
             f"已创建新会话：{runtime_context['session_id']}"
         )

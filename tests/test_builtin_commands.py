@@ -25,7 +25,9 @@ class BuiltinCommandRegistryTestCase(unittest.TestCase):
             "/stop", "/help", "/tools", "/context",
             "/history", "/doctor", "/status", "/version",
             "/config", "/service", "/model", "/allow-path",
-            "/clear", "/mode", "/approval",
+            "/clear", "/memory", "/mode", "/approval", "/multi",
+            "/auto-decision", "/file", "/session", "/capabilities",
+            "/trace", "/pipeline",
         }
         self.assertTrue(expected_commands.issubset(set(_COMMAND_REGISTRY.keys())))
 
@@ -50,6 +52,46 @@ class BuiltinCommandRegistryTestCase(unittest.TestCase):
         with patch("cyber_agent.cli.app.print_help"):
             result = dispatch_builtin_command("/help", self.runner, self.ctx)
             self.assertTrue(result)
+
+    def test_clear_starts_fresh_visible_session(self) -> None:
+        """/clear 同时清上下文、最近输入和可见会话窗口。"""
+        renderer = MagicMock()
+        self.ctx["_recent_inputs"] = ["旧输入"]
+
+        result = dispatch_builtin_command(
+            "/clear",
+            self.runner,
+            self.ctx,
+            renderer,
+        )
+
+        self.assertTrue(result)
+        self.runner.reset.assert_called_once()
+        renderer.clear_screen.assert_called_once()
+        renderer.print_info.assert_called_once()
+        self.assertEqual(self.ctx["_recent_inputs"], [])
+        self.assertTrue(self.ctx["__clear_visible_session"])
+        self.assertIn("session_id", self.ctx)
+
+    def test_session_new_starts_fresh_visible_session(self) -> None:
+        """/session new 的可见聊天窗口也应像新会话一样清空。"""
+        renderer = MagicMock()
+        self.ctx["_recent_inputs"] = ["旧输入"]
+
+        result = dispatch_builtin_command(
+            "/session new",
+            self.runner,
+            self.ctx,
+            renderer,
+        )
+
+        self.assertTrue(result)
+        self.runner.reset.assert_called_once()
+        renderer.clear_screen.assert_called_once()
+        renderer.print_info.assert_called_once()
+        self.assertEqual(self.ctx["_recent_inputs"], [])
+        self.assertTrue(self.ctx["__clear_visible_session"])
+        self.assertIn("session_id", self.ctx)
 
     def test_unknown_command_prefix_returns_none(self) -> None:
         """未知 / 前缀命令返回 None（非内建命令）。"""

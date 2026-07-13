@@ -825,6 +825,21 @@ def start_new_runtime_session(
     return session_id
 
 
+def start_fresh_visible_runtime_session(
+    runtime_context: dict[str, object],
+    *,
+    source_session_id: str | None = None,
+) -> str:
+    """开始一个对用户可见也全新的会话窗口。"""
+    session_id = start_new_runtime_session(
+        runtime_context,
+        source_session_id=source_session_id,
+    )
+    runtime_context["_recent_inputs"] = []
+    runtime_context["__clear_visible_session"] = True
+    return session_id
+
+
 def _try_persist(
     runner: AgentRunner,
     runtime_context: dict[str, object],
@@ -1331,6 +1346,7 @@ def run_chat_loop(
         if builtin_result is False:
             break
         if builtin_result is True:
+            runtime_context.pop("__clear_visible_session", None)
             continue
 
         # 注入待处理的文件内容到用户消息

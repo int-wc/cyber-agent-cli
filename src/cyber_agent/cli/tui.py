@@ -669,6 +669,8 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.exit()
                 return
             if builtin_result is True:
+                if self.runtime_context.pop("__clear_visible_session", False):
+                    self._clear_chat_view()
                 for renderable in renderables:
                     self._add_renderable(renderable)
                 # session 切换后刷新标题栏
@@ -1028,6 +1030,25 @@ if TEXTUAL_IMPORT_ERROR is None:
             chat_view.mount(block)
             chat_view.scroll_end(animate=False)
             return block
+
+        def _clear_chat_view(self) -> None:
+            """清空当前可见聊天窗口，保持输入区和状态栏不变。"""
+            chat_view = self.query_one("#chat-view", ScrollableContainer)
+            for child in list(chat_view.children):
+                try:
+                    chat_view.remove(child)
+                except Exception:
+                    try:
+                        child.remove()
+                    except Exception:
+                        pass
+            self._active_assistant_message = None
+            self._reasoning_parts = []
+            self._reasoning_message = None
+            self._compression_visible = False
+            self._compression_widget = None
+            self._last_assistant_raw_text = ""
+            chat_view.scroll_home(animate=False)
 
         def _add_tool_result(self, content: str) -> None:
             """添加工具结果（纯 Panel，不做 markdown 解析）。"""
