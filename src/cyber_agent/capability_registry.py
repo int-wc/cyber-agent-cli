@@ -33,6 +33,7 @@ from .capability_codegen import (
 from .config import settings
 from .execution_control import ExecutionController, ExecutionInterruptedError
 from .logging import log_capability_operation, log_error
+from .model_client import build_llm_with_proxy_fallback
 from .openai_compat import ensure_deepseek_reasoning_content_compat
 from .tools.metadata import attach_tool_risk
 from .tools.system import _run_process_with_controller
@@ -411,7 +412,7 @@ class CapabilityRegistry:
                 kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
                 kwargs.pop("openai_api_key", None)
                 kwargs.pop("openai_proxy", None)
-            self._llm = llm_cls(**kwargs)
+            self._llm = build_llm_with_proxy_fallback(llm_cls, kwargs)
         return self._llm
 
     def _ensure_not_cancelled(self) -> None:

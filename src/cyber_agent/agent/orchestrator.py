@@ -14,6 +14,7 @@ from .._lazy_imports import load_chat_openai, load_llm_for_api, is_anthropic_api
 from ..config import settings
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..logging import log_info, log_error
+from ..model_client import build_llm_with_proxy_fallback
 from .events import AgentEventType
 from .roles import AgentRole, get_role_label, get_role_prompt
 from .runner import _extract_usage_from_chunk, _accumulate_usage, _estimate_tokens_from_text
@@ -130,7 +131,7 @@ class MultiAgentOrchestrator:
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*extra_body.*")
-                self._llm = llm_cls(**kwargs)
+                self._llm = build_llm_with_proxy_fallback(llm_cls, kwargs)
         return self._llm
 
     def _emit(self, event_type: str, payload: Any) -> None:

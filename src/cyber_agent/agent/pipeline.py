@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..execution_control import ExecutionController, ExecutionInterruptedError
+from ..model_client import build_llm_with_proxy_fallback
 from .events import AgentEventType
 from .roles import AgentRole, get_role_label, get_role_prompt
 
@@ -116,7 +117,7 @@ class FourPillarPipeline:
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*extra_body.*")
-            self._llm = llm_cls(**kwargs)
+            self._llm = build_llm_with_proxy_fallback(llm_cls, kwargs)
         return self._llm
 
     def _call_role(

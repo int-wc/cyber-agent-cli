@@ -18,6 +18,7 @@ from ..logging import (
     log_model_call,
     log_tool_execution,
 )
+from ..model_client import build_llm_with_proxy_fallback
 from ..openai_compat import (
     ensure_deepseek_reasoning_content_compat,
     prepare_messages_for_openai_compatible_service,
@@ -340,7 +341,7 @@ class AgentRunner:
         # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*extra_body.*")
-            return llm_cls(**kwargs)
+            return build_llm_with_proxy_fallback(llm_cls, kwargs)
 
     def _get_llm(self) -> Any:
         """按需构建模型客户端，避免非模型命令在缺依赖环境下提前失败。"""
