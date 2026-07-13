@@ -631,6 +631,7 @@ def _handle_session(
     """查看/管理多会话：list、load、new、show。"""
     from .app import (
         load_history_session_into_runner,
+        persist_runtime_session,
         print_history_list,
         show_history_session,
         start_fresh_visible_runtime_session,
@@ -658,6 +659,10 @@ def _handle_session(
         runner.reset()
         start_fresh_visible_runtime_session(runtime_context)
         sync_runtime_context_from_runner(runtime_context, runner)
+        try:
+            persist_runtime_session(runner, runtime_context, force=True)
+        except Exception:
+            pass
         cli_renderer.clear_screen()
         cli_renderer.print_info(
             f"已创建新会话：{runtime_context['session_id']}"

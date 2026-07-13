@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langchain_core.tools import tool
 
 from cyber_agent.agent.approval import ApprovalDecision
+from cyber_agent.agent.events import AgentEventType
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.agent.runner import AgentRunner, iter_stream_characters
 from cyber_agent.execution_control import ExecutionInterruptedError
@@ -467,6 +468,38 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         self.assertEqual(response, "final:processed:first")
         self.assertEqual(token_events, list("final:processed:first"))
+
+    def test_runner_emits_history_updated_after_each_saved_message(self) -> None:
+        """
+        测试：用户、AI 工具调用、工具结果和最终 AI 消息入 history 后都会发出更新事件。
+        """
+
+        @tool
+        def echo_tool(text: str) -> str:
+            """回显文本。"""
+            return f"processed:{text}"
+
+        history_events: list[dict] = []
+
+        def capture_event(event_type: str, payload: object) -> None:
+            if event_type == AgentEventType.HISTORY_UPDATED:
+                assert isinstance(payload, dict)
+                history_events.append(payload)
+
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", FakeChatOpenAI):
+            runner = AgentRunner([echo_tool])
+            response = runner.run(
+                "first",
+                verbose=False,
+                event_handler=capture_event,
+            )
+
+        self.assertEqual(response, "final:processed:first")
+        self.assertEqual(
+            [event["reason"] for event in history_events],
+            ["human_message", "ai_message", "tool_message", "ai_message"],
+        )
+        self.assertEqual(history_events[-1]["message_count"], len(runner.history))
 
     def test_runner_can_be_interrupted_during_streaming_response(self) -> None:
         """

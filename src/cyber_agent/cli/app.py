@@ -144,6 +144,7 @@ def _load_tool_support():
 def _load_session_store_support():
     """按需加载历史会话存储，避免帮助和版本命令导入 LangChain 消息类型。"""
     from ..session_store import (
+        append_session_event,
         clear_interrupt_checkpoint,
         create_session_id,
         export_session_history,
@@ -158,6 +159,7 @@ def _load_session_store_support():
     )
 
     return {
+        "append_session_event": append_session_event,
         "clear_interrupt_checkpoint": clear_interrupt_checkpoint,
         "create_session_id": create_session_id,
         "export_session_history": export_session_history,
@@ -853,22 +855,36 @@ def start_fresh_visible_runtime_session(
 def _try_persist(
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    *,
+    force: bool = False,
 ) -> None:
     """安全保存会话，失败时仅记录日志不影响主流程。"""
     try:
-        persist_runtime_session(runner, runtime_context)
+        persist_runtime_session(runner, runtime_context, force=force)
     except Exception as exc:
         from ..logging import log_warning
         log_warning("app", f"会话持久化失败：{exc}")
 
 
+def _get_runtime_session_base_dir(
+    runtime_context: dict[str, object],
+) -> Path | None:
+    """读取运行期指定的会话存储基准目录；CLI 默认使用当前目录发现规则。"""
+    raw_base_dir = runtime_context.get("session_base_dir")
+    if raw_base_dir is None:
+        return None
+    return Path(str(raw_base_dir)).expanduser()
+
+
 def persist_runtime_session(
     runner: AgentRunner,
     runtime_context: dict[str, object],
+    *,
+    force: bool = False,
 ) -> Path | None:
     """按当前工作目录自动保存会话历史，供后续 /history 访问。"""
     history = runner.get_history_snapshot()
-    if len(history) <= 1 and runner.get_turn_count() == 0:
+    if not force and len(history) <= 1 and runner.get_turn_count() == 0:
         return None
 
     session_store = _load_session_store_support()
@@ -879,9 +895,68 @@ def persist_runtime_session(
         approval_policy=runtime_context["approval_policy"].value,
         source_session_id=runtime_context.get("session_source_id"),
         recent_inputs=runtime_context.get("_recent_inputs"),
+        base_dir=_get_runtime_session_base_dir(runtime_context),
     )
     runtime_context["session_storage_dir"] = session_path.parent
     return session_path
+
+
+def append_runtime_session_event(
+    runtime_context: dict[str, object],
+    event_type: str | AgentEventType,
+    payload: object = None,
+) -> Path | None:
+    """把运行期事件追加到当前会话的 JSONL 事件流。"""
+    session_id = runtime_context.get("session_id")
+    if not session_id:
+        return None
+    try:
+        session_store = _load_session_store_support()
+        event_path = session_store["append_session_event"](
+            str(session_id),
+            str(event_type),
+            payload=payload,
+            base_dir=_get_runtime_session_base_dir(runtime_context),
+        )
+        runtime_context["session_event_log"] = event_path
+        return event_path
+    except Exception as exc:
+        from ..logging import log_warning
+        log_warning("app", f"会话事件落盘失败：{exc}")
+        return None
+
+
+def create_persisting_event_handler(
+    runner: AgentRunner,
+    runtime_context: dict[str, object],
+    inner_handler: Any | None,
+) -> Any:
+    """包装运行器事件处理器：保留原展示逻辑，同时实时写事件和会话快照。"""
+    semantic_events = {
+        AgentEventType.TURN_START,
+        AgentEventType.RESPONSE_END,
+        AgentEventType.RESPONSE_RETRY,
+        AgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.APPROVAL_REQUEST,
+        AgentEventType.APPROVAL_RESULT,
+        AgentEventType.TURN_END,
+        AgentEventType.HISTORY_UPDATED,
+    }
+
+    def handler(event_type: str | AgentEventType, payload: object) -> None:
+        if inner_handler is not None:
+            inner_handler(event_type, payload)
+        try:
+            normalized_event: str | AgentEventType = AgentEventType(event_type)
+        except ValueError:
+            normalized_event = str(event_type)
+        if normalized_event in semantic_events:
+            append_runtime_session_event(runtime_context, normalized_event, payload)
+        if normalized_event == AgentEventType.HISTORY_UPDATED:
+            _try_persist(runner, runtime_context, force=True)
+
+    return handler
 
 
 def _save_interrupt_checkpoint(
@@ -1352,6 +1427,7 @@ def run_chat_loop(
             break
         if runner is None:
             runner = create_runner(runtime_context)
+            _try_persist(runner, runtime_context, force=True)
         builtin_result = handle_builtin_command(user_input, runner, runtime_context)
         if builtin_result is False:
             break
@@ -1377,6 +1453,17 @@ def run_chat_loop(
             user_input = "\n".join(file_context_parts)
 
         try:
+            recent = runtime_context.setdefault("_recent_inputs", [])
+            recent.append(user_input)
+            if len(recent) > 50:
+                recent.pop(0)
+            append_runtime_session_event(
+                runtime_context,
+                "user_input_received",
+                {"input": user_input},
+            )
+            _try_persist(runner, runtime_context, force=True)
+
             # 判断是否使用多 Agent 编排
             multi_setting = runtime_context.get("multi_agent_enabled", "auto")
             if multi_setting is True or (
@@ -1388,19 +1475,23 @@ def run_chat_loop(
                     runner,
                     user_input,
                     runtime_context,
+                    event_handler=create_persisting_event_handler(
+                        runner,
+                        runtime_context,
+                        render_agent_event,
+                    ),
                 )
             else:
                 runner.run(
                     user_input,
                     verbose=False,
-                    event_handler=render_agent_event,
+                    event_handler=create_persisting_event_handler(
+                        runner,
+                        runtime_context,
+                        render_agent_event,
+                    ),
                     approval_handler=create_approval_handler(runtime_context),
                 )
-            # 记录最近 50 条用户输入
-            recent = runtime_context.setdefault("_recent_inputs", [])
-            recent.append(user_input)
-            if len(recent) > 50:
-                recent.pop(0)
 
             _try_persist(runner, runtime_context)
         except KeyboardInterrupt:
@@ -1562,10 +1653,21 @@ def chat(
         try:
             if runner.llm is None:
                 renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
+            runtime_context.setdefault("_recent_inputs", []).append(message)
+            append_runtime_session_event(
+                runtime_context,
+                "user_input_received",
+                {"input": message},
+            )
+            persist_runtime_session(runner, runtime_context, force=True)
             runner.run(
                 message,
                 verbose=False,
-                event_handler=render_agent_event,
+                event_handler=create_persisting_event_handler(
+                    runner,
+                    runtime_context,
+                    render_agent_event,
+                ),
                 approval_handler=create_approval_handler(runtime_context),
             )
         except ModuleNotFoundError as exc:
@@ -1590,10 +1692,21 @@ def run(
     try:
         if runner.llm is None:
             renderer.print_info("正在初始化模型客户端，首次请求可能需要数十秒。")
+        runtime_context.setdefault("_recent_inputs", []).append(message)
+        append_runtime_session_event(
+            runtime_context,
+            "user_input_received",
+            {"input": message},
+        )
+        persist_runtime_session(runner, runtime_context, force=True)
         runner.run(
             message,
             verbose=False,
-            event_handler=render_agent_event,
+            event_handler=create_persisting_event_handler(
+                runner,
+                runtime_context,
+                render_agent_event,
+            ),
             approval_handler=create_approval_handler(runtime_context),
         )
     except ModuleNotFoundError as exc:

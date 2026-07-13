@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
@@ -20,6 +21,7 @@ import re
 SESSION_STORAGE_DIRNAME = ".cyber-agent-cli-sessions"
 DEFAULT_HISTORY_SEARCH_LIMIT = 20
 DEFAULT_HISTORY_SEARCH_EXCERPT_LENGTH = 120
+SESSION_EVENT_LOG_SUFFIX = ".events.jsonl"
 # 会话 ID 不能包含路径遍历或非法文件系统字符
 _SESSION_ID_FORBIDDEN_RE = re.compile(r"\.\.|[/\\]|[<>:\"|?*\x00-\x1f]")
 
@@ -305,6 +307,8 @@ def save_session_history(
         "recent_inputs": recent_inputs or [],
         "turn_count": sum(isinstance(message, HumanMessage) for message in messages),
         "message_count": len(messages),
+        "event_log": f"{validated_id}{SESSION_EVENT_LOG_SUFFIX}",
+        "event_count": count_session_events(validated_id, base_dir=base_dir),
         "messages": serialized_messages,
     }
     # 原子写入：先写临时文件再 rename，避免崩溃导致文件损坏
@@ -493,6 +497,69 @@ def export_session_history(
 # ── 中断续传 ──
 
 CHECKPOINT_FILENAME = "_checkpoint.json"
+
+
+def _json_safe(value: Any) -> Any:
+    """将运行期事件对象规整为 JSON 可写结构。"""
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except TypeError:
+        if isinstance(value, dict):
+            return {str(k): _json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_safe(v) for v in value]
+        return str(value)
+
+
+def get_session_event_log_path(
+    session_id: str,
+    *,
+    base_dir: Path | None = None,
+) -> Path:
+    """返回与会话绑定的实时事件日志路径。"""
+    validated_id = _validate_session_id(session_id)
+    return get_session_storage_dir(base_dir) / f"{validated_id}{SESSION_EVENT_LOG_SUFFIX}"
+
+
+def append_session_event(
+    session_id: str,
+    event: str,
+    *,
+    payload: Any = None,
+    base_dir: Path | None = None,
+) -> Path:
+    """追加一条实时事件。JSONL 逐行落盘，便于 tail 和崩溃后恢复审计。"""
+    validated_id = _validate_session_id(session_id)
+    storage_dir = get_session_storage_dir(base_dir)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    event_path = storage_dir / f"{validated_id}{SESSION_EVENT_LOG_SUFFIX}"
+    record = {
+        "session_id": validated_id,
+        "ts": datetime.now().astimezone().isoformat(),
+        "event": str(event),
+        "payload": _json_safe(payload),
+    }
+    with event_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+    return event_path
+
+
+def count_session_events(
+    session_id: str,
+    *,
+    base_dir: Path | None = None,
+) -> int:
+    """统计已落盘事件数量，坏行按普通行计数以反映磁盘可见事实。"""
+    event_path = get_session_event_log_path(session_id, base_dir=base_dir)
+    if not event_path.exists():
+        return 0
+    try:
+        with event_path.open("r", encoding="utf-8") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
 
 
 def save_interrupt_checkpoint(

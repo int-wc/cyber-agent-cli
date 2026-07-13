@@ -420,6 +420,30 @@ class AgentRunner:
         """返回当前会话消息副本，供上下文查看和持久化复用。"""
         return list(self.history)
 
+    def _emit_history_updated(
+        self,
+        event_handler: AgentEventHandler | None,
+        *,
+        message: BaseMessage,
+        reason: str,
+    ) -> None:
+        """通知外层当前 history 已追加消息，可安全持久化最新快照。"""
+        if event_handler is None:
+            return
+        try:
+            event_handler(
+                AgentEventType.HISTORY_UPDATED,
+                {
+                    "reason": reason,
+                    "message_type": message.type,
+                    "message_count": len(self.history),
+                    "turn_count": self.get_turn_count(),
+                },
+            )
+        except Exception:
+            from ..logging import log_error
+            log_error("event_handler", "HISTORY_UPDATED handler 异常", exc_info=True)
+
     def restore_history(self, messages: list[BaseMessage]) -> None:
         """使用已保存历史恢复当前会话上下文。"""
         if not messages:
@@ -1035,7 +1059,13 @@ class AgentRunner:
             elif verbose:
                 print("开始处理用户输入...")
 
-            self.history.append(HumanMessage(content=user_input))
+            human_message = HumanMessage(content=user_input)
+            self.history.append(human_message)
+            self._emit_history_updated(
+                event_handler,
+                message=human_message,
+                reason="human_message",
+            )
             tool_round_signatures: list[str] = []
             empty_final_response_retries = 0
             turn_usage: dict[str, int] | None = None
@@ -1044,6 +1074,11 @@ class AgentRunner:
                 self.execution_controller.ensure_not_cancelled()
                 ai_message = self._stream_model_response(event_handler)
                 self.history.append(ai_message)
+                self._emit_history_updated(
+                    event_handler,
+                    message=ai_message,
+                    reason="ai_message",
+                )
                 round_usage = _extract_usage_from_chunk(ai_message)
                 if round_usage is None:
                     # API 未返回精确用量，从本轮消息历史估算
@@ -1092,6 +1127,11 @@ class AgentRunner:
                                 event_handler,
                             )
                             self.history.append(tool_message)
+                            self._emit_history_updated(
+                                event_handler,
+                                message=tool_message,
+                                reason="tool_message",
+                            )
                             round_tool_messages.append(tool_message)
                     except ExecutionInterruptedError:
                         # 超时/中断后清理本轮追加的孤立 AIMessage(tool_calls) 和

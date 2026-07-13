@@ -12,8 +12,9 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from cyber_agent.agent.mode import AgentMode
 from cyber_agent.agent.pipeline import (
     BASE_SUBTASK_TIMEOUT,
     CIRCUIT_BREAKER_CONSECUTIVE_FAILS,
@@ -56,6 +57,61 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         reasoning_end = prompt.index("\n", reasoning_start)
         reasoning_in_prompt = prompt[reasoning_start:reasoning_end]
         self.assertLessEqual(len(reasoning_in_prompt), 300)
+
+    def test_execution_summary_keeps_full_subtask_body(self):
+        """四柱最终总结应保留完整子任务正文，不再只展示短摘要。"""
+        long_body = "完整输出-" + ("细节" * 120)
+        summary = FourPillarPipeline._build_execution_summary(
+            [[f"[runner] 长任务\n{long_body}"]],
+            iteration=1,
+        )
+
+        self.assertIn(long_body, summary)
+        self.assertNotIn("完整输出-" + ("细节" * 50) + "…", summary)
+
+
+class PipelineSessionPersistenceTestCase(unittest.TestCase):
+    """测试四柱管线会把外壳对话写回主 runner history。"""
+
+    def test_pipeline_run_appends_user_and_summary_messages_to_main_history(self):
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.mode = AgentMode.STANDARD
+                self.history = [SystemMessage(content="system")]
+
+            def get_turn_count(self) -> int:
+                return sum(isinstance(message, HumanMessage) for message in self.history)
+
+            def get_history_snapshot(self):
+                return list(self.history)
+
+        runner = FakeRunner()
+        renderer = MagicMock()
+        renderer.add_token_usage = MagicMock()
+        pipeline = FourPillarPipeline(
+            runner=runner,
+            runtime_context={
+                "session_id": "pipeline-session",
+                "approval_policy": "prompt",
+            },
+            renderer=renderer,
+        )
+
+        def _fake_run_phases(_user_input: str, _auto_decision: bool) -> None:
+            pipeline._final_summary = "完整四柱总结\n包含所有子任务结果"
+
+        with (
+            patch.object(pipeline, "_run_phases", side_effect=_fake_run_phases),
+            patch.object(pipeline, "_save_trace"),
+            patch("cyber_agent.session_store.append_session_event"),
+            patch("cyber_agent.session_store.save_session_history"),
+        ):
+            pipeline.run("链接VPN并启动题目")
+
+        self.assertIsInstance(runner.history[1], HumanMessage)
+        self.assertEqual(runner.history[1].content, "链接VPN并启动题目")
+        self.assertIsInstance(runner.history[2], AIMessage)
+        self.assertIn("完整四柱总结", runner.history[2].content)
 
 
 class SubtaskChecklistTestCase(unittest.TestCase):

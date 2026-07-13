@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,8 +6,11 @@ from tempfile import TemporaryDirectory
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from cyber_agent.session_store import (
+    append_session_event,
+    count_session_events,
     create_session_id,
     export_session_history,
+    get_session_event_log_path,
     list_stored_sessions,
     load_session_history,
     save_session_history,
@@ -46,6 +50,37 @@ class SessionStoreTestCase(unittest.TestCase):
             self.assertEqual(loaded_session.summary.session_id, session_id)
             self.assertEqual(len(loaded_session.messages), 3)
             self.assertEqual(loaded_session.messages[1].content, "hello history")
+
+    def test_session_store_appends_realtime_event_log(self) -> None:
+        """
+        测试：实时事件以 JSONL 形式追加落盘，并在 session JSON 中暴露关联字段。
+        """
+        with TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            session_id = "session-events"
+            event_path = append_session_event(
+                session_id,
+                "tool_result",
+                payload={"content": "完整工具输出", "non_json": {1, 2}},
+                base_dir=base_dir,
+            )
+            save_path = save_session_history(
+                session_id,
+                [SystemMessage(content="system")],
+                mode="standard",
+                approval_policy="prompt",
+                base_dir=base_dir,
+            )
+
+            payload = json.loads(save_path.read_text(encoding="utf-8"))
+            lines = event_path.read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(event_path, get_session_event_log_path(session_id, base_dir=base_dir))
+            self.assertEqual(count_session_events(session_id, base_dir=base_dir), 1)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("完整工具输出", lines[0])
+            self.assertEqual(payload["event_log"], "session-events.events.jsonl")
+            self.assertEqual(payload["event_count"], 1)
 
     def test_session_store_preserves_source_session_id(self) -> None:
         """

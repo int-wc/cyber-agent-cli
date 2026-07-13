@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from cyber_agent.agent.approval import ApprovalPolicy
+from cyber_agent.agent.events import AgentEventType
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.execution_control import ExecutionController, ExecutionInterruptedError
 from cyber_agent.cli.webhook import (
@@ -37,7 +38,7 @@ from cyber_agent.cli.webhook import (
     load_webhook_routes_from_file,
     parse_feishu_payload,
 )
-from cyber_agent.session_store import load_session_history
+from cyber_agent.session_store import get_session_event_log_path, load_session_history
 
 
 class FakeWebhookRunner:
@@ -116,6 +117,49 @@ class BlockingWebhookRunner(FakeWebhookRunner):
             event_handler=event_handler,
             approval_handler=approval_handler,
         )
+
+
+class EventfulWebhookRunner(FakeWebhookRunner):
+    """模拟真实 AgentRunner，在 history 变更后发出实时事件。"""
+
+    def run(
+        self,
+        user_input: str,
+        verbose: bool = False,
+        event_handler=None,
+        approval_handler=None,
+    ) -> str:
+        _ = verbose, approval_handler
+        if event_handler is not None:
+            event_handler(AgentEventType.TURN_START, {"input": user_input})
+        self.history.append(HumanMessage(content=user_input))
+        if event_handler is not None:
+            event_handler(
+                AgentEventType.HISTORY_UPDATED,
+                {
+                    "reason": "human_message",
+                    "message_type": "human",
+                    "message_count": len(self.history),
+                    "turn_count": self.get_turn_count(),
+                },
+            )
+        reply_text = f"实时回复: {user_input}"
+        self.history.append(AIMessage(content=reply_text))
+        if event_handler is not None:
+            event_handler(
+                AgentEventType.HISTORY_UPDATED,
+                {
+                    "reason": "ai_message",
+                    "message_type": "ai",
+                    "message_count": len(self.history),
+                    "turn_count": self.get_turn_count(),
+                },
+            )
+            event_handler(
+                AgentEventType.TURN_END,
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+        return reply_text
 
 
 class StoppableBlockingWebhookRunner(FakeWebhookRunner):
@@ -505,6 +549,34 @@ class WebhookGatewayTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.body)
         self.assertEqual(payload["challenge"], "challenge-token")
+
+    def test_feishu_turn_writes_realtime_session_event_log(self) -> None:
+        """测试：飞书普通消息处理期间会实时写 session JSON 和事件 JSONL。"""
+        with TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir)
+            route = WebhookRouteConfig(provider="feishu", path="/webhook/feishu")
+            gateway = WebhookGateway(
+                [route],
+                {"approval_policy": ApprovalPolicy.NEVER},
+                lambda runtime_context: EventfulWebhookRunner(),
+                base_dir=base_dir,
+            )
+
+            response = gateway.handle_event(
+                route,
+                _build_feishu_event("请实时保存", message_id="om_realtime"),
+            )
+
+            session_id = build_webhook_session_id("feishu", "oc_test_chat")
+            stored_session = load_session_history(session_id, base_dir=base_dir)
+            event_path = get_session_event_log_path(session_id, base_dir=base_dir)
+            event_lines = event_path.read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(stored_session.summary.turn_count, 1)
+            self.assertTrue(event_path.exists())
+            self.assertTrue(any("user_input_received" in line for line in event_lines))
+            self.assertTrue(any("history_updated" in line for line in event_lines))
 
     def test_dingtalk_request_can_use_session_webhook_and_restore_history(self) -> None:
         """测试：钉钉 webhook 会优先用 sessionWebhook 回复，并复用同一会话历史。"""

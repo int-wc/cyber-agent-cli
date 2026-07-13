@@ -26,7 +26,7 @@ import threading
 import time as time_mod
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ..execution_control import ExecutionController, ExecutionInterruptedError
 from ..model_client import build_llm_with_proxy_fallback
@@ -134,6 +134,8 @@ class FourPillarPipeline:
         # 执行轨迹
         self._trace: list[dict] = []
         self._session_id: str = ""
+        self._trace_id: str = ""
+        self._final_summary: str = ""
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -226,12 +228,142 @@ class FourPillarPipeline:
         metadata: dict | None = None,
     ) -> None:
         """记录一条执行轨迹事件。"""
-        self._trace.append({
+        trace_event = {
             "event": event,
             "timestamp": datetime.now().isoformat(),
             "detail": detail,
             "metadata": metadata or {},
-        })
+        }
+        self._trace.append(trace_event)
+        self._append_session_event(f"pipeline.{event}", trace_event)
+
+    def _append_session_event(self, event: str, payload: object) -> None:
+        """把管线事件同步写入当前会话事件流。"""
+        session_id = str(self._runtime_context.get("session_id") or "").strip()
+        if not session_id:
+            return
+        try:
+            from ..session_store import append_session_event
+
+            raw_base_dir = self._runtime_context.get("session_base_dir")
+            base_dir = Path(str(raw_base_dir)).expanduser() if raw_base_dir else None
+            event_path = append_session_event(
+                session_id,
+                event,
+                payload=payload,
+                base_dir=base_dir,
+            )
+            self._runtime_context["session_event_log"] = event_path
+        except Exception as exc:
+            from ..logging import log_error
+            log_error("trace", f"保存管线事件失败：{exc}")
+
+    def _persist_main_session(self) -> None:
+        """管线内直接保存主 runner 历史，避免长任务结束前 session 不可见。"""
+        session_id = str(self._runtime_context.get("session_id") or "").strip()
+        if not session_id:
+            return
+        try:
+            from ..session_store import save_session_history
+
+            approval_policy = self._runtime_context.get("approval_policy", "prompt")
+            approval_value = getattr(approval_policy, "value", str(approval_policy))
+            raw_base_dir = self._runtime_context.get("session_base_dir")
+            base_dir = Path(str(raw_base_dir)).expanduser() if raw_base_dir else None
+            session_path = save_session_history(
+                session_id,
+                self._runner.get_history_snapshot(),
+                mode=getattr(getattr(self._runner, "mode", None), "value", "standard"),
+                approval_policy=approval_value,
+                source_session_id=self._runtime_context.get("session_source_id"),
+                recent_inputs=self._runtime_context.get("_recent_inputs"),
+                base_dir=base_dir,
+            )
+            self._runtime_context["session_storage_dir"] = session_path.parent
+        except Exception as exc:
+            from ..logging import log_error
+            log_error("trace", f"保存管线主会话失败：{exc}")
+
+    def _append_pipeline_user_message(self, user_input: str) -> None:
+        """四柱管线不走 AgentRunner.run，需要主动把用户输入纳入主 history。"""
+        message = HumanMessage(
+            content=user_input,
+            additional_kwargs={"cyber_agent_pipeline": True},
+        )
+        self._runner.history.append(message)
+        self._append_session_event(
+            "history_updated",
+            {
+                "reason": "pipeline_human_message",
+                "message_type": message.type,
+                "message_count": len(self._runner.history),
+                "turn_count": self._runner.get_turn_count(),
+            },
+        )
+        self._persist_main_session()
+
+    def _append_pipeline_summary_message(self) -> None:
+        """把完整四柱总结写回主会话，供 /history 和后续对话使用。"""
+        summary = self._final_summary.strip()
+        if not summary:
+            return
+        message = AIMessage(
+            content=summary,
+            additional_kwargs={"cyber_agent_pipeline_summary": True},
+        )
+        self._runner.history.append(message)
+        self._append_session_event(
+            "history_updated",
+            {
+                "reason": "pipeline_summary_message",
+                "message_type": message.type,
+                "message_count": len(self._runner.history),
+                "turn_count": self._runner.get_turn_count(),
+            },
+        )
+        self._persist_main_session()
+
+    @staticmethod
+    def _build_execution_summary(
+        all_results: list[list[str]],
+        iteration: int,
+    ) -> str:
+        """构建完整的四柱执行总结，不截断子任务正文。"""
+        total_tasks = sum(len(round_) for round_ in all_results)
+        success_count = 0
+        fail_count = 0
+        for round_ in all_results:
+            for r in round_:
+                body = r.split("\n", 1)[1] if "\n" in r else r
+                is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
+                if is_fail:
+                    fail_count += 1
+                else:
+                    success_count += 1
+
+        summary_parts = [
+            "## 📊 四柱管线执行总结\n",
+            f"共执行 {total_tasks} 个子任务，经过 {iteration} 轮迭代。"
+            f" ✅ 成功 {success_count} | ❌ 失败 {fail_count}",
+        ]
+
+        for iter_idx, round_ in enumerate(all_results, 1):
+            summary_parts.append(
+                f"\n### 第 {iter_idx} 轮迭代 ({len(round_)} 个子任务)"
+            )
+            for r in round_:
+                lines = r.split("\n", 1)
+                heading = lines[0].lstrip("# ")
+                body = lines[1] if len(lines) > 1 else ""
+                is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
+                prefix = "❌" if is_fail else "✅"
+                summary_parts.append(f"- {prefix} {heading}")
+                if body.strip():
+                    summary_parts.append("")
+                    summary_parts.append(body.strip())
+                    summary_parts.append("")
+        summary_parts.append("")
+        return "\n".join(summary_parts)
 
     def _save_trace(self) -> None:
         """将执行轨迹保存到会话目录。"""
@@ -240,11 +372,15 @@ class FourPillarPipeline:
         try:
             storage_dir = Path.home() / ".cyber-agent-cli-traces"
             storage_dir.mkdir(parents=True, exist_ok=True)
-            sid = self._session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+            sid = self._trace_id or self._session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
             trace_file = storage_dir / f"{sid}.trace.json"
             trace_file.write_text(
                 json.dumps(self._trace, ensure_ascii=False, indent=2),
                 encoding="utf-8",
+            )
+            self._append_session_event(
+                "pipeline.trace_saved",
+                {"trace_file": str(trace_file), "event_count": len(self._trace)},
             )
         except Exception as exc:
             from ..logging import log_error
@@ -386,15 +522,21 @@ class FourPillarPipeline:
                     args = tc.get("args", {})
                     args_str = json.dumps(args, ensure_ascii=False)
                     if len(args_str) > 80:
-                        args_str = args_str[:80] + "…"
+                        display_args_str = args_str[:80] + "…"
+                    else:
+                        display_args_str = args_str
                     elapsed = time_mod.monotonic() - subtask_start
                     self._record_trace(
                         "tool_call",
-                        detail=f"{name}({args_str[:300]})",
-                        metadata={"tool": name, "elapsed_s": round(elapsed)},
+                        detail=f"{name}({args_str})",
+                        metadata={
+                            "tool": name,
+                            "args": args,
+                            "elapsed_s": round(elapsed),
+                        },
                     )
                     _pending_tool_calls.append({
-                        "name": name, "args_str": args_str,
+                        "name": name, "args_str": display_args_str,
                     })
             elif event_type == AgentEventType.TOOL_RESULT:
                 content = data.get("content", "")
@@ -409,7 +551,12 @@ class FourPillarPipeline:
                 self._record_trace(
                     "tool_result",
                     detail=f"{tool_name} → {status}",
-                    metadata={"tool": tool_name, "exit_code": _exit_code, "status": status},
+                    metadata={
+                        "tool": tool_name,
+                        "exit_code": _exit_code,
+                        "status": status,
+                        "content": content,
+                    },
                 )
                 elapsed = time_mod.monotonic() - subtask_start
                 if _pending_tool_calls:
@@ -896,9 +1043,17 @@ class FourPillarPipeline:
         renderer = self._renderer
         self._consecutive_failures = 0
         self._trace = []
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._final_summary = ""
+        self._session_id = str(
+            self._runtime_context.get("session_id")
+            or datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+        self._trace_id = (
+            f"{self._session_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
 
-        self._record_trace("pipeline_start", detail=user_input[:500])
+        self._append_pipeline_user_message(user_input)
+        self._record_trace("pipeline_start", detail=user_input)
 
         try:
             self._run_phases(user_input, auto_decision)
@@ -918,6 +1073,7 @@ class FourPillarPipeline:
                 self.cumulative_input_tokens,
                 self.cumulative_output_tokens,
             )
+            self._append_pipeline_summary_message()
             self._save_trace()
 
     def _run_phases(self, user_input: str, auto_decision: bool) -> None:
@@ -1352,55 +1508,8 @@ class FourPillarPipeline:
         renderer.console.print("[dim bold]📊 四柱管线执行完成[/]")
 
         if all_results:
-            total_tasks = sum(len(round_) for round_ in all_results)
-            # 统计成功/失败：仅当结果通过 except 分支存储（以 ❌ 失败: 或 ❌ 全部超时开头）
-            # 才算失败；模型输出内容中可能含 ❌ 字符（如测试覆盖矩阵 ❌* 标记）但不计失败
-            success_count = 0
-            fail_count = 0
-            for round_ in all_results:
-                for r in round_:
-                    body = r.split("\n", 1)[1] if "\n" in r else r
-                    is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
-                    if is_fail:
-                        fail_count += 1
-                    else:
-                        success_count += 1
-
-            summary_parts = [
-                f"## 📊 四柱管线执行总结\n",
-                f"共执行 {total_tasks} 个子任务，经过 {iteration} 轮迭代。"
-                f" ✅ 成功 {success_count} | ❌ 失败 {fail_count}",
-            ]
-
-            for iter_idx, round_ in enumerate(all_results, 1):
-                summary_parts.append(
-                    f"\n### 第 {iter_idx} 轮迭代 ({len(round_)} 个子任务)"
-                )
-                for r in round_:
-                    lines = r.split("\n", 1)
-                    heading = lines[0].lstrip("# ")  # 如 "[runner] 读取文件"
-                    body = lines[1] if len(lines) > 1 else ""
-                    # 仅当 body 以 ❌ 失败: 开头（即通过 except 分支存储）才算真失败
-                    is_fail = body.startswith("❌ 失败:") or "❌ 全部超时叠加后重规划也失败" in body[:60]
-                    prefix = "❌" if is_fail else "✅"
-                    if is_fail:
-                        # 提取失败原因（取第一行，兼容 ❌ 失败: 和 ❌ 全部超时... 两种前缀）
-                        fail_reason = body.lstrip("❌ ").split("\n")[0][:120]
-                        for _prefix in ("失败: ", "全部超时叠加后重规划也失败: "):
-                            if fail_reason.startswith(_prefix):
-                                fail_reason = fail_reason[len(_prefix):]
-                                break
-                        summary_parts.append(f"- {prefix} {heading} — {fail_reason}")
-                    else:
-                        # 成功则显示结果摘要（前 120 字）
-                        snippet = body.strip().replace("\n", " ")[:120]
-                        if len(body.strip()) > 120:
-                            snippet += "…"
-                        summary_parts.append(f"- {prefix} {heading}")
-                        if snippet:
-                            summary_parts.append(f"  > {snippet}")
-            summary_parts.append("")
-            renderer.print_markdown("\n".join(summary_parts))
+            self._final_summary = self._build_execution_summary(all_results, iteration)
+            renderer.print_markdown(self._final_summary)
 
     def _emit_compression_notice(self) -> None:
         """检查 runner 最近是否触发了上下文压缩，若有则打印通知。"""

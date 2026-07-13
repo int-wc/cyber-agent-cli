@@ -30,9 +30,11 @@ from ..agent.approval import (
     ApprovalPolicy,
     get_approval_policy_label,
 )
+from ..agent.events import AgentEventType
 from ..agent.mode import get_mode_description, get_mode_label
 from ..execution_control import ExecutionInterruptedError
 from ..session_store import (
+    append_session_event,
     create_session_id,
     get_session_storage_dir,
     list_stored_sessions,
@@ -1519,6 +1521,8 @@ class WebhookGateway:
         self.runner_factory = runner_factory
         self.cli_renderer = cli_renderer or CliRenderer()
         self.base_dir = base_dir
+        if base_dir is not None:
+            self.runtime_context["session_base_dir"] = base_dir
         self.reply_timeout_seconds = max(1.0, reply_timeout_seconds)
         self.reply_sender = reply_sender or send_webhook_json
         self._processing_lock = threading.Lock()
@@ -2542,6 +2546,39 @@ class WebhookGateway:
         approval_policy = self.runtime_context.get("approval_policy", ApprovalPolicy.NEVER)
         if not isinstance(approval_policy, ApprovalPolicy):
             approval_policy = ApprovalPolicy.NEVER
+
+        def _save_webhook_session(history_snapshot: list | None = None) -> None:
+            save_session_history(
+                session_id,
+                history_snapshot or runner.get_history_snapshot(),
+                mode=runner.mode.value,
+                approval_policy=approval_policy.value,
+                source_session_id=self._resolve_source_session_id(event),
+                base_dir=self.base_dir,
+            )
+
+        def _append_webhook_event(
+            event_type: str | AgentEventType,
+            payload: object = None,
+        ) -> None:
+            append_session_event(
+                session_id,
+                str(event_type),
+                payload=payload,
+                base_dir=self.base_dir,
+            )
+
+        _append_webhook_event(
+            "user_input_received",
+            {
+                "provider": event.provider,
+                "session_key": event.session_key,
+                "message_id": event.message_id,
+                "input": event.text,
+            },
+        )
+        _save_webhook_session()
+
         progress_emitter = (
             FeishuProgressMessageEmitter(
                 lambda step, step_index: self._emit_feishu_progress_message(
@@ -2554,6 +2591,33 @@ class WebhookGateway:
             if event.provider == "feishu"
             else None
         )
+
+        semantic_events = {
+            AgentEventType.TURN_START,
+            AgentEventType.RESPONSE_END,
+            AgentEventType.RESPONSE_RETRY,
+            AgentEventType.TOOL_CALL,
+            AgentEventType.TOOL_RESULT,
+            AgentEventType.APPROVAL_REQUEST,
+            AgentEventType.APPROVAL_RESULT,
+            AgentEventType.TURN_END,
+            AgentEventType.HISTORY_UPDATED,
+        }
+
+        def persistent_event_handler(
+            event_type: str | AgentEventType,
+            payload: object,
+        ) -> None:
+            if progress_emitter is not None:
+                progress_emitter(event_type, payload)
+            try:
+                normalized_event: str | AgentEventType = AgentEventType(event_type)
+            except ValueError:
+                normalized_event = str(event_type)
+            if normalized_event in semantic_events:
+                _append_webhook_event(normalized_event, payload)
+            if normalized_event == AgentEventType.HISTORY_UPDATED:
+                _save_webhook_session()
 
         builtin_reply = self._build_webhook_builtin_reply(
             event,
@@ -2572,7 +2636,7 @@ class WebhookGateway:
             reply_text = runner.run(
                 event.text,
                 verbose=False,
-                event_handler=progress_emitter,
+                event_handler=persistent_event_handler,
                 approval_handler=create_webhook_approval_handler(approval_policy),
             )
             history_snapshot = runner.get_history_snapshot()
@@ -3146,5 +3210,3 @@ def serve_webhook_gateway(
         resolved_renderer.print_info("Webhook 服务已收到停止信号，正在关闭。")
     finally:
         server.server_close()
-
-

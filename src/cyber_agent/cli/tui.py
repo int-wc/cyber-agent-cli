@@ -656,7 +656,18 @@ if TEXTUAL_IMPORT_ERROR is None:
             if len(recent) > 50:
                 recent.pop(0)
 
-            from .app import capture_builtin_command_renderables
+            from .app import (
+                append_runtime_session_event,
+                capture_builtin_command_renderables,
+                persist_runtime_session,
+            )
+
+            append_runtime_session_event(
+                self.runtime_context,
+                "user_input_received",
+                {"input": user_input},
+            )
+            persist_runtime_session(self.runner, self.runtime_context, force=True)
 
             builtin_result, renderables = capture_builtin_command_renderables(
                 user_input,
@@ -682,7 +693,11 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         @work(thread=True)
         def _run_agent(self, user_input: str) -> None:
-            from .app import create_approval_handler, persist_runtime_session
+            from .app import (
+                create_approval_handler,
+                create_persisting_event_handler,
+                persist_runtime_session,
+            )
 
             def event_handler(event_type: str, payload: object) -> None:
                 if event_type == AgentEventType.REASONING_TOKEN:
@@ -755,7 +770,11 @@ if TEXTUAL_IMPORT_ERROR is None:
                 final_response = self.runner.run(
                     user_input,
                     verbose=False,
-                    event_handler=event_handler,
+                    event_handler=create_persisting_event_handler(
+                        self.runner,
+                        self.runtime_context,
+                        event_handler,
+                    ),
                     approval_handler=create_approval_handler(self.runtime_context),
                 )
                 if final_response:

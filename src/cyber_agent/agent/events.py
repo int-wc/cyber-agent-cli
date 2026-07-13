@@ -18,3 +18,4 @@ class AgentEventType(StrEnum):
     APPROVAL_REQUEST = "approval_request"
     APPROVAL_RESULT = "approval_result"
     TURN_END = "turn_end"
+    HISTORY_UPDATED = "history_updated"
