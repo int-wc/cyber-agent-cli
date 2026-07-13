@@ -119,6 +119,7 @@ class MultiAgentOrchestrator:
                 # ChatAnthropic 不支持 extra_body / openai_api_key
                 kwargs.pop("extra_body", None)
                 kwargs.pop("openai_api_key", None)
+                kwargs.pop("openai_proxy", None)
                 kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
                 # 角色 Agent 无工具调用，anthropic 端点自身控制 thinking
             else:

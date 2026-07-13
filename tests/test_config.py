@@ -14,6 +14,7 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "GATEWAY_DEFAULT_MODEL_OPENCODE",
     "GATEWAY_BASE_URL",
     "GATEWAY_DEFAULT_SERVICE",
+    "MODEL_PROXY_URL",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_MODEL",
     "DEEPSEEK_BASE_URL",
@@ -26,6 +27,7 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "OPENCODE_API_KEY",
     "OPENCODE_MODEL",
     "OPENCODE_BASE_URL",
+    "OPENCODE_PROXY_URL",
     "CYBER_AGENT_HOME",
 )
 
@@ -70,6 +72,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.gateway_default_model, "deepseek-v4-flash-free")
         self.assertIsNone(settings.gateway_base_url)
         self.assertEqual(settings.resolve_base_url(), "https://opencode.ai/zen/v1")
+        self.assertEqual(settings.resolve_proxy_url(), "http://192.168.31.47:7892")
         self.assertEqual(settings.max_context_tokens, 400_000)
         self.assertEqual(settings.get_service(), "opencode")
 
@@ -179,6 +182,7 @@ class SettingsTestCase(unittest.TestCase):
             OPENCODE_API_KEY="opencode-key",
             OPENCODE_MODEL="deepseek-v4-flash-free",
             OPENCODE_BASE_URL="https://opencode.ai/zen/v1",
+            OPENCODE_PROXY_URL="http://proxy.example:7892",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -189,7 +193,40 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["model"], "deepseek-v4-flash-free")
         self.assertEqual(kwargs["api_key"], "opencode-key")
         self.assertEqual(kwargs["base_url"], "https://opencode.ai/zen/v1")
+        self.assertEqual(kwargs["openai_proxy"], "http://proxy.example:7892")
         self.assertEqual(kwargs["extra_body"], {"provider": "opencode"})
+
+    def test_opencode_proxy_can_use_socks_alias(self) -> None:
+        """
+        测试：socks:// 作为 socks5:// 的便捷写法。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="opencode",
+            OPENCODE_API_KEY="opencode-key",
+            OPENCODE_PROXY_URL="socks://192.168.31.47:7892",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(kwargs["openai_proxy"], "socks5://192.168.31.47:7892")
+
+    def test_opencode_proxy_does_not_leak_to_other_services(self) -> None:
+        """
+        测试：OpenCode 专属代理不会影响其他服务商。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="deepseek",
+            DEEPSEEK_API_KEY="deepseek-key",
+            OPENCODE_PROXY_URL="http://proxy.example:7892",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertNotIn("openai_proxy", kwargs)
 
     def test_opencode_model_can_be_overridden_by_gateway_service_model(self) -> None:
         """

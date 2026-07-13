@@ -57,6 +57,7 @@ GATEWAY_DEFAULT_MODEL=deepseek-v4-flash-free
 OPENCODE_API_KEY=your_api_key
 OPENCODE_MODEL=deepseek-v4-flash-free
 OPENCODE_BASE_URL=https://opencode.ai/zen/v1
+OPENCODE_PROXY_URL=http://192.168.31.47:7892
 
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
@@ -75,6 +76,8 @@ SEARCH_SHOW_BROWSER=true
 - `GATEWAY_DEFAULT_MODEL`：可选，当前默认是 `deepseek-v4-flash-free`。
 - `GATEWAY_BASE_URL`：可选，统一模型网关基址；若服务商配置了专属基址，如 `OPENCODE_BASE_URL`，专属基址优先。
 - `OPENCODE_API_KEY` / `OPENCODE_MODEL` / `OPENCODE_BASE_URL`：可选，OpenCode Zen 专属配置。默认基址是 `https://opencode.ai/zen/v1`。
+- `OPENCODE_PROXY_URL`：可选，OpenCode Zen 专属代理，默认 `http://192.168.31.47:7892`。也支持 `socks://192.168.31.47:7892`（会按 `socks5://` 处理），需安装 socks 支持依赖。
+- `MODEL_PROXY_URL`：可选，通用模型代理；服务商专属代理优先。
 - `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`：可选，DeepSeek 专属配置。
 - `DEEPSEEK_THINKING_MODE`：可选，默认 `enabled`。DeepSeek thinking 模式在工具调用后要求完整回传 `reasoning_content`，如遇兼容问题可改为 `disabled`。
 - `MAX_CONTEXT_TOKENS`：模型调用前的上下文保护阈值，默认 `400000`。超过该预算时会先压缩较早历史；若单条消息或工具结果仍过大，会只把首尾片段发送给模型，完整内容仍保存在本地历史中。

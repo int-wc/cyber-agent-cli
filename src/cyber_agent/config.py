@@ -15,6 +15,7 @@ DEFAULT_MODELS: dict[str, str] = {
     "claude": "claude-opus-4-6",
 }
 DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
+DEFAULT_OPENCODE_PROXY_URL = "http://192.168.31.47:7892"
 ANTHROPIC_TOKEN_SERVICES = frozenset({"deepseek", "mimo", "claude"})
 # DeepSeek V4 Pro [1m] 上下文窗口参数
 DEEPSEEK_MAX_CONTEXT_TOKENS = 1_000_000
@@ -34,6 +35,10 @@ class Settings(BaseSettings):
     gateway_base_url: str | None = Field(
         default=None,
         validation_alias="GATEWAY_BASE_URL",
+    )
+    model_proxy_url: str | None = Field(
+        default=None,
+        validation_alias="MODEL_PROXY_URL",
     )
     gateway_default_service: str = Field(
         default="opencode",
@@ -94,6 +99,10 @@ class Settings(BaseSettings):
     opencode_base_url: str | None = Field(
         default=DEFAULT_OPENCODE_BASE_URL,
         validation_alias="OPENCODE_BASE_URL",
+    )
+    opencode_proxy_url: str | None = Field(
+        default=DEFAULT_OPENCODE_PROXY_URL,
+        validation_alias="OPENCODE_PROXY_URL",
     )
 
     # ── 搜索工具 ──
@@ -291,6 +300,29 @@ class Settings(BaseSettings):
             return self.anthropic_base_url.strip()
         return DEFAULT_MODEL_GATEWAY_BASE_URL
 
+    def normalize_proxy_url(self, proxy_url: str | None = None) -> str | None:
+        """规范化代理地址；socks:// 作为 socks5:// 的便捷别名。"""
+        normalized = (proxy_url or "").strip()
+        if not normalized:
+            return None
+        if normalized.startswith("socks://"):
+            return "socks5://" + normalized[len("socks://"):]
+        return normalized
+
+    def resolve_proxy_url(self, service_name: str | None = None) -> str | None:
+        """解析模型客户端代理地址。
+
+        优先级：服务商专属代理 > MODEL_PROXY_URL。当前仅为 opencode 设置默认代理。
+        """
+        normalized_service = self.normalize_service_name(service_name)
+        service_proxies: dict[str, str | None] = {
+            "opencode": self.opencode_proxy_url,
+        }
+        specific_proxy = self.normalize_proxy_url(service_proxies.get(normalized_service))
+        if specific_proxy:
+            return specific_proxy
+        return self.normalize_proxy_url(self.model_proxy_url)
+
     def get_chat_openai_kwargs(
         self,
         service_name: str | None = None,
@@ -327,6 +359,9 @@ class Settings(BaseSettings):
             "temperature": 0.7,
             "extra_body": extra_body,
         }
+        resolved_proxy_url = self.resolve_proxy_url(resolved_service_name)
+        if resolved_proxy_url:
+            kwargs["openai_proxy"] = resolved_proxy_url
         return {key: value for key, value in kwargs.items() if value is not None}
 
 

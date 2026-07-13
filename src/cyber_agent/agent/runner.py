@@ -335,6 +335,7 @@ class AgentRunner:
             # ChatAnthropic 不支持 extra_body 和 openai_api_key
             kwargs.pop("extra_body", None)
             kwargs.pop("openai_api_key", None)
+            kwargs.pop("openai_proxy", None)
             kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
         # 抑制 extra_body → model_kwargs 迁移警告（extra_body 是网关必需的）
         with warnings.catch_warnings():

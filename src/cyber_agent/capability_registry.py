@@ -410,6 +410,7 @@ class CapabilityRegistry:
             if is_anthropic:
                 kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
                 kwargs.pop("openai_api_key", None)
+                kwargs.pop("openai_proxy", None)
             self._llm = llm_cls(**kwargs)
         return self._llm
 

@@ -105,6 +105,7 @@ class FourPillarPipeline:
             # ChatAnthropic 不支持 extra_body / openai_api_key
             kwargs.pop("extra_body", None)
             kwargs.pop("openai_api_key", None)
+            kwargs.pop("openai_proxy", None)
             kwargs["anthropic_api_key"] = kwargs.pop("api_key", "")
             # 在 extra_body 被移除后不再设置 thinking
         else:
