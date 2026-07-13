@@ -1591,36 +1591,45 @@ def _normalize_hub_agent_event(event_type: str) -> AgentEventType | None:
         return None
 
 
-def subscribe_cli_to_hub(hub) -> Any:
+def subscribe_cli_to_hub(
+    hub,
+    *,
+    show_status: bool = False,
+    render_remote_events: bool = False,
+) -> Any:
     """把 Hub 事件渲染到当前 CLI。"""
 
     def _subscriber(event) -> None:
+        source_kind = getattr(event.source, "kind", "") if event.source is not None else ""
         normalized_event = _normalize_hub_agent_event(event.type)
         if normalized_event is not None:
+            if source_kind and source_kind != "cli" and not render_remote_events:
+                return
             render_agent_event(normalized_event, event.payload)
             return
 
         source_label = ""
         if event.source is not None:
             source_label = f"[{event.source.kind}] "
-        source_kind = getattr(event.source, "kind", "") if event.source is not None else ""
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type == "hub_started":
-            renderer.print_info(f"Hub 会话：{payload.get('session_id', 'unknown')}")
+            if show_status:
+                renderer.print_info(f"Hub 会话：{payload.get('session_id', 'unknown')}")
         elif event.type == "hub_stopped":
-            renderer.print_info(f"Hub 已停止，会话：{payload.get('session_id', 'unknown')}")
+            if show_status:
+                renderer.print_info(f"Hub 已停止，会话：{payload.get('session_id', 'unknown')}")
         elif event.type == "task_queued":
-            if source_kind == "cli":
+            if not show_status:
                 return
             renderer.print_info(
                 f"{source_label}任务已入队，队列长度：{payload.get('queue_size', 0)}"
             )
         elif event.type == "task_started":
-            if source_kind == "cli":
+            if not show_status:
                 return
             renderer.print_info(f"{source_label}开始执行：{payload.get('text', '')}")
         elif event.type == "task_finished":
-            if source_kind == "cli":
+            if not show_status:
                 return
             renderer.print_info(f"{source_label}任务完成，会话：{payload.get('session_id', '')}")
         elif event.type == "task_interrupted":
@@ -1628,11 +1637,13 @@ def subscribe_cli_to_hub(hub) -> Any:
         elif event.type == "task_error":
             renderer.print_error(str(payload.get("message", "Hub 任务执行失败。")))
         elif event.type == "task_stop_requested":
-            renderer.print_info(str(payload.get("reason", "已请求停止当前任务。")))
+            if show_status:
+                renderer.print_info(str(payload.get("reason", "已请求停止当前任务。")))
         elif event.type == "session_switched":
-            renderer.print_info(
-                f"{source_label}已切换会话：{payload.get('session_id', '')}"
-            )
+            if show_status:
+                renderer.print_info(
+                    f"{source_label}已切换会话：{payload.get('session_id', '')}"
+                )
         elif event.type == "session_switch_failed":
             renderer.print_error(str(payload.get("reason", "会话切换失败。")))
 
@@ -1995,10 +2006,37 @@ def _load_persisted_feishu_chat_ids(base_dir: Path | None) -> list[str]:
     return chat_ids
 
 
-def run_hub_cli_loop(hub, *, subscribe: bool = True) -> None:
+class QuietInfoRenderer:
+    """用于后台前端：吞掉 info，只把错误转给主 CLI。"""
+
+    def __init__(self, inner: CliRenderer) -> None:
+        self._inner = inner
+
+    def print_info(self, content: str) -> None:
+        _ = content
+
+    def print_error(self, content: str) -> None:
+        self._inner.print_error(content)
+
+
+def run_hub_cli_loop(
+    hub,
+    *,
+    subscribe: bool = True,
+    show_status: bool = False,
+    render_remote_events: bool = False,
+) -> None:
     """运行 Hub 模式下的 CLI 前端。"""
     _, _, HubTaskSource = _load_hub_support()
-    unsubscribe = subscribe_cli_to_hub(hub) if subscribe else None
+    unsubscribe = (
+        subscribe_cli_to_hub(
+            hub,
+            show_status=show_status,
+            render_remote_events=render_remote_events,
+        )
+        if subscribe
+        else None
+    )
     try:
         while True:
             try:
@@ -2063,6 +2101,16 @@ def hub_serve(
         "--feishu-connect-timeout-seconds",
         help="进入 CLI 交互前等待飞书长连接建立的最长秒数。",
     ),
+    hub_verbose: bool = typer.Option(
+        False,
+        "--hub-verbose",
+        help="显示 Hub/飞书连接和队列状态；默认静默以避免打断 CLI 交互。",
+    ),
+    render_remote_events: bool = typer.Option(
+        False,
+        "--render-remote-events",
+        help="在本地 CLI 中渲染飞书端触发的 Agent 输出；默认不渲染以避免打断输入。",
+    ),
 ) -> None:
     """
     启动 Cyber Agent Hub，让 CLI 和飞书共享同一个 runner、队列和会话。
@@ -2083,7 +2131,11 @@ def hub_serve(
         else None
     )
     hub = build_hub(runtime_context, base_dir=resolved_storage_dir)
-    unsubscribe_cli = subscribe_cli_to_hub(hub)
+    unsubscribe_cli = subscribe_cli_to_hub(
+        hub,
+        show_status=hub_verbose,
+        render_remote_events=render_remote_events,
+    )
     feishu_bridge: HubFeishuBridge | None = None
     renderer.print_startup_splash()
     print_banner(hub.runner, runtime_context)
@@ -2118,11 +2170,12 @@ def hub_serve(
 
             def _serve_feishu() -> None:
                 try:
+                    feishu_renderer = renderer if hub_verbose else QuietInfoRenderer(renderer)
                     serve_feishu_long_connection(
                         resolved_route,
                         runtime_context,
                         create_runner,
-                        cli_renderer=renderer,
+                        cli_renderer=feishu_renderer,
                         base_dir=resolved_storage_dir,
                         reply_timeout_seconds=reply_timeout_seconds,
                         event_consumer=feishu_bridge.consume_event,
@@ -2137,33 +2190,42 @@ def hub_serve(
                 daemon=True,
             )
             feishu_thread.start()
-            renderer.print_info("Hub 飞书前端已启动，正在等待长连接建立。")
+            if hub_verbose:
+                renderer.print_info("Hub 飞书前端已启动，正在等待长连接建立。")
             if feishu_connected_event.wait(max(0.0, feishu_connect_timeout_seconds)):
-                if feishu_bridge.has_broadcast_targets():
-                    renderer.print_info(
-                        f"飞书同步通知已启用，目标会话数：{len(broadcast_chat_ids)}。"
-                    )
-                else:
-                    renderer.print_info(
-                        "飞书长连接已就绪。首次请先在飞书里给机器人发一条消息，"
-                        "Hub 会自动记住 chat_id；之后 CLI 任务会同步到飞书。"
-                    )
+                if hub_verbose:
+                    if feishu_bridge.has_broadcast_targets():
+                        renderer.print_info(
+                            f"飞书同步通知已启用，目标会话数：{len(broadcast_chat_ids)}。"
+                        )
+                    else:
+                        renderer.print_info(
+                            "飞书长连接已就绪。首次请先在飞书里给机器人发一条消息，"
+                            "Hub 会自动记住 chat_id；之后 CLI 任务会同步到飞书。"
+                        )
             else:
                 renderer.print_error(
                     "飞书长连接尚未确认建立，仍将进入 CLI；连接完成后飞书端会继续可用。"
                 )
 
         if no_cli:
-            renderer.print_info("Hub 正在后台运行，按 Ctrl+C 停止。")
+            if hub_verbose:
+                renderer.print_info("Hub 正在后台运行，按 Ctrl+C 停止。")
             while True:
                 time.sleep(1.0)
         else:
-            run_hub_cli_loop(hub, subscribe=False)
+            run_hub_cli_loop(
+                hub,
+                subscribe=False,
+                show_status=hub_verbose,
+                render_remote_events=render_remote_events,
+            )
     except (ModuleNotFoundError, ValueError) as exc:
         renderer.print_error(f"运行失败：{exc}")
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
-        renderer.print_info("\nHub 已收到退出请求。")
+        if hub_verbose:
+            renderer.print_info("\nHub 已收到退出请求。")
     finally:
         unsubscribe_cli()
         if feishu_bridge is not None:
