@@ -12,6 +12,7 @@ src/cyber_agent/local_config.py
 src/cyber_agent/logging.py
 src/cyber_agent/mcp_client.py
 src/cyber_agent/memory.py
+src/cyber_agent/model_client.py
 src/cyber_agent/openai_compat.py
 src/cyber_agent/runtime_context.py
 src/cyber_agent/session_store.py
@@ -38,6 +39,7 @@ src/cyber_agent/cli/feishu_long_connection.py
 src/cyber_agent/cli/ide_launcher.py
 src/cyber_agent/cli/ide_server.py
 src/cyber_agent/cli/interactive.py
+src/cyber_agent/cli/pipeline_web.py
 src/cyber_agent/cli/prompting.py
 src/cyber_agent/cli/render.py
 src/cyber_agent/cli/render_panels.py
@@ -77,10 +79,13 @@ tests/test_cli_commands.py
 tests/test_cli_interactive.py
 tests/test_config.py
 tests/test_feishu_long_connection.py
+tests/test_local_config.py
 tests/test_logging.py
 tests/test_memory.py
+tests/test_model_client.py
 tests/test_openai_compat.py
 tests/test_orchestrator_fixes.py
+tests/test_parallel_execution.py
 tests/test_search_tool.py
 tests/test_session_store.py
 tests/test_tool_executor.py
