@@ -18,8 +18,9 @@ DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_OPENCODE_PROXY_URL = "http://192.168.31.47:7892"
 ANTHROPIC_TOKEN_SERVICES = frozenset({"deepseek", "mimo", "claude"})
 # DeepSeek V4 Pro [1m] 上下文窗口参数
-DEEPSEEK_MAX_CONTEXT_TOKENS = 1_000_000
-DEEPSEEK_AUTO_COMPACT_WINDOW = 400_000
+DEEPSEEK_MAX_CONTEXT_TOKENS = 4_000_000
+DEEPSEEK_AUTO_COMPACT_WINDOW = 4_000_000
+DEFAULT_MAX_CONTEXT_CHARS = 4_000_000
 
 
 class Settings(BaseSettings):
@@ -125,7 +126,7 @@ class Settings(BaseSettings):
 
     # ── 上下文压缩 ──
     max_context_chars: int = Field(
-        default=30000,
+        default=DEFAULT_MAX_CONTEXT_CHARS,
         validation_alias="MAX_CONTEXT_CHARS",
     )
     max_context_tokens: int = Field(
