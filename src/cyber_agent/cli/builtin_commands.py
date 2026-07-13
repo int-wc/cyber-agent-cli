@@ -813,6 +813,77 @@ def _handle_trace(
     return True
 
 
+# ── /pipeline ──
+
+def _handle_pipeline(
+    runner: "AgentRunner",
+    runtime_context: dict[str, object],
+    cli_renderer: "CliRenderer",
+    tokens: list[str],
+    raw_input: str,
+) -> bool:
+    """启动四柱管线 Web 仪表盘。"""
+    subcmd = tokens[1] if len(tokens) >= 2 else ""
+
+    if subcmd == "serve":
+        cli_renderer.print_info("正在启动四柱管线仪表盘服务…")
+        try:
+            from .pipeline_web import run_pipeline_server
+            host = tokens[2] if len(tokens) >= 3 else "127.0.0.1"
+            port = int(tokens[3]) if len(tokens) >= 4 else 8318
+            import threading
+            t = threading.Thread(
+                target=run_pipeline_server,
+                kwargs={"host": host, "port": port},
+                daemon=True,
+            )
+            t.start()
+            cli_renderer.print_info(f"🌐 仪表盘已启动 → http://{host}:{port}")
+            cli_renderer.print_info("在当前会话后台运行，关闭会话即停止。")
+        except Exception as exc:
+            cli_renderer.print_error(f"启动仪表盘失败：{exc}")
+        return True
+
+    if subcmd == "traces":
+        try:
+            from .pipeline_web import PIPELINE_TRACE_DIR
+            from pathlib import Path
+            d = PIPELINE_TRACE_DIR
+            if not d.exists():
+                cli_renderer.print_info("尚无执行轨迹记录。")
+                return True
+            files = sorted(d.glob("*.trace.json"), reverse=True)[:20]
+            if not files:
+                cli_renderer.print_info("没有轨迹文件。")
+                return True
+            import json
+            rows = []
+            for f in files:
+                sid = f.stem.replace(".trace", "")
+                size = f.stat().st_size
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    events = data if isinstance(data, list) else data.get("events", [])
+                    rows.append((sid[:20], f"{len(events)} 事件, {size:,} 字节"))
+                except Exception:
+                    rows.append((sid[:20], f"{size:,} 字节"))
+            cli_renderer.print_status(rows, title="管线执行轨迹")
+        except Exception as exc:
+            cli_renderer.print_error(f"读取失败：{exc}")
+        return True
+
+    # /pipeline 无参数 → 显示帮助
+    cli_renderer.print_markdown(
+        "## 🧠 四柱管线仪表盘\n\n"
+        "**子命令：**\n"
+        "- `/pipeline serve [host] [port]` — 启动 Web 仪表盘（默认 127.0.0.1:8318）\n"
+        "- `/pipeline traces` — 列出已保存的执行轨迹\n\n"
+        "仪表盘展示了 10 个智能体角色的任务分配与传递流程。\n"
+        "访问 http://localhost:8318 即可查看。"
+    )
+    return True
+
+
 # ── 命令注册表 ──
 
 _COMMAND_REGISTRY: dict[str, CommandHandler] = {
@@ -838,6 +909,7 @@ _COMMAND_REGISTRY: dict[str, CommandHandler] = {
     "/session": _handle_session,
     "/capabilities": _handle_capabilities,
     "/trace": _handle_trace,
+    "/pipeline": _handle_pipeline,
 }
 
 
