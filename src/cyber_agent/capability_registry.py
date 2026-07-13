@@ -52,9 +52,11 @@ class CapabilityRegistry:
         api_key: str | None = None,
         base_url: str | None = None,
     ) -> None:
+        from .local_config import get_application_home
+
         self.execution_controller = execution_controller
-        self.base_dir = (base_dir or Path.cwd()).resolve()
-        self.storage_dir = get_capability_storage_dir(self.base_dir)
+        self.base_dir = (base_dir or get_application_home()).resolve()
+        self.storage_dir = get_capability_storage_dir(base_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.service_name = settings.normalize_service_name(service_name)
         self.model_name = settings.get_model_name(

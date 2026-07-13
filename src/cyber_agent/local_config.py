@@ -1,10 +1,33 @@
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 LOCAL_CONFIG_FILENAME = ".cyber-agent-cli.json"
 CYBER_DIR_NAME = ".cyber"
+CYBER_AGENT_HOME_ENV = "CYBER_AGENT_HOME"
+
+
+def get_application_home() -> Path:
+    """返回 Cyber Agent 的应用主目录，用于存放默认配置和运行数据。"""
+    configured_home = os.getenv(CYBER_AGENT_HOME_ENV, "").strip()
+    if configured_home:
+        return Path(configured_home).expanduser().resolve()
+
+    source_path = Path(__file__).resolve()
+    for parent in source_path.parents:
+        if (
+            (parent / "pyproject.toml").is_file()
+            and (parent / "src" / "cyber_agent").is_dir()
+        ):
+            return parent
+    return Path.home() / ".cyber-agent-cli"
+
+
+def get_application_env_file() -> Path:
+    """返回默认环境配置文件路径。"""
+    return get_application_home() / ".env"
 
 
 @dataclass(slots=True)
@@ -134,14 +157,20 @@ def save_local_cli_config(
 
 
 def find_cyber_dir(base_dir: Path | None = None) -> Path:
-    """从 base_dir 或 cwd 开始向上搜索 .cyber/ 目录。
+    """返回集中应用数据目录 .cyber/。
 
-    搜索策略：向上走查 .git/ 或已有 .cyber/（最多 10 层）：
+    无显式 base_dir 时固定使用应用主目录，避免在任意启动目录创建隐藏数据。
+    有显式 base_dir 时保留原项目回溯策略：
     - 若找到已有 .cyber/ → 直接返回
     - 若找到含 .git/ 的目录但无 .cyber/ → 在其下创建 .cyber/ 并返回
     - 若都没找到 → 在 base_dir（或 cwd）下创建 .cyber/ 并返回
     """
-    start = (base_dir or Path.cwd()).resolve()
+    if base_dir is None:
+        target = get_application_home() / CYBER_DIR_NAME
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    start = base_dir.resolve()
     candidate_git_root: Path | None = None
     current = start
     for _ in range(10):
@@ -160,54 +189,19 @@ def find_cyber_dir(base_dir: Path | None = None) -> Path:
 
 
 def find_data_dir(dirname: str, base_dir: Path | None = None) -> Path:
-    """查找数据目录，按优先级回溯：指定目录 → .cyber/<sub> → 父目录(10层) → 用户家目录。
+    """查找数据目录，默认集中到应用主目录的 .cyber/<sub>。
 
-    若都不存在，返回 .cyber/<short_name>（优先）或当前工作目录下的路径，
-    调用方负责 mkdir。
-    当 base_dir 显式传入时，始终优先使用 base_dir 本身，不做父目录回溯，
-    仅在 base_dir 为 None 时才从当前工作目录开始回溯查找。
+    当 base_dir 显式传入时，始终优先使用 base_dir 本身，方便测试或显式隔离。
     dirname 示例: ".cyber-agent-cli-sessions", ".cyber-agent-cli-capabilities"
     """
-    # 若调用方显式传入了 base_dir，直接使用该目录（不回溯）
     if base_dir is not None:
         return base_dir.resolve() / dirname
 
-    # 对于 .cyber-agent-cli-xxx 格式，优先检查 .cyber/xxx（项目级统一目录）
-    cyber_sub: Path | None = None
     if dirname.startswith(".cyber-agent-cli-"):
         short_name = dirname[len(".cyber-agent-cli-"):]
-        try:
-            cyber_dir = find_cyber_dir(None)
-            cyber_candidate = cyber_dir / short_name
-            if cyber_candidate.exists():
-                return cyber_candidate
-            cyber_sub = cyber_candidate  # 记录以备 fallback 使用
-        except OSError:
-            pass
+        return find_cyber_dir(None) / short_name
 
-    current = Path.cwd().resolve()
-    # 1. 当前目录
-    candidate = current / dirname
-    if candidate.exists():
-        return candidate
-    # 2. 父目录回溯
-    for _ in range(10):
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-        candidate = current / dirname
-        if candidate.exists():
-            return candidate
-    # 3. 用户家目录
-    home_candidate = Path.home() / dirname
-    if home_candidate.exists():
-        return home_candidate
-    # 4. 优先在 .cyber/<short_name> 下创建（项目集中的应用）
-    if cyber_sub is not None:
-        return cyber_sub
-    # 5. 默认：当前工作目录
-    return Path.cwd().resolve() / dirname
+    return get_application_home() / dirname
 
 
 def merge_allow_paths(*path_groups: list[Path | str]) -> list[Path]:

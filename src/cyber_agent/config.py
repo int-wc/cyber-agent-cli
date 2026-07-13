@@ -3,6 +3,8 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .local_config import get_application_env_file
+
 DEFAULT_MODEL_GATEWAY_BASE_URL = "http://127.0.0.1:8317/v1"
 # 服务商默认模型。可通过 GATEWAY_DEFAULT_MODEL_<SERVICE> 环境变量覆盖。
 DEFAULT_MODELS: dict[str, str] = {
@@ -155,7 +157,7 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(get_application_env_file()),
         extra="ignore",
     )
 

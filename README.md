@@ -48,7 +48,7 @@ python -m playwright install chromium
 
 ### 2. 配置环境变量
 
-可参考仓库中的 `.env.example`，在项目根目录创建 `.env`：
+可参考仓库中的 `.env.example`，在应用主目录创建 `.env`。源码方式运行时，应用主目录默认是本仓库根目录；也可以通过 `CYBER_AGENT_HOME=/path/to/cyber-agent-cli` 显式指定：
 
 ```env
 GATEWAY_DEFAULT_SERVICE=opencode
@@ -69,6 +69,8 @@ SEARCH_SHOW_BROWSER=true
 
 说明：
 
+- 默认只读取应用主目录下的 `.env`，不会因为从其他工作目录启动就在当地读取或创建 `.env`。
+- 历史会话、动态能力等运行数据默认集中写入应用主目录下的 `.cyber/`。
 - `GATEWAY_DEFAULT_SERVICE`：可选，默认是 `opencode`，当前支持 `opencode`、`openai`、`deepseek`、`claude`、`mimo`，也支持其他 OpenAI 兼容服务商名称。
 - `GATEWAY_DEFAULT_MODEL`：可选，当前默认是 `deepseek-v4-flash-free`。
 - `GATEWAY_BASE_URL`：可选，统一模型网关基址；若服务商配置了专属基址，如 `OPENCODE_BASE_URL`，专属基址优先。

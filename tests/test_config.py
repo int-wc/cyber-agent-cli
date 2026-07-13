@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, Optional
@@ -25,6 +26,7 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "OPENCODE_API_KEY",
     "OPENCODE_MODEL",
     "OPENCODE_BASE_URL",
+    "CYBER_AGENT_HOME",
 )
 
 
@@ -89,6 +91,39 @@ class SettingsTestCase(unittest.TestCase):
             config_module.settings.gateway_base_url,
             "https://example.test/v1",
         )
+
+    def test_settings_load_env_from_application_home(self) -> None:
+        """
+        测试：默认配置文件来自 CYBER_AGENT_HOME/.env，而不是当前工作目录。
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_home = os.path.join(temp_dir, "app-home")
+            cwd = os.path.join(temp_dir, "launch-cwd")
+            os.makedirs(app_home)
+            os.makedirs(cwd)
+            with open(os.path.join(app_home, ".env"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "GATEWAY_DEFAULT_SERVICE=opencode\n"
+                    "OPENCODE_API_KEY=app-home-key\n"
+                    "OPENCODE_MODEL=deepseek-v4-flash-free\n"
+                    "OPENCODE_BASE_URL=https://opencode.ai/zen/v1\n"
+                )
+            with open(os.path.join(cwd, ".env"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "GATEWAY_DEFAULT_SERVICE=opencode\n"
+                    "OPENCODE_API_KEY=cwd-key-should-not-win\n"
+                )
+
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(cwd)
+                with temporary_config_env(CYBER_AGENT_HOME=app_home):
+                    config_module = import_config_module()
+                    settings = config_module.Settings()
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(settings.get_api_key("opencode"), "app-home-key")
 
     def test_settings_can_build_deepseek_compatible_kwargs(self) -> None:
         """

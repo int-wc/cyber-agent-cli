@@ -67,7 +67,12 @@ class MemorySearchResult:
 
 def get_memory_dir(base_dir: Path | None = None) -> Path:
     """返回记忆存储目录。"""
-    return (base_dir or Path.cwd()).resolve() / MEMORY_STORAGE_DIRNAME
+    if base_dir is not None:
+        return base_dir.resolve() / MEMORY_STORAGE_DIRNAME
+
+    from .local_config import find_cyber_dir
+
+    return find_cyber_dir() / "memory"
 
 
 def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
