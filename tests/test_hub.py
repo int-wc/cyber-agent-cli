@@ -12,6 +12,8 @@ from cyber_agent.agent.approval import ApprovalPolicy
 from cyber_agent.agent.events import AgentEventType
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.execution_control import ExecutionInterruptedError
+from cyber_agent.cli.app import _parse_feishu_broadcast_chat_ids
+from cyber_agent.cli.webhook_feishu import _save_feishu_session_state
 from cyber_agent.hub import CyberAgentHub, HubTaskSource
 from cyber_agent.session_store import load_session_history, save_session_history
 
@@ -230,6 +232,36 @@ class CyberAgentHubTestCase(unittest.TestCase):
             self.assertIn("task_queue_drained", event_types)
             drained = next(event for event in events if event.type == "task_queue_drained")
             self.assertEqual(drained.payload["count"], 1)
+
+    def test_feishu_broadcast_chat_ids_merge_config_and_persisted_state(self) -> None:
+        class Route:
+            provider_options = {
+                "hub_broadcast_chat_ids": "oc_config_a, oc_config_b",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            _save_feishu_session_state(
+                {
+                    "version": 1,
+                    "chats": {
+                        "oc_config_a": {},
+                        "oc_persisted": {},
+                    },
+                },
+                base_dir,
+            )
+
+            chat_ids = _parse_feishu_broadcast_chat_ids(
+                Route(),
+                ["oc_option"],
+                base_dir=base_dir,
+            )
+
+            self.assertEqual(
+                chat_ids,
+                ["oc_option", "oc_config_a", "oc_config_b", "oc_persisted"],
+            )
 
 
 if __name__ == "__main__":

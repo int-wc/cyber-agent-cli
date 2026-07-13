@@ -1603,18 +1603,25 @@ def subscribe_cli_to_hub(hub) -> Any:
         source_label = ""
         if event.source is not None:
             source_label = f"[{event.source.kind}] "
+        source_kind = getattr(event.source, "kind", "") if event.source is not None else ""
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type == "hub_started":
-            renderer.print_info(f"Hub 已启动，会话：{payload.get('session_id', 'unknown')}")
+            renderer.print_info(f"Hub 会话：{payload.get('session_id', 'unknown')}")
         elif event.type == "hub_stopped":
             renderer.print_info(f"Hub 已停止，会话：{payload.get('session_id', 'unknown')}")
         elif event.type == "task_queued":
+            if source_kind == "cli":
+                return
             renderer.print_info(
                 f"{source_label}任务已入队，队列长度：{payload.get('queue_size', 0)}"
             )
         elif event.type == "task_started":
+            if source_kind == "cli":
+                return
             renderer.print_info(f"{source_label}开始执行：{payload.get('text', '')}")
         elif event.type == "task_finished":
+            if source_kind == "cli":
+                return
             renderer.print_info(f"{source_label}任务完成，会话：{payload.get('session_id', '')}")
         elif event.type == "task_interrupted":
             renderer.print_info(str(payload.get("message", "当前任务已被停止。")))
@@ -1677,6 +1684,7 @@ class HubFeishuBridge:
         chat_id = str(event.metadata.get("chat_id", "")).strip()
         if chat_id:
             self._remember_chat_event(chat_id, event)
+            self._persist_known_chat_id(chat_id)
         self.hub.submit(
             event.text,
             source=HubTaskSource(
@@ -1908,10 +1916,47 @@ class HubFeishuBridge:
         )
         self._remember_chat_event(normalized_chat_id, event)
 
+    def _persist_known_chat_id(self, chat_id: str) -> None:
+        from .webhook_feishu import (
+            _build_feishu_session_entry,
+            _load_feishu_session_state,
+            _save_feishu_session_state,
+        )
+
+        normalized_chat_id = chat_id.strip()
+        if not normalized_chat_id:
+            return
+        try:
+            state_payload = _load_feishu_session_state(self.gateway.base_dir)
+            chats_payload = state_payload.get("chats")
+            if not isinstance(chats_payload, dict):
+                chats_payload = {}
+                state_payload["chats"] = chats_payload
+            chat_state = chats_payload.get(normalized_chat_id)
+            if not isinstance(chat_state, dict):
+                chat_state = {}
+            chat_state.setdefault("active_session_key", normalized_chat_id)
+            sessions = chat_state.get("sessions")
+            if not isinstance(sessions, list):
+                sessions = []
+            if not any(
+                isinstance(entry, dict)
+                and str(entry.get("session_key", "")).strip() == normalized_chat_id
+                for entry in sessions
+            ):
+                sessions.insert(0, _build_feishu_session_entry(normalized_chat_id))
+            chat_state["sessions"] = sessions
+            chats_payload[normalized_chat_id] = chat_state
+            _save_feishu_session_state(state_payload, self.gateway.base_dir)
+        except Exception as exc:  # noqa: BLE001 - 记录 chat_id 失败不应影响消息处理
+            logger.warning("保存飞书 chat_id 失败: %s", exc)
+
 
 def _parse_feishu_broadcast_chat_ids(
     route: Any,
     option_values: list[str] | None,
+    *,
+    base_dir: Path | None,
 ) -> list[str]:
     raw_values: list[str] = []
     raw_values.extend(option_values or [])
@@ -1920,6 +1965,7 @@ def _parse_feishu_broadcast_chat_ids(
         value = str(provider_options.get(key, "")).strip()
         if value:
             raw_values.append(value)
+    raw_values.extend(_load_persisted_feishu_chat_ids(base_dir))
 
     chat_ids: list[str] = []
     for raw_value in raw_values:
@@ -1927,6 +1973,25 @@ def _parse_feishu_broadcast_chat_ids(
             chat_id = item.strip()
             if chat_id and chat_id not in chat_ids:
                 chat_ids.append(chat_id)
+    return chat_ids
+
+
+def _load_persisted_feishu_chat_ids(base_dir: Path | None) -> list[str]:
+    from .webhook_feishu import _load_feishu_session_state
+
+    try:
+        state_payload = _load_feishu_session_state(base_dir)
+    except Exception as exc:  # noqa: BLE001 - 自动发现失败不影响 Hub 启动
+        logger.warning("加载已知飞书 chat_id 失败: %s", exc)
+        return []
+    chats_payload = state_payload.get("chats")
+    if not isinstance(chats_payload, dict):
+        return []
+    chat_ids = [
+        str(chat_id).strip()
+        for chat_id in chats_payload.keys()
+        if str(chat_id).strip()
+    ]
     return chat_ids
 
 
@@ -2020,6 +2085,8 @@ def hub_serve(
     hub = build_hub(runtime_context, base_dir=resolved_storage_dir)
     unsubscribe_cli = subscribe_cli_to_hub(hub)
     feishu_bridge: HubFeishuBridge | None = None
+    renderer.print_startup_splash()
+    print_banner(hub.runner, runtime_context)
     hub.start()
     feishu_thread: threading.Thread | None = None
     try:
@@ -2036,6 +2103,7 @@ def hub_serve(
             broadcast_chat_ids = _parse_feishu_broadcast_chat_ids(
                 resolved_route,
                 feishu_broadcast_chat_ids,
+                base_dir=resolved_storage_dir,
             )
             feishu_bridge = HubFeishuBridge(
                 hub=hub,
@@ -2072,19 +2140,19 @@ def hub_serve(
             renderer.print_info("Hub 飞书前端已启动，正在等待长连接建立。")
             if feishu_connected_event.wait(max(0.0, feishu_connect_timeout_seconds)):
                 if feishu_bridge.has_broadcast_targets():
-                    renderer.print_info("飞书同步通知已启用。")
+                    renderer.print_info(
+                        f"飞书同步通知已启用，目标会话数：{len(broadcast_chat_ids)}。"
+                    )
                 else:
                     renderer.print_info(
-                        "飞书长连接已就绪。CLI 发起的任务会在飞书端先给机器人发送一条消息后同步；"
-                        "如需启动即同步，请传入 --feishu-broadcast-chat-id。"
+                        "飞书长连接已就绪。首次请先在飞书里给机器人发一条消息，"
+                        "Hub 会自动记住 chat_id；之后 CLI 任务会同步到飞书。"
                     )
             else:
                 renderer.print_error(
                     "飞书长连接尚未确认建立，仍将进入 CLI；连接完成后飞书端会继续可用。"
                 )
 
-        renderer.print_startup_splash()
-        print_banner(hub.runner, runtime_context)
         if no_cli:
             renderer.print_info("Hub 正在后台运行，按 Ctrl+C 停止。")
             while True:
