@@ -48,6 +48,40 @@ class PipelineCircuitBreakerError(RuntimeError):
     """连续子任务失败触发的熔断异常。"""
 
 
+LOCAL_PROJECT_PROBE_PATTERNS = (
+    "/cyber-agent-cli",
+    ".cyber-agent-cli-sessions",
+    ".cyber/sessions",
+    ".claude/settings",
+    "/desktop/",
+    "/src/cyber_agent/",
+    "/tests/",
+)
+LOCAL_SECRET_PROBE_PATTERNS = (
+    ".env",
+    "opencode_api_key",
+    "anthropic_auth_token",
+    "gateway_api_key",
+)
+BROAD_LOCAL_SEARCH_PATTERNS = (
+    "find /home",
+    "find / ",
+    "grep -r",
+    "grep -rn",
+    "cat /home",
+)
+CYBER_AGENT_TASK_KEYWORDS = (
+    "cyber-agent",
+    "cyber_agent",
+    "agent runner",
+    "fourpillarpipeline",
+    "四柱",
+    "上下文压缩",
+    "history",
+    "session",
+)
+
+
 class FourPillarPipeline:
     """四柱管线协调器。所有 10 个角色各司其职。"""
 
@@ -208,11 +242,60 @@ class FourPillarPipeline:
                 f"请检查任务是否合理或简化需求后重试。"
             )
 
-    @staticmethod
-    def _auto_approval_handler(tool: Any, tool_call: dict) -> "ApprovalDecision":
-        """管线自动批准所有工具调用（管线模式下无需用户交互确认）。"""
+    def _auto_approval_handler(self, tool: Any, tool_call: dict) -> "ApprovalDecision":
+        """管线自动批准工具调用，由子任务审批器负责额外边界约束。"""
         from .approval import ApprovalDecision
         return ApprovalDecision(True, "管线自动批准所有工具调用。")
+
+    @staticmethod
+    def _is_cyber_agent_debug_task(task_text: str) -> bool:
+        lowered = task_text.lower()
+        return any(keyword in lowered for keyword in CYBER_AGENT_TASK_KEYWORDS)
+
+    @staticmethod
+    def _is_boundary_probe(tool_call: dict) -> str | None:
+        tool_name = str(tool_call.get("name", ""))
+        args = tool_call.get("args", {})
+        if not isinstance(args, dict):
+            return None
+
+        haystack_parts = []
+        for key in ("command", "path", "working_directory"):
+            value = args.get(key)
+            if isinstance(value, str):
+                haystack_parts.append(value)
+        haystack = "\n".join(haystack_parts).lower()
+        if not haystack:
+            return None
+
+        if any(pattern in haystack for pattern in LOCAL_SECRET_PROBE_PATTERNS):
+            return "禁止在内部子任务中探测本机密钥、.env 或凭证配置。"
+
+        if any(pattern in haystack for pattern in LOCAL_PROJECT_PROBE_PATTERNS):
+            return "禁止在无关内部子任务中探测 cyber-agent 本地源码、历史会话或桌面端目录。"
+
+        if tool_name == "run_shell_command" and any(
+            pattern in haystack for pattern in BROAD_LOCAL_SEARCH_PATTERNS
+        ):
+            return "禁止在内部子任务中对本机 /home 或根目录做大范围搜索。"
+
+        return None
+
+    def _make_subtask_approval_handler(self, task_text: str) -> Any:
+        """为内部子任务创建带任务边界的审批器。"""
+        from .approval import ApprovalDecision
+
+        allow_project_probe = self._is_cyber_agent_debug_task(task_text)
+
+        def handler(tool: Any, tool_call: dict) -> "ApprovalDecision":
+            if not allow_project_probe:
+                reason = self._is_boundary_probe(tool_call)
+                if reason is not None:
+                    return ApprovalDecision(False, reason)
+            return self._auto_approval_handler(tool, tool_call)
+
+        handler.review_all_tools = True  # type: ignore[attr-defined]
+        return handler
 
     def _make_subtask_event_handler(
         self,
@@ -322,7 +405,9 @@ class FourPillarPipeline:
             result = sub_runner.run(
                 subtask_prompt, verbose=False,
                 event_handler=event_handler,
-                approval_handler=self._auto_approval_handler,
+                approval_handler=self._make_subtask_approval_handler(
+                    f"{role_label}\n{desc}\n{subtask_prompt}"
+                ),
             )
             usage = event_handler.get_token_usage()
             self.cumulative_input_tokens += usage["input_tokens"]
@@ -438,6 +523,11 @@ class FourPillarPipeline:
             "\n- 一步到位，避免分批读取——能一次读完的就不要分多次"
             "\n- 不需要用 run_shell_command 执行 # 注释来记录思路，直接在回复中说明"
             "\n- 每个工具有明确目的，不做多余的探测"
+            "\n\n任务边界："
+            "\n- 只围绕当前子任务、用户给出的目标、当前工作目录和明确提供的靶场地址/API 操作"
+            "\n- 不要为了寻找线索去读取 cyber-agent 本地源码、历史会话、桌面端代码、.env 或凭证配置"
+            "\n- 不要对 /home、/ 或无关目录做大范围 find/grep/cat"
+            "\n- 如果明确 API/目标连续失败，停止并报告失败原因和所需信息，不要转向无关本地项目排查"
         )
         return prompt
 
@@ -484,7 +574,9 @@ class FourPillarPipeline:
                     subtask_prompt,
                     verbose=False,
                     event_handler=event_handler,
-                    approval_handler=self._auto_approval_handler,
+                    approval_handler=self._make_subtask_approval_handler(
+                        f"{role_str}\n{desc}\n{subtask_prompt}"
+                    ),
                 )
                 # 收集并行子任务的 Token 用量（注意线程安全：每子任务独立 handler）
                 usage = event_handler.get_token_usage()

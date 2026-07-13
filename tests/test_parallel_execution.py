@@ -34,6 +34,8 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         self.assertIn("你是执行者", prompt)
         self.assertIn("读取 /etc/hosts 文件", prompt)
         self.assertIn("请直接调用工具完成", prompt)
+        self.assertIn("任务边界", prompt)
+        self.assertIn("不要为了寻找线索去读取 cyber-agent 本地源码", prompt)
 
     def test_with_context(self):
         """传入 ctx 时嵌入上下文段落。"""
@@ -306,6 +308,92 @@ class SequentialSubtaskIsolationTestCase(unittest.TestCase):
         self.assertFalse(
             any("请完成以下子任务" in msg.content for msg in self.main_runner.history)
         )
+
+
+class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
+    """测试内部子任务的任务边界审批。"""
+
+    def setUp(self):
+        self.runner = MagicMock()
+        self.runner.tools = []
+        self.runner.mode = "standard"
+        self.runner.allowed_roots = []
+        self.runner.command_registry = {}
+        self.runner.extra_allowed_paths = []
+        self.runner.configured_registry = {}
+        self.runner.capability_registry = None
+        self.runner.file_skills = []
+        self.runner.system_prompt = "系统提示"
+        self.runner.max_context_chars = None
+        self.runner.max_context_tokens = None
+        self.runner.context_keep_recent_messages = None
+        self.runner.context_summary_max_chars = None
+        self.pipeline = FourPillarPipeline(
+            runner=self.runner,
+            runtime_context={
+                "service_name": "deepseek",
+                "model_name": "deepseek-chat",
+                "api_key": "sk-test",
+                "base_url": "http://test:8000/v1",
+            },
+            renderer=MagicMock(),
+        )
+
+    def test_boundary_approval_blocks_unrelated_project_probe(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "TSec Benchmark 启动容器",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "grep -rn 'api' "
+                        "/home/my/cyber/pentest/cyber-agent-cli/src/cyber_agent"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("禁止", decision.reason)
+
+    def test_boundary_approval_blocks_secret_probe(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "TSec Benchmark 获取题目列表",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": "cat /home/my/cyber/pentest/cyber-agent-cli/.env",
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn(".env", decision.reason)
+
+    def test_boundary_approval_allows_cyber_agent_debug_task(self):
+        handler = self.pipeline._make_subtask_approval_handler(
+            "调试 cyber-agent 的 FourPillarPipeline history 污染问题",
+        )
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "grep -rn 'run(' "
+                        "/home/my/cyber/pentest/cyber-agent-cli/src/cyber_agent"
+                    ),
+                },
+            },
+        )
+
+        self.assertTrue(decision.approved)
 
 
 class SubtaskGroupingTestCase(unittest.TestCase):

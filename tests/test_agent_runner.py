@@ -116,6 +116,42 @@ class ApprovalFakeChatOpenAI:
         raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
 
 
+class ReadBoundaryReviewFakeChatOpenAI:
+    """用于测试 read 工具也能被边界审批器拒绝。"""
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.bound_tools = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = tools
+        return self
+
+    def stream(self, messages):
+        last_message = messages[-1]
+        if isinstance(last_message, HumanMessage):
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {
+                        "name": "read_text_file",
+                        "args": '{"path":"/tmp/secret.env"}',
+                        "id": "call_read",
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+            return
+
+        if isinstance(last_message, ToolMessage):
+            yield AIMessageChunk(content="读取审批结果:")
+            yield AIMessageChunk(content=str(last_message.content))
+            return
+
+        raise AssertionError(f"未处理的消息类型: {type(last_message)!r}")
+
+
 class InterruptibleFakeChatOpenAI:
     """
     用于中断测试的假模型。
@@ -797,6 +833,34 @@ class AgentRunnerTestCase(unittest.TestCase):
 
         self.assertIn("审批结果:", response)
         self.assertIn("测试中拒绝所有写入", response)
+
+    def test_runner_can_review_read_tools_when_handler_requests_it(self) -> None:
+        """
+        测试：管线边界审批器可要求 read 工具也经过拒绝审查。
+        """
+
+        @tool("read_text_file")
+        def read_text_file(path: str) -> str:
+            """读文件。"""
+            raise AssertionError("边界拒绝后不应真正执行读文件工具。")
+
+        read_text_file = attach_tool_risk(read_text_file, "read")
+
+        def reject_boundary(tool, tool_call):
+            return ApprovalDecision(False, "禁止读取内部配置。")
+
+        reject_boundary.review_all_tools = True
+
+        with patch("cyber_agent._lazy_imports.ChatOpenAI", ReadBoundaryReviewFakeChatOpenAI):
+            runner = AgentRunner([read_text_file])
+            response = runner.run(
+                "请读配置",
+                verbose=False,
+                approval_handler=reject_boundary,
+            )
+
+        self.assertIn("读取审批结果:", response)
+        self.assertIn("禁止读取内部配置", response)
 
 
     def test_runner_can_be_created_without_langchain_openai_until_model_is_used(self) -> None:

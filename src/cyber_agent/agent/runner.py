@@ -904,7 +904,13 @@ class AgentRunner:
 
         self.execution_controller.ensure_not_cancelled()
 
-        if self._tool_requires_approval(tool):
+        tool_requires_approval = self._tool_requires_approval(tool)
+        review_all_tools = bool(
+            approval_handler is not None
+            and getattr(approval_handler, "review_all_tools", False)
+        )
+
+        if tool_requires_approval:
             if event_handler is not None:
                 try:
                     event_handler(
@@ -941,6 +947,14 @@ class AgentRunner:
                     from ..logging import log_error
                     log_error("event_handler", f"APPROVAL_RESULT handler 异常", exc_info=True)
 
+            if not decision.approved:
+                return ToolMessage(
+                    content=f"❌ 审批未通过：{decision.reason}",
+                    name=tool_name,
+                    tool_call_id=str(tool_call.get("id", "")),
+                )
+        elif review_all_tools and approval_handler is not None:
+            decision = approval_handler(tool, tool_call)
             if not decision.approved:
                 return ToolMessage(
                     content=f"❌ 审批未通过：{decision.reason}",
