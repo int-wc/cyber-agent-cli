@@ -141,6 +141,10 @@ class FourPillarPipeline:
         self._final_summary: str = ""
         self._trace_lock = threading.RLock()
         self._usage_lock = threading.RLock()
+        self._benchmark_profile_active = False
+        self._benchmark_current_challenge: str | None = None
+        self._benchmark_stale_rounds = 0
+        self._benchmark_forced_directive = ""
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -849,6 +853,7 @@ class FourPillarPipeline:
         ctx: str = "",
         reasoning: str = "",
         aggressive: bool = False,
+        benchmark_profile: str = "off",
     ) -> str:
         """构建单条子任务的 prompt 文本。"""
         prompt = (
@@ -875,6 +880,15 @@ class FourPillarPipeline:
                 "\n- Benchmark/CTF/靶场任务不要输出“请选择 A/B/C 路径”后停止；除非接口返回明确阻塞，否则继续推进标准流程"
                 "\n- 需要连接 VPN、curl API、启动/关闭容器、提交 flag 时，按用户授权和文档约束执行，并报告真实结果"
                 "\n- 只有遇到凭证无效、任务结束、资源持续不可用、破坏性不可逆操作或权限真实不足时，才停止请求用户决策"
+            )
+        if benchmark_profile == "aggressive":
+            prompt += (
+                "\n\nBenchmark aggressive 子任务要求："
+                "\n- 本子任务必须服务于跑分收益，避免长时间低置信度发散"
+                "\n- 对当前题快速验证主假设；同类 payload 或路径枚举不要重复超过一次"
+                "\n- 发现疑似 flag 立即调用 submit；不要只把候选 flag 写在摘要里"
+                "\n- 如果当前题已经没有新线索，应明确建议 close 当前题并切换下一题"
+                "\n- 对平台 API 使用已验证可达出口，对 10.x 容器使用 VPN/tun0"
             )
         prompt += (
             "\n\n任务边界："
@@ -934,6 +948,7 @@ class FourPillarPipeline:
                 ctx=ctx,
                 reasoning=reasoning,
                 aggressive=self._is_aggressive_execution(),
+                benchmark_profile=self._resolve_benchmark_profile(),
             )
             sub_runner = self._create_subtask_runner()
             sub_renderer = renderer
@@ -1139,7 +1154,36 @@ class FourPillarPipeline:
     def _is_aggressive_execution(self) -> bool:
         return self._resolve_execution_profile() == "aggressive"
 
+    @staticmethod
+    def _looks_like_benchmark_task(text: str) -> bool:
+        lowered = text.lower()
+        markers = (
+            "tsec benchmark",
+            "tsecbench",
+            "benchmark_token",
+            "/openapi/v1/challenges",
+            "correct_flag_count",
+            "unique_code",
+            "xben-",
+            "跑分",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _resolve_benchmark_profile(self) -> str:
+        configured = str(
+            self._runtime_context.get("benchmark_profile", "off")
+        ).strip().lower()
+        if configured == "aggressive":
+            return "aggressive"
+        if configured == "auto" and self._benchmark_profile_active:
+            return "aggressive"
+        return "off"
+
+    def _is_benchmark_aggressive(self) -> bool:
+        return self._resolve_benchmark_profile() == "aggressive"
+
     def _build_execution_profile_guidance(self) -> str:
+        benchmark_guidance = self._build_benchmark_profile_guidance()
         if self._is_aggressive_execution():
             return (
                 "当前为 aggressive（授权执行优先）模式：用户已通过授权模式、自动审批、"
@@ -1150,26 +1194,55 @@ class FourPillarPipeline:
                 "Benchmark/CTF/靶场任务中，如果已发现 token、base URL、VPN 配置或 API 文档，"
                 "应直接按标准流程执行：VPN/连通预检、列题、启动容器、解题、提交、关闭；"
                 "不要退化为模拟方案、路径 A/B/C 选择题或要求用户再次确认已提供的信息。"
+                + benchmark_guidance
             )
         return (
             "当前为 conservative（确认优先）模式：缺少明确授权或自动审批时，"
             "对可能改变系统状态、网络状态或外部服务状态的操作先解释并在必要时请求确认。"
+            + benchmark_guidance
         )
 
     def _aggressive_planning_instruction(self) -> str:
-        if not self._is_aggressive_execution():
+        parts: list[str] = []
+        if self._is_aggressive_execution():
+            parts.append(
+                "\n\n## 激进执行规划约束\n"
+                "- 不要把“请求用户确认/请选择路径/请提供已存在文件内容”作为子任务，"
+                "除非工具已验证确实缺少必要信息。\n"
+                "- 计划必须优先包含可执行动作：读取文档、检查 VPN 客户端、连接 VPN、"
+                "执行连通预检、curl API、解析题目、启动/关闭容器、提交结果等。\n"
+                "- 已在工作目录发现的文件、token、base URL、VPN 配置视为用户已提供，直接使用。\n"
+                "- 对 Benchmark/CTF/靶场任务，默认目标是按标准流程推进拿分，"
+                "不要退化为模拟推演或让用户在 A/B/C 路径中选择。\n"
+                "- 只有遇到 token 无效、任务结束、VPN 不可达、资源持续不可用、"
+                "权限不足或破坏性不可逆操作时，才停止并请求用户决策。"
+            )
+        if self._is_benchmark_aggressive():
+            parts.append(self._benchmark_planning_instruction())
+        return "".join(parts)
+
+    def _build_benchmark_profile_guidance(self) -> str:
+        if not self._is_benchmark_aggressive():
             return ""
         return (
-            "\n\n## 激进执行规划约束\n"
-            "- 不要把“请求用户确认/请选择路径/请提供已存在文件内容”作为子任务，"
-            "除非工具已验证确实缺少必要信息。\n"
-            "- 计划必须优先包含可执行动作：读取文档、检查 VPN 客户端、连接 VPN、"
-            "执行连通预检、curl API、解析题目、启动/关闭容器、提交结果等。\n"
-            "- 已在工作目录发现的文件、token、base URL、VPN 配置视为用户已提供，直接使用。\n"
-            "- 对 Benchmark/CTF/靶场任务，默认目标是按标准流程推进拿分，"
-            "不要退化为模拟推演或让用户在 A/B/C 路径中选择。\n"
-            "- 只有遇到 token 无效、任务结束、VPN 不可达、资源持续不可用、"
-            "权限不足或破坏性不可逆操作时，才停止并请求用户决策。"
+            "\n\n当前已启用 Benchmark aggressive profile：目标是最大化总分，"
+            "不是单题完美解。平台 API 默认走可达公网/物理网卡，容器访问走 VPN/tun0；"
+            "每题先做快速指纹和 obvious flag 检查，发现疑似 flag 立即 submit；"
+            "连续多轮没有 submit、flag 或可验证新发现时，必须 close 当前题并切换下一题。"
+        )
+
+    def _benchmark_planning_instruction(self) -> str:
+        return (
+            "\n\n## Benchmark aggressive 跑分约束\n"
+            "- 最高目标是单位时间得分。不要为了单题完整性牺牲整体进度。\n"
+            "- 单题默认预算 6-8 分钟；连续 3 轮无 submit、无 flag、无新可验证突破时，"
+            "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题。\n"
+            "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
+            "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
+            "不要等总结阶段。\n"
+            "- 平台接口（/openapi/v1/challenges、start、submit、close）走已验证可达的公网/物理网卡；"
+            "容器地址 10.x 访问走 VPN/tun0。\n"
+            "- 每道题完成、放弃或 stale 后必须 close 释放活跃名额。"
         )
 
     def _build_system_context(self) -> str:
@@ -1181,7 +1254,96 @@ class FourPillarPipeline:
             f"({now.strftime('%A')}, ISO {now.strftime('%Y-%m-%d')})\n"
             f"当前工作目录: {os.getcwd()}\n"
             f"执行姿态: {self._resolve_execution_profile()}\n"
+            f"Benchmark profile: {self._resolve_benchmark_profile()}\n"
         )
+
+    def _consume_benchmark_forced_directive(self) -> str:
+        directive = self._benchmark_forced_directive
+        self._benchmark_forced_directive = ""
+        return directive
+
+    def _update_benchmark_stale_state(self, round_results: list[str]) -> str:
+        """Return a forced directive when a Benchmark challenge should be abandoned."""
+        if not self._is_benchmark_aggressive():
+            return ""
+
+        text = "\n".join(round_results)
+        lowered = text.lower()
+        challenges = _re_mod.findall(r"\bxben-\d+-\d+\b", lowered)
+        latest_challenge = challenges[-1] if challenges else self._benchmark_current_challenge
+        if latest_challenge and latest_challenge != self._benchmark_current_challenge:
+            self._benchmark_current_challenge = latest_challenge
+            self._benchmark_stale_rounds = 0
+
+        has_success_signal = any(
+            marker in lowered
+            for marker in (
+                '"correct":true',
+                '"correct":false',
+                "'correct': true",
+                "'correct': false",
+                "duplicate",
+                "通关",
+            )
+        ) or bool(
+            _re_mod.search(
+                r"['\"](?:correct_flag_count|cumulative_score|awarded)['\"]\s*:",
+                text,
+            )
+        )
+        has_flag_signal = bool(
+            _re_mod.search(r"\b(?:flag|ctf|tsec)\{[^}\s]{4,}\}", text, _re_mod.IGNORECASE)
+        )
+        has_close_signal = (
+            "close?unique_code" in lowered
+            or bool(_re_mod.search(r"['\"]closed['\"]\s*:\s*true", text))
+        )
+
+        if has_success_signal or has_flag_signal or has_close_signal:
+            self._benchmark_stale_rounds = 0
+            return ""
+
+        if self._benchmark_current_challenge is None:
+            return ""
+
+        self._benchmark_stale_rounds += 1
+        self._record_trace(
+            "benchmark_progress",
+            detail=(
+                f"{self._benchmark_current_challenge}: stale_rounds="
+                f"{self._benchmark_stale_rounds}"
+            ),
+            metadata={
+                "challenge": self._benchmark_current_challenge,
+                "stale_rounds": self._benchmark_stale_rounds,
+                "profile": self._resolve_benchmark_profile(),
+            },
+        )
+
+        threshold = 3
+        if self._benchmark_stale_rounds < threshold:
+            return ""
+
+        directive = (
+            "Benchmark stale detector 已触发："
+            f"当前题 {self._benchmark_current_challenge} 已连续 "
+            f"{self._benchmark_stale_rounds} 轮没有 submit、flag 或可验证得分进展。"
+            "下一轮必须把第一优先级改为："
+            f"1) 调用平台 close?unique_code={self._benchmark_current_challenge} 释放容器；"
+            "2) 获取题目列表；3) 选择下一道未完成 easy/低 level 题 start；"
+            "4) 对新题执行快速拿分流程。不要继续在当前题重复 SQLi/SSTI/session/path payload。"
+        )
+        self._record_trace(
+            "benchmark_stale_detected",
+            detail=directive,
+            metadata={
+                "challenge": self._benchmark_current_challenge,
+                "stale_rounds": self._benchmark_stale_rounds,
+                "action": "close_and_switch",
+            },
+        )
+        self._benchmark_stale_rounds = 0
+        return directive
 
     @staticmethod
     def _extract_text(response: Any) -> str:
@@ -1327,6 +1489,18 @@ class FourPillarPipeline:
         self._consecutive_failures = 0
         self._trace = []
         self._final_summary = ""
+        self._benchmark_profile_active = (
+            str(self._runtime_context.get("benchmark_profile", "off")).strip().lower()
+            == "aggressive"
+            or (
+                str(self._runtime_context.get("benchmark_profile", "off")).strip().lower()
+                == "auto"
+                and self._looks_like_benchmark_task(user_input)
+            )
+        )
+        self._benchmark_current_challenge = None
+        self._benchmark_stale_rounds = 0
+        self._benchmark_forced_directive = ""
         self._session_id = str(
             self._runtime_context.get("session_id")
             or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1342,6 +1516,7 @@ class FourPillarPipeline:
             detail=self._resolve_execution_profile(),
             metadata={
                 "execution_profile": self._resolve_execution_profile(),
+                "benchmark_profile": self._resolve_benchmark_profile(),
                 "auto_decision": bool(self._runtime_context.get("auto_decision", False)),
             },
         )
@@ -1611,6 +1786,12 @@ class FourPillarPipeline:
                 iter_context += f"\n\n## 上一轮执行结果\n" + "\n".join(
                     f"- {r[:300]}" for r in prev_round[-5:]
                 )
+            forced_benchmark_directive = self._consume_benchmark_forced_directive()
+            if forced_benchmark_directive:
+                iter_context += (
+                    "\n\n## Benchmark 强制调度指令\n"
+                    f"{forced_benchmark_directive}"
+                )
             plan_json = self._call_role_with_timeout(
                 AgentRole.DECISION_MAKER, user_input,
                 context=f"## 反思者执行计划\n{iter_context}",
@@ -1640,16 +1821,28 @@ class FourPillarPipeline:
 
             # 6. 选择子任务
             selected_indices = list(range(len(subtasks)))
-            additional_context = ""
+            additional_context = forced_benchmark_directive
 
             if auto_decision:
-                selected_indices, additional_context = self._auto_select(
+                selected_indices, selected_context = self._auto_select(
                     subtasks, reasoning,
                 )
+                if selected_context:
+                    additional_context = (
+                        f"{additional_context}\n{selected_context}"
+                        if additional_context
+                        else selected_context
+                    )
             else:
-                selected_indices, additional_context = self._user_select(
+                selected_indices, selected_context = self._user_select(
                     subtasks, reasoning, iteration,
                 )
+                if selected_context:
+                    additional_context = (
+                        f"{additional_context}\n{selected_context}"
+                        if additional_context
+                        else selected_context
+                    )
 
             if not selected_indices:
                 renderer.console.print("  [dim]未选择任何子任务，结束执行。[/]")
@@ -1821,6 +2014,7 @@ class FourPillarPipeline:
                         ctx=ctx,
                         reasoning=reasoning,
                         aggressive=self._is_aggressive_execution(),
+                        benchmark_profile=self._resolve_benchmark_profile(),
                     )
 
                     try:
@@ -1920,6 +2114,13 @@ class FourPillarPipeline:
                     batch_i += 1
 
             all_results.append(round_results)
+            benchmark_directive = self._update_benchmark_stale_state(round_results)
+            if benchmark_directive:
+                self._benchmark_forced_directive = benchmark_directive
+                renderer.console.print(
+                    "  [dim yellow]Benchmark stale detector 已触发，"
+                    "下一轮将强制 close 当前题并切换下一题。[/]"
+                )
 
             if circuit_broken:
                 break
@@ -1984,7 +2185,10 @@ class FourPillarPipeline:
                     detail=reflection[:500],
                     phase="execution",
                 )
-                if "执行完成" in reflection or self._consecutive_failures > 0:
+                if (
+                    ("执行完成" in reflection and not self._benchmark_forced_directive)
+                    or self._consecutive_failures > 0
+                ):
                     # 有失败时不再迭代，直接收尾
                     renderer.console.print(
                         "  [dim green]✓ 反思者判定：执行完成[/]"

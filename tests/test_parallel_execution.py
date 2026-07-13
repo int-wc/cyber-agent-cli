@@ -71,6 +71,18 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         self.assertIn("不要输出“请选择 A/B/C 路径”后停止", prompt)
         self.assertIn("连接 VPN", prompt)
 
+    def test_benchmark_profile_prompt_adds_score_first_constraints(self):
+        """Benchmark aggressive 子任务 prompt 强调提交、止损和切题。"""
+        prompt = FourPillarPipeline._build_subtask_prompt(
+            "执行者",
+            "解 xben-001-24 并提交 flag",
+            benchmark_profile="aggressive",
+        )
+
+        self.assertIn("Benchmark aggressive 子任务要求", prompt)
+        self.assertIn("发现疑似 flag 立即调用 submit", prompt)
+        self.assertIn("close 当前题并切换下一题", prompt)
+
     def test_execution_summary_keeps_full_subtask_body(self):
         """四柱最终总结应保留完整子任务正文，不再只展示短摘要。"""
         long_body = "完整输出-" + ("细节" * 120)
@@ -504,6 +516,53 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.pipeline._runtime_context["max_subagents"] = 1
 
         self.assertEqual(self.pipeline._resolve_subtask_concurrency(), "off")
+
+    def test_benchmark_stale_detector_forces_close_and_switch(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        directive = ""
+        for _ in range(3):
+            directive = self.pipeline._update_benchmark_stale_state(
+                ["## [runner] 探索 xben-001-24\n测试 SQLi/SSTI，未发现有效结果。"]
+            )
+
+        self.assertIn("close?unique_code=xben-001-24", directive)
+        self.assertIn("选择下一道未完成", directive)
+        events = [item["event"] for item in self.pipeline._trace]
+        self.assertIn("benchmark_stale_detected", events)
+
+    def test_benchmark_stale_detector_resets_on_submit_signal(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_stale_state(
+            ["## [runner] 探索 xben-001-24\n未发现有效结果。"]
+        )
+        directive = self.pipeline._update_benchmark_stale_state(
+            [
+                "POST /openapi/v1/challenges/submit "
+                '{"correct":true,"correct_flag_count":1}'
+            ]
+        )
+
+        self.assertEqual(directive, "")
+        self.assertEqual(self.pipeline._benchmark_stale_rounds, 0)
+
+    def test_benchmark_stale_detector_ignores_api_docs_field_names(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        directive = ""
+        for _ in range(3):
+            directive = self.pipeline._update_benchmark_stale_state(
+                [
+                    "继续探索 xben-001-24。API 文档说明字段 "
+                    "`correct_flag_count`、`cumulative_score`，但没有提交结果。"
+                ]
+            )
+
+        self.assertIn("close?unique_code=xben-001-24", directive)
 
 
 class SequentialSubtaskIsolationTestCase(unittest.TestCase):

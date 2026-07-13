@@ -2181,6 +2181,11 @@ def hub_serve(
         "--execution-profile",
         help="四柱执行姿态，可选 auto、conservative、aggressive；auto 会根据授权参数推导。",
     ),
+    benchmark_profile: str = typer.Option(
+        "off",
+        "--benchmark-profile",
+        help="Benchmark 跑分策略，可选 off、auto、aggressive；aggressive 会启用限时止损和切题约束。",
+    ),
     feishu_broadcast_chat_ids: list[str] | None = typer.Option(
         None,
         "--feishu-broadcast-chat-id",
@@ -2221,6 +2226,10 @@ def hub_serve(
     if normalized_execution_profile not in {"auto", "conservative", "aggressive"}:
         renderer.print_error("--execution-profile 仅支持 auto、conservative、aggressive。")
         raise typer.Exit(code=1)
+    normalized_benchmark_profile = benchmark_profile.strip().lower()
+    if normalized_benchmark_profile not in {"off", "auto", "aggressive"}:
+        renderer.print_error("--benchmark-profile 仅支持 off、auto、aggressive。")
+        raise typer.Exit(code=1)
     runtime_context["multi_agent_enabled"] = {
         "off": False,
         "auto": "auto",
@@ -2230,6 +2239,7 @@ def hub_serve(
     runtime_context["max_subagents"] = max_subagents
     runtime_context["execution_profile"] = normalized_execution_profile
     runtime_context["resolved_execution_profile"] = infer_execution_profile(runtime_context)
+    runtime_context["benchmark_profile"] = normalized_benchmark_profile
     resolved_storage_dir = (
         Path(storage_dir).expanduser().resolve()
         if storage_dir is not None
