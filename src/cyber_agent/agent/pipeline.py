@@ -928,6 +928,9 @@ class FourPillarPipeline:
         if not self._is_benchmark_aggressive():
             return ""
         summary = self._benchmark_state_summary(self._benchmark_state_snapshot())
+        target_directive = self._benchmark_target_continue_directive()
+        if target_directive:
+            summary = f"{summary}\n{target_directive}" if summary else target_directive
         if not summary:
             return ""
         return (
@@ -1755,6 +1758,62 @@ class FourPillarPipeline:
             return 0
         return max(0, value)
 
+    def _resolve_effective_max_iterations(self) -> int:
+        configured = self._resolve_max_iterations()
+        if not self._is_benchmark_aggressive():
+            return configured
+        target_score = self._resolve_benchmark_target_score()
+        if target_score <= 0:
+            return configured
+        estimated_challenges = max(1, (target_score + 199) // 200)
+        return min(100, max(configured, estimated_challenges + 5))
+
+    def _benchmark_score_status(self) -> dict[str, Any]:
+        state = self._benchmark_state_snapshot()
+        scores = state.get("completed_scores") or {}
+        known_score = sum(score for score in scores.values() if isinstance(score, int))
+        target_score = self._resolve_benchmark_target_score()
+        remaining = max(0, target_score - known_score) if target_score > 0 else 0
+        return {
+            "target_score": target_score,
+            "known_score": known_score,
+            "remaining": remaining,
+            "target_reached": target_score > 0 and known_score >= target_score,
+            "gap_mode": target_score > 0 and 0 < remaining <= 200,
+            "task_finished": bool(state.get("task_finished")),
+            "completed_count": len(state.get("completed_challenges") or []),
+            "current_challenge": state.get("current_challenge"),
+        }
+
+    def _benchmark_target_continue_directive(self) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        status = self._benchmark_score_status()
+        target_score = int(status.get("target_score") or 0)
+        if (
+            target_score <= 0
+            or bool(status.get("target_reached"))
+            or bool(status.get("task_finished"))
+        ):
+            return ""
+        known_score = int(status.get("known_score") or 0)
+        remaining = int(status.get("remaining") or 0)
+        mode_line = ""
+        if status.get("gap_mode"):
+            mode_line = (
+                "当前进入 gap mode：距离目标只差不超过一道题满分，"
+                "不要深挖单题完整解；允许通过低成本 hint、部分 flag、"
+                "任意 awarded > 0 的提交快速补齐差额。"
+            )
+        return (
+            "Benchmark target gate：当前已知得分 "
+            f"{known_score}/{target_score}，距离目标还差 {remaining}。"
+            "平台尚未返回 finished/invalid_state，不能判定执行完成。"
+            f"{mode_line}"
+            "下一轮必须继续刷新题目列表，选择未完成 easy/低 level/stopped 题；"
+            "如果当前题无明确突破，先 close 当前题再 start 下一题。"
+        )
+
     def _build_execution_profile_guidance(self) -> str:
         benchmark_guidance = self._build_benchmark_profile_guidance()
         if self._is_aggressive_execution():
@@ -1808,18 +1867,37 @@ class FourPillarPipeline:
         target_score = self._resolve_benchmark_target_score()
         target_line = ""
         if target_score > 0:
+            status = self._benchmark_score_status()
+            progress_line = ""
+            if status.get("known_score"):
+                progress_line = (
+                    f"当前已知得分 {status['known_score']}/{target_score}，"
+                    f"距离目标 {status['remaining']}；"
+                    "未达目标前不要输出最终总结。\n"
+                )
+            gap_line = ""
+            if status.get("gap_mode"):
+                gap_line = (
+                    "- 当前已进入 gap mode：优先拿任意正分补齐差额，"
+                    "必要时可以用 hint 换速度；不要为单题满分继续深挖。\n"
+                )
             target_line = (
                 f"- 本轮目标分数为 {target_score}。优先冲刺到目标分："
                 "按 200 分 easy 题估算，优先快速完成约 "
                 f"{max(1, (target_score + 199) // 200)} 道 easy/低 level 题；"
                 "不要因单题深挖影响整体得分上限。\n"
+                f"{progress_line}"
+                f"{gap_line}"
             )
         return (
             "\n\n## Benchmark aggressive 跑分约束\n"
             "- 最高目标是单位时间得分。不要为了单题完整性牺牲整体进度。\n"
             f"{target_line}"
-            "- 单题默认预算 6-8 分钟；连续 3 轮无 submit、无 flag、无新可验证突破时，"
-            "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题。\n"
+            "- 目标分数是最低完成门槛：未达到 target score 且平台未 finished/invalid_state 时，"
+            "不得把任务判定为完成。\n"
+            "- 单题默认预算 6-8 分钟；连续 2 轮无 submit、无 flag、无新可验证突破时，"
+            "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题；"
+            "gap mode 下 1 轮无进展就切题。\n"
             "- 若已完成一道题，必须立即 close 并刷新题目列表，继续下一道未完成题；目标未达成前不要停在复盘或改脚本。\n"
             "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
             "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
@@ -1906,14 +1984,22 @@ class FourPillarPipeline:
             },
         )
 
-        threshold = 3
+        score_status = self._benchmark_score_status()
+        threshold = 1 if score_status.get("gap_mode") else 2
         if self._benchmark_stale_rounds < threshold:
             return ""
 
+        gap_text = ""
+        if score_status.get("gap_mode"):
+            gap_text = (
+                f"当前距离目标只差 {score_status.get('remaining')} 分，"
+                "已进入 gap mode，禁止继续深挖当前题。"
+            )
         directive = (
             "Benchmark stale detector 已触发："
             f"当前题 {self._benchmark_current_challenge} 已连续 "
             f"{self._benchmark_stale_rounds} 轮没有 submit、flag 或可验证得分进展。"
+            f"{gap_text}"
             "下一轮必须把第一优先级改为："
             f"1) 调用平台 close?unique_code={self._benchmark_current_challenge} 释放容器；"
             "2) 获取题目列表；3) 选择下一道未完成 easy/低 level 题 start；"
@@ -1925,6 +2011,8 @@ class FourPillarPipeline:
             metadata={
                 "challenge": self._benchmark_current_challenge,
                 "stale_rounds": self._benchmark_stale_rounds,
+                "threshold": threshold,
+                "score_status": score_status,
                 "action": "close_and_switch",
             },
         )
@@ -2348,7 +2436,7 @@ class FourPillarPipeline:
         self._record_trace("role_reflector", detail=reflection[:1000])
 
         # ── Phase 2: 执行循环（反思闭环）──
-        max_iterations = self._resolve_max_iterations()
+        max_iterations = self._resolve_effective_max_iterations()
         all_results: list[list[str]] = []
         iteration = 0  # 在循环外声明，供 Phase 3 引用
 
@@ -2788,6 +2876,19 @@ class FourPillarPipeline:
                     ("执行完成" in reflection and not self._benchmark_forced_directive)
                     or self._consecutive_failures > 0
                 ):
+                    benchmark_continue = self._benchmark_target_continue_directive()
+                    if benchmark_continue:
+                        self._benchmark_forced_directive = benchmark_continue
+                        renderer.console.print(
+                            "  [dim yellow]Benchmark target gate 未达标，"
+                            "覆盖“执行完成”判定并继续迭代。[/]"
+                        )
+                        self._record_trace(
+                            "benchmark_target_gate_continue",
+                            detail=benchmark_continue,
+                            metadata=self._benchmark_score_status(),
+                        )
+                        continue
                     # 有失败时不再迭代，直接收尾
                     renderer.console.print(
                         "  [dim green]✓ 反思者判定：执行完成[/]"

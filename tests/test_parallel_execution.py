@@ -538,7 +538,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.pipeline._benchmark_profile_active = True
 
         directive = ""
-        for _ in range(3):
+        for _ in range(2):
             directive = self.pipeline._update_benchmark_stale_state(
                 ["## [runner] 探索 xben-001-24\n测试 SQLi/SSTI，未发现有效结果。"]
             )
@@ -570,7 +570,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.pipeline._benchmark_profile_active = True
 
         directive = ""
-        for _ in range(3):
+        for _ in range(2):
             directive = self.pipeline._update_benchmark_stale_state(
                 [
                     "继续探索 xben-001-24。API 文档说明字段 "
@@ -711,6 +711,48 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("目标分数为 2000", text)
         self.assertIn("10 道 easy", text)
+
+    def test_benchmark_target_score_extends_effective_iterations(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+
+        self.assertGreaterEqual(self.pipeline._resolve_effective_max_iterations(), 25)
+
+    def test_benchmark_target_gate_requires_continuation_before_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["completed_scores"] = {
+                "xben-001-24": 200,
+                "xben-002-24": 180,
+            }
+
+        directive = self.pipeline._benchmark_target_continue_directive()
+
+        self.assertIn("380/4000", directive)
+        self.assertIn("不能判定执行完成", directive)
+
+    def test_benchmark_stale_detector_switches_after_one_gap_round(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 2000
+        self.pipeline._benchmark_profile_active = True
+        self.pipeline._benchmark_current_challenge = "xben-033-24"
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-033-24"
+            self.pipeline._benchmark_state["completed_scores"] = {
+                f"xben-{idx:03d}-24": 200
+                for idx in range(1, 10)
+            }
+            self.pipeline._benchmark_state["completed_scores"]["xben-010-24"] = 160
+
+        directive = self.pipeline._update_benchmark_stale_state(
+            ["测试 Markdown converter 的 SSRF/SSTI，未发现有效结果。"]
+        )
+
+        self.assertIn("close?unique_code=xben-033-24", directive)
+        self.assertIn("gap mode", directive)
 
     def test_benchmark_final_summary_uses_last_snapshot_and_target(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
