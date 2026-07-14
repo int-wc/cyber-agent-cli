@@ -633,6 +633,11 @@ class FourPillarPipeline:
         output = self._extract_output_from_tool_result(content)
         combined = f"{command}\n{output}"
         lowered = combined.lower()
+        command_lowered = command.lower()
+        is_platform_challenges_command = "/openapi/v1/challenges" in command_lowered
+        is_platform_submit_command = (
+            is_platform_challenges_command and "/openapi/v1/challenges/submit" in command_lowered
+        )
         updates: dict[str, Any] = {}
 
         tun_match = _re_mod.search(
@@ -659,7 +664,7 @@ class FourPillarPipeline:
             if used_interface and used_interface != "tun0":
                 updates["api_interface"] = used_interface
 
-        if "invalid_state" in lowered and "finished" in lowered:
+        if is_platform_challenges_command and "invalid_state" in lowered and "finished" in lowered:
             updates["task_finished"] = True
 
         completed: set[str] = set()
@@ -670,7 +675,8 @@ class FourPillarPipeline:
         last_score: int | None = None
         challenges_snapshot: list[dict[str, Any]] | None = None
 
-        for value in self._iter_json_fragments(output):
+        json_fragments = self._iter_json_fragments(output) if is_platform_challenges_command else []
+        for value in json_fragments:
             if isinstance(value, dict):
                 code = value.get("unique_code")
                 if isinstance(code, str) and _re_mod.fullmatch(r"xben-\d+-\d+", code):
@@ -695,10 +701,10 @@ class FourPillarPipeline:
                         current_challenge = submit_code
                     awarded = value.get("awarded")
                     score = value.get("cumulative_score")
-                    if isinstance(awarded, int) and submit_code:
-                        completed_scores[submit_code] = awarded
-                    elif isinstance(score, int) and submit_code:
+                    if isinstance(score, int) and submit_code:
                         completed_scores[submit_code] = score
+                    elif isinstance(awarded, int) and submit_code:
+                        completed_scores[submit_code] = awarded
                     if isinstance(score, int):
                         last_score = score
 
@@ -708,7 +714,7 @@ class FourPillarPipeline:
                         completed.add(code)
                         total_score = value.get("total_score")
                         if isinstance(total_score, int):
-                            completed_scores[code] = total_score
+                            completed_scores.setdefault(code, total_score)
 
             elif isinstance(value, list):
                 if value and all(
@@ -726,7 +732,7 @@ class FourPillarPipeline:
                         completed.add(code)
                         total_score = item.get("total_score")
                         if isinstance(total_score, int):
-                            completed_scores[code] = total_score
+                            completed_scores.setdefault(code, total_score)
                     if item.get("container_status") == "available":
                         addrs = item.get("container_addr")
                         if isinstance(addrs, list) and addrs:
@@ -755,7 +761,11 @@ class FourPillarPipeline:
             score_map = dict(self._benchmark_state.get("completed_scores", {}))
             completed_set.update(completed)
             closed_set.update(closed)
-            score_map.update(completed_scores)
+            for code, score in completed_scores.items():
+                if is_platform_submit_command:
+                    score_map[code] = score
+                else:
+                    score_map.setdefault(code, score)
             if challenges_snapshot is not None:
                 self._benchmark_state["last_challenges_snapshot"] = challenges_snapshot
                 snapshot_completed = {
@@ -772,7 +782,7 @@ class FourPillarPipeline:
                         and code in completed_set
                         and isinstance(total_score, int)
                     ):
-                        score_map[code] = total_score
+                        score_map.setdefault(code, total_score)
                 active = {}
                 for item in challenges_snapshot:
                     code = item.get("unique_code")
