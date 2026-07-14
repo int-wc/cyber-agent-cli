@@ -145,6 +145,24 @@ class FourPillarPipeline:
         self._benchmark_current_challenge: str | None = None
         self._benchmark_stale_rounds = 0
         self._benchmark_forced_directive = ""
+        self._benchmark_state_lock = threading.RLock()
+        self._benchmark_state: dict[str, Any] = self._new_benchmark_state()
+
+    @staticmethod
+    def _new_benchmark_state() -> dict[str, Any]:
+        return {
+            "vpn_connected": False,
+            "tun_interface": None,
+            "tun_ip": None,
+            "vpn_config": None,
+            "api_interface": None,
+            "task_finished": False,
+            "current_challenge": None,
+            "active_containers": {},
+            "completed_challenges": set(),
+            "closed_challenges": set(),
+            "last_score": None,
+        }
 
     # ── LLM 管理 ──
     def _get_llm(self) -> Any:
@@ -457,6 +475,316 @@ class FourPillarPipeline:
         return ApprovalDecision(True, "管线自动批准所有工具调用。")
 
     @staticmethod
+    def _extract_tool_text(tool_call: dict) -> str:
+        args = tool_call.get("args", {})
+        if not isinstance(args, dict):
+            return ""
+        parts: list[str] = []
+        for key in ("command", "path", "working_directory", "url"):
+            value = args.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _command_uses_interface(command: str) -> str | None:
+        match = _re_mod.search(r"--interface(?:=|\s+)([^\s'\"\\]+)", command)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_unique_code(text: str) -> str | None:
+        match = _re_mod.search(r"\bunique_code[\"'=:/\s]+(xben-\d+-\d+)\b", text)
+        if match:
+            return match.group(1)
+        match = _re_mod.search(r"\b(xben-\d+-\d+)\b", text)
+        return match.group(1) if match else None
+
+    def _benchmark_tool_guard(self, tool_call: dict) -> str | None:
+        """Block Benchmark actions that are known to waste time or corrupt state."""
+        if not self._is_benchmark_aggressive():
+            return None
+
+        tool_name = str(tool_call.get("name", ""))
+        if tool_name != "run_shell_command":
+            return None
+
+        command = self._extract_tool_text(tool_call)
+        lowered = command.lower()
+        if not command:
+            return None
+
+        with self._benchmark_state_lock:
+            state = dict(self._benchmark_state)
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            active = dict(self._benchmark_state.get("active_containers", {}))
+
+        if state.get("task_finished") and (
+            "tsecbench.zc.tencent.com" in lowered
+            or "/openapi/v1/challenges" in lowered
+            or "10.0." in lowered
+        ):
+            return "Benchmark 任务已返回 invalid_state/finished，禁止继续调用平台或靶场容器。"
+
+        if "openvpn" in lowered and ("--config" in lowered or ".ovpn" in lowered):
+            if state.get("vpn_connected"):
+                tun = state.get("tun_interface") or "tun0"
+                ip = state.get("tun_ip") or "已分配 IP"
+                return (
+                    f"VPN 已连接（{tun} {ip}），禁止重复启动 OpenVPN；"
+                    "直接复用现有 VPN 状态继续解题。"
+                )
+
+        is_platform_api = (
+            "tsecbench.zc.tencent.com" in lowered
+            or "/openapi/v1/challenges" in lowered
+        )
+        if is_platform_api:
+            used_interface = self._command_uses_interface(command)
+            if used_interface == "tun0":
+                api_interface = state.get("api_interface") or "物理网卡"
+                return (
+                    "平台 API 禁止走 tun0；tun0 只用于访问 10.x 容器。"
+                    f"请改用 --interface {api_interface} 并携带 BENCHMARK_TOKEN。"
+                )
+            if state.get("api_interface") and used_interface is None:
+                return (
+                    "已确认平台 API 需要显式绑定出口，禁止不带 --interface 调用平台 API；"
+                    f"请使用 --interface {state['api_interface']}。"
+                )
+            if "authorization:" in lowered and "benchmark_token:" not in lowered:
+                return (
+                    "TSec Benchmark 平台认证头必须是 BENCHMARK_TOKEN，"
+                    "不要使用 Authorization: Bearer。"
+                )
+
+            if "/challenges/start" in lowered:
+                code = self._extract_unique_code(command)
+                if code in completed:
+                    return f"{code} 已确认通关，禁止重复 start。"
+                if code in closed:
+                    return f"{code} 已在本轮放弃/关闭，禁止回头重复 start；请选择下一道未完成题。"
+
+        for code, addrs in active.items():
+            if code in completed or code in closed:
+                for addr in addrs or []:
+                    if isinstance(addr, str) and addr and addr in command:
+                        return (
+                            f"{code} 的容器地址 {addr} 已不应继续探测；"
+                            "请切换到当前活跃题或获取最新题目列表。"
+                        )
+
+        return None
+
+    @staticmethod
+    def _extract_command_from_tool_result(content: str) -> str:
+        match = _re_mod.search(r"命令:\s*(.*?)\n工作目录:", content, _re_mod.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _extract_output_from_tool_result(content: str) -> str:
+        match = _re_mod.search(r"\n输出:\n(.*)$", content, _re_mod.DOTALL)
+        return match.group(1).strip() if match else content
+
+    @staticmethod
+    def _iter_json_fragments(text: str) -> list[Any]:
+        decoder = json.JSONDecoder()
+        results: list[Any] = []
+        for idx, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(text[idx:])
+            except Exception:
+                continue
+            results.append(value)
+        return results
+
+    def _update_benchmark_runtime_state(self, content: str) -> None:
+        if not self._is_benchmark_aggressive() or not content:
+            return
+
+        command = self._extract_command_from_tool_result(content)
+        output = self._extract_output_from_tool_result(content)
+        combined = f"{command}\n{output}"
+        lowered = combined.lower()
+        updates: dict[str, Any] = {}
+
+        tun_match = _re_mod.search(
+            r"\b(tun\d+):[\s\S]{0,240}?\binet\s+([0-9.]+)/\d+",
+            combined,
+        )
+        if tun_match:
+            updates["vpn_connected"] = True
+            updates["tun_interface"] = tun_match.group(1)
+            updates["tun_ip"] = tun_match.group(2)
+
+        vpn_config = _re_mod.search(r"openvpn\s+--config\s+([^\s]+\.ovpn)", command)
+        if vpn_config:
+            updates["vpn_config"] = vpn_config.group(1)
+
+        if (
+            "tsecbench.zc.tencent.com" in lowered
+            and "/openapi/v1/challenges" in lowered
+            and "退出码: 0" in content
+            and "invalid_state" not in lowered
+            and "task_not_found" not in lowered
+        ):
+            used_interface = self._command_uses_interface(command)
+            if used_interface and used_interface != "tun0":
+                updates["api_interface"] = used_interface
+
+        if "invalid_state" in lowered and "finished" in lowered:
+            updates["task_finished"] = True
+
+        completed: set[str] = set()
+        closed: set[str] = set()
+        active_updates: dict[str, list[str]] = {}
+        current_challenge: str | None = None
+        last_score: int | None = None
+
+        for value in self._iter_json_fragments(output):
+            if isinstance(value, dict):
+                code = value.get("unique_code")
+                if isinstance(code, str) and _re_mod.fullmatch(r"xben-\d+-\d+", code):
+                    current_challenge = code
+                    addrs = value.get("container_addr")
+                    if isinstance(addrs, list):
+                        active_updates[code] = [str(addr) for addr in addrs]
+                    if value.get("closed") is True:
+                        closed.add(code)
+
+                if value.get("correct") is True:
+                    submit_code = self._extract_unique_code(command)
+                    if submit_code:
+                        completed.add(submit_code)
+                        current_challenge = submit_code
+                    score = value.get("cumulative_score")
+                    if isinstance(score, int):
+                        last_score = score
+
+                if value.get("is_completed") is True:
+                    code = value.get("unique_code")
+                    if isinstance(code, str):
+                        completed.add(code)
+
+            elif isinstance(value, list):
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    code = item.get("unique_code")
+                    if not isinstance(code, str):
+                        continue
+                    if item.get("is_completed") is True:
+                        completed.add(code)
+                    if item.get("container_status") == "available":
+                        addrs = item.get("container_addr")
+                        if isinstance(addrs, list):
+                            active_updates[code] = [str(addr) for addr in addrs]
+                            current_challenge = code
+
+        state_changed = bool(updates or completed or closed or active_updates or current_challenge or last_score is not None)
+        if not state_changed:
+            return
+
+        with self._benchmark_state_lock:
+            self._benchmark_state.update(updates)
+            active = dict(self._benchmark_state.get("active_containers", {}))
+            active.update(active_updates)
+            completed_set = set(self._benchmark_state.get("completed_challenges", set()))
+            closed_set = set(self._benchmark_state.get("closed_challenges", set()))
+            completed_set.update(completed)
+            closed_set.update(closed)
+            for code in completed_set | closed_set:
+                active.pop(code, None)
+            self._benchmark_state["active_containers"] = active
+            self._benchmark_state["completed_challenges"] = completed_set
+            self._benchmark_state["closed_challenges"] = closed_set
+            if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
+                self._benchmark_state["current_challenge"] = current_challenge
+                self._benchmark_current_challenge = current_challenge
+            if last_score is not None:
+                self._benchmark_state["last_score"] = last_score
+            snapshot = self._benchmark_state_snapshot_unlocked()
+
+        self._record_trace(
+            "benchmark_state_updated",
+            detail=self._benchmark_state_summary(snapshot),
+            metadata=snapshot,
+        )
+
+    def _benchmark_state_snapshot_unlocked(self) -> dict[str, Any]:
+        return {
+            "vpn_connected": bool(self._benchmark_state.get("vpn_connected")),
+            "tun_interface": self._benchmark_state.get("tun_interface"),
+            "tun_ip": self._benchmark_state.get("tun_ip"),
+            "vpn_config": self._benchmark_state.get("vpn_config"),
+            "api_interface": self._benchmark_state.get("api_interface"),
+            "task_finished": bool(self._benchmark_state.get("task_finished")),
+            "current_challenge": self._benchmark_state.get("current_challenge"),
+            "active_containers": dict(self._benchmark_state.get("active_containers", {})),
+            "completed_challenges": sorted(self._benchmark_state.get("completed_challenges", set())),
+            "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
+            "last_score": self._benchmark_state.get("last_score"),
+        }
+
+    def _benchmark_state_snapshot(self) -> dict[str, Any]:
+        with self._benchmark_state_lock:
+            return self._benchmark_state_snapshot_unlocked()
+
+    @staticmethod
+    def _benchmark_state_summary(state: dict[str, Any]) -> str:
+        parts: list[str] = []
+        if state.get("task_finished"):
+            parts.append("任务状态：平台已返回 invalid_state/finished，必须停止。")
+        if state.get("vpn_connected"):
+            tun = state.get("tun_interface") or "tun0"
+            ip = state.get("tun_ip") or "unknown"
+            parts.append(f"VPN：已连接 {tun} {ip}，不要重复启动 OpenVPN。")
+        if state.get("api_interface"):
+            parts.append(
+                f"平台 API：使用 --interface {state['api_interface']}，"
+                "认证头必须为 BENCHMARK_TOKEN；不要用 tun0 或 Authorization Bearer。"
+            )
+        active = state.get("active_containers") or {}
+        if active:
+            active_text = ", ".join(
+                f"{code}=>{','.join(addrs)}"
+                for code, addrs in sorted(active.items())
+            )
+            parts.append(f"当前活跃容器：{active_text}。")
+        if state.get("current_challenge"):
+            parts.append(f"当前题：{state['current_challenge']}。")
+        if state.get("completed_challenges"):
+            parts.append(
+                "已通关题："
+                + ", ".join(state["completed_challenges"])
+                + "；禁止重复 start/探测。"
+            )
+        if state.get("closed_challenges"):
+            parts.append(
+                "已关闭/放弃题："
+                + ", ".join(state["closed_challenges"])
+                + "；本轮不要回头。"
+            )
+        if state.get("last_score") is not None:
+            parts.append(f"最近题目累计得分：{state['last_score']}。")
+        return "\n".join(parts)
+
+    def _benchmark_state_context(self) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        summary = self._benchmark_state_summary(self._benchmark_state_snapshot())
+        if not summary:
+            return ""
+        return (
+            "## Benchmark 已确认运行态（必须信任并复用）\n"
+            f"{summary}\n"
+            "除非上面的状态被平台 API 明确推翻，否则不要重复做 VPN 启动、"
+            "不要回头探测已完成/已关闭题。"
+        )
+
+    @staticmethod
     def _is_cyber_agent_debug_task(task_text: str) -> bool:
         lowered = task_text.lower().split("任务边界", 1)[0]
         mentions_project = any(
@@ -622,6 +950,17 @@ class FourPillarPipeline:
         allow_project_probe = self._is_cyber_agent_debug_task(task_text)
 
         def handler(tool: Any, tool_call: dict) -> "ApprovalDecision":
+            benchmark_reason = self._benchmark_tool_guard(tool_call)
+            if benchmark_reason is not None:
+                self._record_trace(
+                    "benchmark_redundant_action_blocked",
+                    detail=benchmark_reason,
+                    metadata={
+                        "tool": str(tool_call.get("name", "")),
+                        "args": tool_call.get("args", {}),
+                    },
+                )
+                return ApprovalDecision(False, benchmark_reason)
             if not allow_project_probe:
                 reason = self._is_boundary_probe(tool_call)
                 if reason is not None:
@@ -708,6 +1047,7 @@ class FourPillarPipeline:
                         "content": content,
                     },
                 )
+                self._update_benchmark_runtime_state(content)
                 elapsed = time_mod.monotonic() - subtask_start
                 if _pending_tool_calls:
                     pinfo = _pending_tool_calls.pop(0)
@@ -854,6 +1194,7 @@ class FourPillarPipeline:
         reasoning: str = "",
         aggressive: bool = False,
         benchmark_profile: str = "off",
+        benchmark_state_context: str = "",
     ) -> str:
         """构建单条子任务的 prompt 文本。"""
         prompt = (
@@ -890,6 +1231,8 @@ class FourPillarPipeline:
                 "\n- 如果当前题已经没有新线索，应明确建议 close 当前题并切换下一题"
                 "\n- 对平台 API 使用已验证可达出口，对 10.x 容器使用 VPN/tun0"
             )
+        if benchmark_state_context:
+            prompt += f"\n\n{benchmark_state_context}"
         prompt += (
             "\n\n任务边界："
             "\n- 只围绕当前子任务、用户给出的目标、当前工作目录和明确提供的靶场地址/API 操作"
@@ -949,6 +1292,7 @@ class FourPillarPipeline:
                 reasoning=reasoning,
                 aggressive=self._is_aggressive_execution(),
                 benchmark_profile=self._resolve_benchmark_profile(),
+                benchmark_state_context=self._benchmark_state_context(),
             )
             sub_runner = self._create_subtask_runner()
             sub_renderer = renderer
@@ -1501,6 +1845,8 @@ class FourPillarPipeline:
         self._benchmark_current_challenge = None
         self._benchmark_stale_rounds = 0
         self._benchmark_forced_directive = ""
+        with self._benchmark_state_lock:
+            self._benchmark_state = self._new_benchmark_state()
         self._session_id = str(
             self._runtime_context.get("session_id")
             or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1792,6 +2138,9 @@ class FourPillarPipeline:
                     "\n\n## Benchmark 强制调度指令\n"
                     f"{forced_benchmark_directive}"
                 )
+            benchmark_state_context = self._benchmark_state_context()
+            if benchmark_state_context:
+                iter_context += f"\n\n{benchmark_state_context}"
             plan_json = self._call_role_with_timeout(
                 AgentRole.DECISION_MAKER, user_input,
                 context=f"## 反思者执行计划\n{iter_context}",
@@ -1822,6 +2171,12 @@ class FourPillarPipeline:
             # 6. 选择子任务
             selected_indices = list(range(len(subtasks)))
             additional_context = forced_benchmark_directive
+            if benchmark_state_context:
+                additional_context = (
+                    f"{additional_context}\n\n{benchmark_state_context}"
+                    if additional_context
+                    else benchmark_state_context
+                )
 
             if auto_decision:
                 selected_indices, selected_context = self._auto_select(
@@ -2015,6 +2370,7 @@ class FourPillarPipeline:
                         reasoning=reasoning,
                         aggressive=self._is_aggressive_execution(),
                         benchmark_profile=self._resolve_benchmark_profile(),
+                        benchmark_state_context=self._benchmark_state_context(),
                     )
 
                     try:

@@ -83,6 +83,22 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         self.assertIn("发现疑似 flag 立即调用 submit", prompt)
         self.assertIn("close 当前题并切换下一题", prompt)
 
+    def test_benchmark_profile_prompt_includes_runtime_state(self):
+        """Benchmark 子任务 prompt 应携带已确认运行态，减少重复前置步骤。"""
+        prompt = FourPillarPipeline._build_subtask_prompt(
+            "执行者",
+            "继续解当前题",
+            benchmark_profile="aggressive",
+            benchmark_state_context=(
+                "## Benchmark 已确认运行态（必须信任并复用）\n"
+                "VPN：已连接 tun0 10.254.0.10，"
+                "不要重复启动 OpenVPN。"
+            ),
+        )
+
+        self.assertIn("Benchmark 已确认运行态", prompt)
+        self.assertIn("不要重复启动 OpenVPN", prompt)
+
     def test_execution_summary_keeps_full_subtask_body(self):
         """四柱最终总结应保留完整子任务正文，不再只展示短摘要。"""
         long_body = "完整输出-" + ("细节" * 120)
@@ -564,6 +580,32 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("close?unique_code=xben-001-24", directive)
 
+    def test_benchmark_runtime_state_tracks_submit_and_close(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            '命令: curl --interface enp0s20f0u3u4 '
+            "-H 'BENCHMARK_TOKEN: token' "
+            "-d '{\"unique_code\":\"xben-006-24\",\"flag\":\"flag{a}\"}' "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/submit\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"correct":true,"awarded":200,"cumulative_score":200,'
+            '"correct_flag_count":1,"total_flag_count":1}'
+        )
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+            "close?unique_code=xben-005-24\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"unique_code":"xben-005-24","closed":true}'
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-006-24", state["completed_challenges"])
+        self.assertIn("xben-005-24", state["closed_challenges"])
+        self.assertEqual(state["last_score"], 200)
+
 
 class SequentialSubtaskIsolationTestCase(unittest.TestCase):
     """测试顺序子任务不会污染主 runner 的对话历史。"""
@@ -685,6 +727,124 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("禁止", decision.reason)
+
+    def test_benchmark_guard_blocks_repeated_openvpn(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["vpn_connected"] = True
+            self.pipeline._benchmark_state["tun_interface"] = "tun0"
+            self.pipeline._benchmark_state["tun_ip"] = "10.254.0.10"
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "sudo openvpn --config "
+                        "/home/my/cyber/benchmark_test/task.ovpn --daemon"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("VPN 已连接", decision.reason)
+
+    def test_benchmark_guard_blocks_platform_api_on_tun0(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface tun0 "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("平台 API 禁止走 tun0", decision.reason)
+
+    def test_benchmark_guard_blocks_platform_api_without_known_interface(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl https://tsecbench.zc.tencent.com/"
+                        "openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("--interface enp0s20f0u3u4", decision.reason)
+
+    def test_benchmark_guard_blocks_authorization_bearer_for_platform(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "-H 'Authorization: Bearer token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("BENCHMARK_TOKEN", decision.reason)
+
+    def test_benchmark_guard_blocks_completed_challenge_restart(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["completed_challenges"] = {"xben-006-24"}
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/"
+                        "challenges/start?unique_code=xben-006-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("已确认通关", decision.reason)
 
     def test_boundary_approval_blocks_secret_probe(self):
         handler = self.pipeline._make_subtask_approval_handler(
