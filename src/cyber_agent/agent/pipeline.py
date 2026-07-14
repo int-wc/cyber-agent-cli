@@ -1814,6 +1814,68 @@ class FourPillarPipeline:
             "如果当前题无明确突破，先 close 当前题再 start 下一题。"
         )
 
+    @staticmethod
+    def _is_transient_llm_error(text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "429",
+                "rate limit",
+                "ratelimit",
+                "freeusagelimiterror",
+                "try again later",
+            )
+        )
+
+    def _resolve_benchmark_rate_limit_backoff_seconds(self) -> float:
+        raw_value = self._runtime_context.get("benchmark_rate_limit_backoff_seconds", 60)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = 60.0
+        return max(0.0, min(value, 300.0))
+
+    def _benchmark_rate_limit_backoff(self, reason: str, text: str) -> bool:
+        if not self._is_benchmark_aggressive() or not self._is_transient_llm_error(text):
+            return False
+        seconds = self._resolve_benchmark_rate_limit_backoff_seconds()
+        self._consecutive_failures = 0
+        detail = (
+            f"Benchmark target gate 遇到临时 LLM 限流：{reason}；"
+            f"等待 {seconds:g}s 后继续，不结束未达标任务。"
+        )
+        self._record_trace(
+            "benchmark_rate_limit_backoff",
+            detail=detail,
+            metadata={
+                "reason": reason,
+                "seconds": seconds,
+                "score_status": self._benchmark_score_status(),
+            },
+        )
+        self._renderer.console.print(f"  [dim yellow]{detail}[/]")
+        if seconds > 0:
+            time_mod.sleep(seconds)
+        return True
+
+    def _benchmark_fallback_subtasks(self) -> list[dict[str, Any]]:
+        state_context = self._benchmark_state_context()
+        return [
+            {
+                "role": "runner",
+                "task_description": (
+                    "Benchmark fallback：刷新 /openapi/v1/challenges，选择下一道"
+                    "未完成、未关闭、easy/低 level、stopped 的题目；start 后做快速"
+                    "HTTP 指纹、常见路径、源码注释、静态资源、默认凭证、SQLi/SSTI/"
+                    "SSRF/IDOR 探测；发现 flag 或候选答案立即 submit；成功或无快速"
+                    "突破后 close。"
+                ),
+                "context": state_context,
+                "parallel": False,
+            }
+        ]
+
     def _build_execution_profile_guidance(self) -> str:
         benchmark_guidance = self._build_benchmark_profile_guidance()
         if self._is_aggressive_execution():
@@ -2492,8 +2554,34 @@ class FourPillarPipeline:
             reasoning = plan.get("reasoning", "")
 
             if not subtasks:
-                renderer.console.print("  [dim]决策者未分解出子任务，结束执行。[/]")
-                break
+                benchmark_continue = self._benchmark_target_continue_directive()
+                if benchmark_continue:
+                    self._benchmark_forced_directive = benchmark_continue
+                    if self._benchmark_rate_limit_backoff(
+                        "decision_maker_empty_plan",
+                        plan_json,
+                    ):
+                        continue
+                    subtasks = self._benchmark_fallback_subtasks()
+                    reasoning = (
+                        "Benchmark target gate fallback：目标未达成且决策者未返回"
+                        "可执行子任务，使用固定刷题调度继续。"
+                    )
+                    self._record_trace(
+                        "benchmark_fallback_plan",
+                        detail=reasoning,
+                        metadata={
+                            "plan_text": plan_json[:500],
+                            "score_status": self._benchmark_score_status(),
+                        },
+                    )
+                    renderer.console.print(
+                        "  [dim yellow]Benchmark target gate 未达标，"
+                        "决策者空计划，已启用固定 fallback 子任务。[/]"
+                    )
+                else:
+                    renderer.console.print("  [dim]决策者未分解出子任务，结束执行。[/]")
+                    break
 
             renderer.console.print(
                 f"  [dim green]✓ 决策者 分解出 {len(subtasks)} 个子任务[/]"
@@ -2879,6 +2967,10 @@ class FourPillarPipeline:
                     benchmark_continue = self._benchmark_target_continue_directive()
                     if benchmark_continue:
                         self._benchmark_forced_directive = benchmark_continue
+                        self._benchmark_rate_limit_backoff(
+                            "reflector_or_round_failure",
+                            reflection + "\n" + "\n".join(round_results),
+                        )
                         renderer.console.print(
                             "  [dim yellow]Benchmark target gate 未达标，"
                             "覆盖“执行完成”判定并继续迭代。[/]"

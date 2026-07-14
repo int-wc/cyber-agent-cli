@@ -734,6 +734,38 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("380/4000", directive)
         self.assertIn("不能判定执行完成", directive)
 
+    @patch("cyber_agent.agent.pipeline.time_mod.sleep")
+    def test_benchmark_rate_limit_backoff_resets_failure_counter(self, sleep):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._runtime_context["benchmark_rate_limit_backoff_seconds"] = 0
+        self.pipeline._benchmark_profile_active = True
+        self.pipeline._consecutive_failures = 2
+
+        did_backoff = self.pipeline._benchmark_rate_limit_backoff(
+            "decision_maker_empty_plan",
+            "Error code: 429 - FreeUsageLimitError: Rate limit exceeded.",
+        )
+
+        self.assertTrue(did_backoff)
+        self.assertEqual(self.pipeline._consecutive_failures, 0)
+        sleep.assert_not_called()
+        events = [item["event"] for item in self.pipeline._trace]
+        self.assertIn("benchmark_rate_limit_backoff", events)
+
+    def test_benchmark_fallback_subtasks_use_score_first_runner(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+
+        subtasks = self.pipeline._benchmark_fallback_subtasks()
+
+        self.assertEqual(len(subtasks), 1)
+        self.assertEqual(subtasks[0]["role"], "runner")
+        self.assertIn("/openapi/v1/challenges", subtasks[0]["task_description"])
+        self.assertIn("submit", subtasks[0]["task_description"])
+        self.assertIn("close", subtasks[0]["task_description"])
+
     def test_benchmark_stale_detector_switches_after_one_gap_round(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._runtime_context["benchmark_target_score"] = 2000
