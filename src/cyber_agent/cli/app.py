@@ -2186,6 +2186,11 @@ def hub_serve(
         "--benchmark-profile",
         help="Benchmark 跑分策略，可选 off、auto、aggressive；aggressive 会启用限时止损和切题约束。",
     ),
+    benchmark_target_score: int = typer.Option(
+        0,
+        "--benchmark-target-score",
+        help="Benchmark aggressive 目标分数；例如 2000 会让规划优先按约 10 道 easy 题冲分。",
+    ),
     feishu_broadcast_chat_ids: list[str] | None = typer.Option(
         None,
         "--feishu-broadcast-chat-id",
@@ -2230,6 +2235,9 @@ def hub_serve(
     if normalized_benchmark_profile not in {"off", "auto", "aggressive"}:
         renderer.print_error("--benchmark-profile 仅支持 off、auto、aggressive。")
         raise typer.Exit(code=1)
+    if benchmark_target_score < 0:
+        renderer.print_error("--benchmark-target-score 必须大于等于 0。")
+        raise typer.Exit(code=1)
     runtime_context["multi_agent_enabled"] = {
         "off": False,
         "auto": "auto",
@@ -2240,6 +2248,7 @@ def hub_serve(
     runtime_context["execution_profile"] = normalized_execution_profile
     runtime_context["resolved_execution_profile"] = infer_execution_profile(runtime_context)
     runtime_context["benchmark_profile"] = normalized_benchmark_profile
+    runtime_context["benchmark_target_score"] = benchmark_target_score
     resolved_storage_dir = (
         Path(storage_dir).expanduser().resolve()
         if storage_dir is not None

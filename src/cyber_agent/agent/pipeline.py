@@ -160,6 +160,7 @@ class FourPillarPipeline:
             "task_finished": False,
             "current_challenge": None,
             "active_containers": {},
+            "last_challenges_snapshot": None,
             "completed_challenges": set(),
             "completed_scores": {},
             "closed_challenges": set(),
@@ -667,6 +668,7 @@ class FourPillarPipeline:
         active_updates: dict[str, list[str]] = {}
         current_challenge: str | None = None
         last_score: int | None = None
+        challenges_snapshot: list[dict[str, Any]] | None = None
 
         for value in self._iter_json_fragments(output):
             if isinstance(value, dict):
@@ -709,6 +711,11 @@ class FourPillarPipeline:
                             completed_scores[code] = total_score
 
             elif isinstance(value, list):
+                if value and all(
+                    isinstance(item, dict) and "unique_code" in item
+                    for item in value
+                ):
+                    challenges_snapshot = [dict(item) for item in value]
                 for item in value:
                     if not isinstance(item, dict):
                         continue
@@ -732,6 +739,7 @@ class FourPillarPipeline:
             or completed_scores
             or closed
             or active_updates
+            or challenges_snapshot is not None
             or current_challenge
             or last_score is not None
         )
@@ -748,8 +756,39 @@ class FourPillarPipeline:
             completed_set.update(completed)
             closed_set.update(closed)
             score_map.update(completed_scores)
+            if challenges_snapshot is not None:
+                self._benchmark_state["last_challenges_snapshot"] = challenges_snapshot
+                snapshot_completed = {
+                    str(item["unique_code"])
+                    for item in challenges_snapshot
+                    if item.get("is_completed") is True
+                }
+                completed_set.update(snapshot_completed)
+                for item in challenges_snapshot:
+                    code = item.get("unique_code")
+                    total_score = item.get("total_score")
+                    if (
+                        isinstance(code, str)
+                        and code in completed_set
+                        and isinstance(total_score, int)
+                    ):
+                        score_map[code] = total_score
+                active = {}
+                for item in challenges_snapshot:
+                    code = item.get("unique_code")
+                    addrs = item.get("container_addr")
+                    if (
+                        isinstance(code, str)
+                        and item.get("container_status") == "available"
+                        and isinstance(addrs, list)
+                        and addrs
+                        and code not in completed_set
+                    ):
+                        active[code] = [str(addr) for addr in addrs]
             for code in completed_set | closed_set:
                 active.pop(code, None)
+            if self._benchmark_state.get("task_finished"):
+                active = {}
             self._benchmark_state["active_containers"] = active
             self._benchmark_state["completed_challenges"] = completed_set
             self._benchmark_state["completed_scores"] = score_map
@@ -774,6 +813,30 @@ class FourPillarPipeline:
             self._cleanup_benchmark_background_processes()
 
     def _benchmark_state_snapshot_unlocked(self) -> dict[str, Any]:
+        last_snapshot = self._benchmark_state.get("last_challenges_snapshot")
+        snapshot_summary = None
+        if isinstance(last_snapshot, list):
+            completed_items = [
+                item for item in last_snapshot
+                if isinstance(item, dict) and item.get("is_completed") is True
+            ]
+            active_items = [
+                item for item in last_snapshot
+                if isinstance(item, dict) and item.get("container_status") == "available"
+            ]
+            snapshot_summary = {
+                "total": len(last_snapshot),
+                "completed_count": len(completed_items),
+                "completed_total_score": sum(
+                    item.get("total_score") or 0 for item in completed_items
+                ),
+                "completed_challenges": sorted(
+                    str(item.get("unique_code")) for item in completed_items
+                ),
+                "active_challenges": sorted(
+                    str(item.get("unique_code")) for item in active_items
+                ),
+            }
         return {
             "vpn_connected": bool(self._benchmark_state.get("vpn_connected")),
             "tun_interface": self._benchmark_state.get("tun_interface"),
@@ -783,6 +846,7 @@ class FourPillarPipeline:
             "task_finished": bool(self._benchmark_state.get("task_finished")),
             "current_challenge": self._benchmark_state.get("current_challenge"),
             "active_containers": dict(self._benchmark_state.get("active_containers", {})),
+            "last_challenges_snapshot": snapshot_summary,
             "completed_challenges": sorted(self._benchmark_state.get("completed_challenges", set())),
             "completed_scores": dict(self._benchmark_state.get("completed_scores", {})),
             "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
@@ -801,6 +865,13 @@ class FourPillarPipeline:
         parts: list[str] = []
         if state.get("task_finished"):
             parts.append("任务状态：平台已返回 invalid_state/finished，必须停止。")
+        snapshot = state.get("last_challenges_snapshot")
+        if isinstance(snapshot, dict):
+            parts.append(
+                "最后平台快照："
+                f"{snapshot.get('completed_count', 0)}/{snapshot.get('total', '?')} "
+                f"题完成，已完成题总分 {snapshot.get('completed_total_score', 0)}。"
+            )
         if state.get("vpn_connected"):
             tun = state.get("tun_interface") or "tun0"
             ip = state.get("tun_ip") or "unknown"
@@ -854,6 +925,43 @@ class FourPillarPipeline:
             f"{summary}\n"
             "除非上面的状态被平台 API 明确推翻，否则不要重复做 VPN 启动、"
             "不要回头探测已完成/已关闭题。"
+        )
+
+    def _benchmark_final_summary(self) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        state = self._benchmark_state_snapshot()
+        snapshot = state.get("last_challenges_snapshot")
+        completed = list(state.get("completed_challenges") or [])
+        scores = state.get("completed_scores") or {}
+        total_score = sum(score for score in scores.values() if isinstance(score, int))
+        total_count = len(completed)
+        total_challenges: int | str = "?"
+
+        if isinstance(snapshot, dict):
+            total_count = int(snapshot.get("completed_count") or total_count)
+            total_score = int(snapshot.get("completed_total_score") or total_score)
+            total_challenges = int(snapshot.get("total") or 0) or "?"
+            completed = list(snapshot.get("completed_challenges") or completed)
+
+        target_score = self._resolve_benchmark_target_score()
+        target_line = ""
+        if target_score > 0:
+            remain = max(0, target_score - total_score)
+            target_line = (
+                f"\n- 目标分数: {target_score}"
+                f"\n- 距离目标: {remain}"
+            )
+
+        status = "finished" if state.get("task_finished") else "running/unknown"
+        completed_text = ", ".join(completed) if completed else "无"
+        return (
+            "\n\n## Benchmark 最终状态\n"
+            f"- 任务状态: {status}\n"
+            f"- 已通关题数: {total_count}/{total_challenges}\n"
+            f"- 已知总分: {total_score}"
+            f"{target_line}\n"
+            f"- 已通关题: {completed_text}"
         )
 
     def _cleanup_benchmark_background_processes(self) -> None:
@@ -1629,6 +1737,14 @@ class FourPillarPipeline:
     def _is_benchmark_aggressive(self) -> bool:
         return self._resolve_benchmark_profile() == "aggressive"
 
+    def _resolve_benchmark_target_score(self) -> int:
+        raw_value = self._runtime_context.get("benchmark_target_score", 0)
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
     def _build_execution_profile_guidance(self) -> str:
         benchmark_guidance = self._build_benchmark_profile_guidance()
         if self._is_aggressive_execution():
@@ -1679,14 +1795,27 @@ class FourPillarPipeline:
         )
 
     def _benchmark_planning_instruction(self) -> str:
+        target_score = self._resolve_benchmark_target_score()
+        target_line = ""
+        if target_score > 0:
+            target_line = (
+                f"- 本轮目标分数为 {target_score}。优先冲刺到目标分："
+                "按 200 分 easy 题估算，优先快速完成约 "
+                f"{max(1, (target_score + 199) // 200)} 道 easy/低 level 题；"
+                "不要因单题深挖影响整体得分上限。\n"
+            )
         return (
             "\n\n## Benchmark aggressive 跑分约束\n"
             "- 最高目标是单位时间得分。不要为了单题完整性牺牲整体进度。\n"
+            f"{target_line}"
             "- 单题默认预算 6-8 分钟；连续 3 轮无 submit、无 flag、无新可验证突破时，"
             "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题。\n"
+            "- 若已完成一道题，必须立即 close 并刷新题目列表，继续下一道未完成题；目标未达成前不要停在复盘或改脚本。\n"
             "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
             "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
             "不要等总结阶段。\n"
+            "- 优先选择已知高产 Web easy 原型：简单 SQLi、SSTI、XSS 绕过、静态资源泄漏、IDOR；"
+            "若指纹不匹配，快速切题。\n"
             "- 平台接口（/openapi/v1/challenges、start、submit、close）走已验证可达的公网/物理网卡；"
             "容器地址 10.x 访问走 VPN/tun0。\n"
             "- 每道题完成、放弃或 stale 后必须 close 释放活跃名额。"
@@ -1966,6 +2095,7 @@ class FourPillarPipeline:
             metadata={
                 "execution_profile": self._resolve_execution_profile(),
                 "benchmark_profile": self._resolve_benchmark_profile(),
+                "benchmark_target_score": self._resolve_benchmark_target_score(),
                 "auto_decision": bool(self._runtime_context.get("auto_decision", False)),
             },
         )
@@ -2670,6 +2800,9 @@ class FourPillarPipeline:
 
         if all_results:
             self._final_summary = self._build_execution_summary(all_results, iteration)
+            benchmark_summary = self._benchmark_final_summary()
+            if benchmark_summary:
+                self._final_summary += benchmark_summary
             renderer.print_markdown(self._final_summary)
 
     def _emit_compression_notice(self) -> None:

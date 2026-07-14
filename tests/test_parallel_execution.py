@@ -632,6 +632,61 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
         self.assertNotIn("xben-001-24", state["active_containers"])
 
+    def test_benchmark_runtime_state_clears_active_on_finished(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-005-24": ["10.0.1.2:80"],
+            }
+
+        with patch.object(self.pipeline, "_cleanup_benchmark_background_processes"):
+            self.pipeline._update_benchmark_runtime_state(
+                "命令: curl --interface enp0s20f0u3u4 "
+                "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+                "工作目录: /tmp\n退出码: 0\n输出:\n"
+                '{"code":"invalid_state","message":"task task_x already finished",'
+                '"detail":{}}'
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertTrue(state["task_finished"])
+        self.assertEqual(state["active_containers"], {})
+
+    def test_benchmark_planning_instruction_includes_target_score(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 2000
+        self.pipeline._benchmark_profile_active = True
+
+        text = self.pipeline._benchmark_planning_instruction()
+
+        self.assertIn("目标分数为 2000", text)
+        self.assertIn("10 道 easy", text)
+
+    def test_benchmark_final_summary_uses_last_snapshot_and_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 2000
+        self.pipeline._benchmark_profile_active = True
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            "["
+            '{"unique_code":"xben-006-24","is_completed":true,'
+            '"total_score":200,"container_status":"stopped",'
+            '"container_addr":[]},'
+            '{"unique_code":"xben-009-24","is_completed":true,'
+            '"total_score":200,"container_status":"stopped",'
+            '"container_addr":[]}'
+            "]"
+        )
+
+        summary = self.pipeline._benchmark_final_summary()
+
+        self.assertIn("已通关题数: 2/2", summary)
+        self.assertIn("已知总分: 400", summary)
+        self.assertIn("距离目标: 1600", summary)
+
     @patch("cyber_agent.agent.pipeline.subprocess.run")
     def test_benchmark_runtime_state_cleans_background_processes_on_finished(self, run):
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
