@@ -44,6 +44,7 @@ TIMEOUT_ESCALATION_STEP = 60         # 每次超时叠加步长（秒）
 MAX_TIMEOUT_ESCALATIONS = 3          # 最多叠加次数 → 最大 300+3×60=480s
 LLM_CALL_TIMEOUT_SECONDS = 120       # 单次角色 LLM 调用超时（秒）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
+BENCHMARK_REDUNDANT_BLOCK_LIMIT = 1    # finished 后首次被 guard 拦截即硬停
 
 
 class PipelineCircuitBreakerError(RuntimeError):
@@ -146,6 +147,8 @@ class FourPillarPipeline:
         self._benchmark_current_challenge: str | None = None
         self._benchmark_stale_rounds = 0
         self._benchmark_forced_directive = ""
+        self._benchmark_redundant_block_count = 0
+        self._benchmark_hard_stop_recorded = False
         self._benchmark_state_lock = threading.RLock()
         self._benchmark_state: dict[str, Any] = self._new_benchmark_state()
 
@@ -165,6 +168,7 @@ class FourPillarPipeline:
             "completed_scores": {},
             "closed_challenges": set(),
             "last_score": None,
+            "redundant_block_count": 0,
             "background_processes_cleaned": False,
         }
 
@@ -453,6 +457,43 @@ class FourPillarPipeline:
         except Exception as exc:
             from ..logging import log_error
             log_error("trace", f"保存执行轨迹失败：{exc}")
+
+    def _benchmark_state_path(self) -> Path:
+        """Return the checkpoint path for the current Benchmark run."""
+        raw_base_dir = self._runtime_context.get("session_base_dir")
+        if raw_base_dir:
+            base_dir = Path(str(raw_base_dir)).expanduser()
+        else:
+            base_dir = Path.home() / ".cyber-agent-cli-benchmark"
+        session_id = self._session_id or str(
+            self._runtime_context.get("session_id") or "current"
+        )
+        safe_session_id = _re_mod.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)
+        return base_dir / ".benchmark-state" / f"{safe_session_id}.json"
+
+    def _persist_benchmark_state(self) -> None:
+        """Persist a sanitized Benchmark checkpoint for summaries and recovery."""
+        if not self._is_benchmark_aggressive():
+            return
+        try:
+            path = self._benchmark_state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "session_id": self._session_id
+                or str(self._runtime_context.get("session_id") or ""),
+                "updated_at": datetime.now().isoformat(),
+                "state": self._benchmark_state_snapshot(),
+            }
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+            self._runtime_context["benchmark_state_file"] = str(path)
+        except Exception as exc:
+            from ..logging import log_error
+            log_error("benchmark", f"保存 Benchmark 状态失败：{exc}")
 
     def _load_trace(self, session_id: str) -> list[dict] | None:
         """加载指定会话的执行轨迹。"""
@@ -819,6 +860,15 @@ class FourPillarPipeline:
             detail=self._benchmark_state_summary(snapshot),
             metadata=snapshot,
         )
+        if (
+            bool(self._benchmark_state.get("task_finished"))
+            or completed
+            or completed_scores
+            or closed
+            or challenges_snapshot is not None
+            or last_score is not None
+        ):
+            self._persist_benchmark_state()
         if should_cleanup:
             self._cleanup_benchmark_background_processes()
 
@@ -861,6 +911,9 @@ class FourPillarPipeline:
             "completed_scores": dict(self._benchmark_state.get("completed_scores", {})),
             "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
             "last_score": self._benchmark_state.get("last_score"),
+            "redundant_block_count": int(
+                self._benchmark_state.get("redundant_block_count") or 0
+            ),
             "background_processes_cleaned": bool(
                 self._benchmark_state.get("background_processes_cleaned")
             ),
@@ -976,6 +1029,45 @@ class FourPillarPipeline:
             f"{target_line}\n"
             f"- 已通关题: {completed_text}"
         )
+
+    def _benchmark_terminal_stop_reason(self) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        state = self._benchmark_state_snapshot()
+        if not state.get("task_finished"):
+            return ""
+        blocked = int(state.get("redundant_block_count") or 0)
+        if blocked >= BENCHMARK_REDUNDANT_BLOCK_LIMIT:
+            block_phrase = (
+                "首次被 guard 拦截"
+                if blocked == 1
+                else f"已连续被拦截 {blocked} 次"
+            )
+            return (
+                "Benchmark 已处于 invalid_state/finished，且后续平台/靶场调用"
+                f"{block_phrase}；立即终止管线，避免 finished 后空转。"
+            )
+        return (
+            "Benchmark 已处于 invalid_state/finished；立即终止管线，"
+            "跳过后续子任务、审计和反思。"
+        )
+
+    def _benchmark_stop_if_terminal(self, source: str) -> bool:
+        reason = self._benchmark_terminal_stop_reason()
+        if not reason:
+            return False
+        if not self._benchmark_hard_stop_recorded:
+            self._benchmark_hard_stop_recorded = True
+            self._record_trace(
+                "benchmark_hard_stop",
+                detail=reason,
+                metadata={
+                    "source": source,
+                    "score_status": self._benchmark_score_status(),
+                },
+            )
+            self._renderer.console.print(f"  [dim yellow]⏹ {reason}[/]")
+        return True
 
     def _cleanup_benchmark_background_processes(self) -> None:
         """Stop helper scripts after a Benchmark task is known to be finished."""
@@ -1176,12 +1268,18 @@ class FourPillarPipeline:
         def handler(tool: Any, tool_call: dict) -> "ApprovalDecision":
             benchmark_reason = self._benchmark_tool_guard(tool_call)
             if benchmark_reason is not None:
+                with self._benchmark_state_lock:
+                    self._benchmark_redundant_block_count += 1
+                    self._benchmark_state["redundant_block_count"] = (
+                        self._benchmark_redundant_block_count
+                    )
                 self._record_trace(
                     "benchmark_redundant_action_blocked",
                     detail=benchmark_reason,
                     metadata={
                         "tool": str(tool_call.get("name", "")),
                         "args": tool_call.get("args", {}),
+                        "count": self._benchmark_redundant_block_count,
                     },
                 )
                 return ApprovalDecision(False, benchmark_reason)
@@ -2237,6 +2335,8 @@ class FourPillarPipeline:
         self._benchmark_current_challenge = None
         self._benchmark_stale_rounds = 0
         self._benchmark_forced_directive = ""
+        self._benchmark_redundant_block_count = 0
+        self._benchmark_hard_stop_recorded = False
         with self._benchmark_state_lock:
             self._benchmark_state = self._new_benchmark_state()
         self._session_id = str(
@@ -2279,6 +2379,7 @@ class FourPillarPipeline:
                 self.cumulative_output_tokens,
             )
             self._append_pipeline_summary_message()
+            self._persist_benchmark_state()
             self._save_trace()
 
     def _run_phases(self, user_input: str, auto_decision: bool) -> None:
@@ -2508,6 +2609,9 @@ class FourPillarPipeline:
                 f"[dim bold]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
             )
             self._record_trace("iteration_start", detail=f"第 {iteration} 轮")
+            if self._benchmark_stop_if_terminal("iteration_start"):
+                self._record_trace("iteration_done", detail=f"第 {iteration} 轮：Benchmark 已终止")
+                break
 
             # 5. 决策者 → 分解子任务
             renderer.console.print("  [dim]⏳ 决策者 正在分解子任务...[/]")
@@ -2759,6 +2863,9 @@ class FourPillarPipeline:
                         additional_context=additional_context,
                     )
                     round_results.extend(batch_results)
+                    if self._benchmark_stop_if_terminal("parallel_batch_end"):
+                        circuit_broken = True
+                        break
                 else:
                     # 顺序执行单条子任务（保持原有行为）
                     role_str = task.get("role", "runner")
@@ -2886,9 +2993,15 @@ class FourPillarPipeline:
                     # ── 上下文压缩通知 ──
                     self._emit_compression_notice()
 
+                    if self._benchmark_stop_if_terminal("subtask_end"):
+                        circuit_broken = True
+                        break
+
                     batch_i += 1
 
             all_results.append(round_results)
+            if circuit_broken:
+                break
             benchmark_directive = self._update_benchmark_stale_state(round_results)
             if benchmark_directive:
                 self._benchmark_forced_directive = benchmark_directive
@@ -2896,9 +3009,6 @@ class FourPillarPipeline:
                     "  [dim yellow]Benchmark stale detector 已触发，"
                     "下一轮将强制 close 当前题并切换下一题。[/]"
                 )
-
-            if circuit_broken:
-                break
 
             # 8. 审计者验证
             renderer.console.print("  [dim]⏳ 审计者 正在验证结果...[/]")
@@ -3001,11 +3111,14 @@ class FourPillarPipeline:
         renderer.console.print()
         renderer.console.print("[dim bold]📊 四柱管线执行完成[/]")
 
+        benchmark_summary = self._benchmark_final_summary()
         if all_results:
             self._final_summary = self._build_execution_summary(all_results, iteration)
-            benchmark_summary = self._benchmark_final_summary()
             if benchmark_summary:
                 self._final_summary += benchmark_summary
+            renderer.print_markdown(self._final_summary)
+        elif benchmark_summary:
+            self._final_summary = benchmark_summary.lstrip()
             renderer.print_markdown(self._final_summary)
 
     def _emit_compression_notice(self) -> None:

@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -607,6 +609,29 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["last_score"], 200)
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
 
+    def test_benchmark_runtime_state_persists_submit_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+            self.pipeline._runtime_context["session_id"] = "bench-session"
+            self.pipeline._runtime_context["session_base_dir"] = tmpdir
+            self.pipeline._benchmark_profile_active = True
+
+            self.pipeline._update_benchmark_runtime_state(
+                '命令: curl --interface enp0s20f0u3u4 '
+                "-H 'BENCHMARK_TOKEN: token' "
+                "-d '{\"unique_code\":\"xben-006-24\",\"flag\":\"flag{a}\"}' "
+                "https://tsecbench.zc.tencent.com/openapi/v1/challenges/submit\n"
+                "工作目录: /tmp\n退出码: 0\n输出:\n"
+                '{"correct":true,"awarded":200,"cumulative_score":200,'
+                '"correct_flag_count":1,"total_flag_count":1}'
+            )
+
+            state_path = self.pipeline._benchmark_state_path()
+            self.assertTrue(state_path.exists())
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["state"]["completed_scores"]["xben-006-24"], 200)
+            self.assertIn("xben-006-24", saved["state"]["completed_challenges"])
+
     def test_benchmark_runtime_state_ignores_api_doc_examples(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -701,6 +726,46 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertTrue(state["task_finished"])
         self.assertEqual(state["active_containers"], {})
+
+    def test_benchmark_terminal_stop_records_hard_stop_once(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["task_finished"] = True
+
+        self.assertTrue(self.pipeline._benchmark_stop_if_terminal("test"))
+        self.assertTrue(self.pipeline._benchmark_stop_if_terminal("test-again"))
+
+        hard_stops = [
+            item for item in self.pipeline._trace
+            if item["event"] == "benchmark_hard_stop"
+        ]
+        self.assertEqual(len(hard_stops), 1)
+        self.assertIn("invalid_state/finished", hard_stops[0]["detail"])
+
+    def test_benchmark_guard_counts_redundant_blocks_after_finished(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["task_finished"] = True
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\ncheck")
+        tool_call = {
+            "name": "run_shell_command",
+            "args": {
+                "command": (
+                    "curl --interface enp0s20f0u3u4 "
+                    "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                )
+            },
+        }
+
+        first = handler(MagicMock(), tool_call)
+        self.assertFalse(first.approved)
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["redundant_block_count"], 1)
+        self.assertIn("首次被 guard 拦截", self.pipeline._benchmark_terminal_stop_reason())
 
     def test_benchmark_planning_instruction_includes_target_score(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
