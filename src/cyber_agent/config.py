@@ -13,8 +13,10 @@ DEFAULT_MODELS: dict[str, str] = {
     "opencode": "deepseek-v4-flash-free",
     "mimo": "mimo-v2.5-pro",
     "claude": "claude-opus-4-6",
+    "baisub": "",
 }
 DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
+DEFAULT_BAISUB_BASE_URL = "https://baisub.bai.edu.kg/v1"
 DEFAULT_OPENCODE_PROXY_URL = "http://192.168.31.47:7892"
 ANTHROPIC_TOKEN_SERVICES = frozenset({"deepseek", "mimo", "claude"})
 # DeepSeek V4 Pro [1m] 上下文窗口参数
@@ -104,6 +106,28 @@ class Settings(BaseSettings):
     opencode_proxy_url: str | None = Field(
         default=DEFAULT_OPENCODE_PROXY_URL,
         validation_alias="OPENCODE_PROXY_URL",
+    )
+
+    # ── BaiSub OpenAI 兼容 API ──
+    baisub_api_key: str | None = Field(
+        default=None,
+        validation_alias="BAISUB_API_KEY",
+    )
+    baisub_api_keys: str | None = Field(
+        default=None,
+        validation_alias="BAISUB_API_KEYS",
+    )
+    baisub_model: str | None = Field(
+        default=None,
+        validation_alias="BAISUB_MODEL",
+    )
+    baisub_models: str | None = Field(
+        default=None,
+        validation_alias="BAISUB_MODELS",
+    )
+    baisub_base_url: str | None = Field(
+        default=DEFAULT_BAISUB_BASE_URL,
+        validation_alias="BAISUB_BASE_URL",
     )
 
     # ── 搜索工具 ──
@@ -196,6 +220,23 @@ class Settings(BaseSettings):
         """返回当前默认服务商名称。"""
         return self.normalize_service_name()
 
+    @staticmethod
+    def _split_config_list(raw_value: str | None) -> list[str]:
+        if not raw_value:
+            return []
+        return [
+            item.strip()
+            for item in raw_value.replace("\n", ",").split(",")
+            if item.strip()
+        ]
+
+    def _get_baisub_models(self) -> list[str]:
+        models = self._split_config_list(self.baisub_models)
+        if models:
+            return models
+        model = (self.baisub_model or "").strip()
+        return [model] if model else []
+
     def get_model_name(
         self,
         model_name: str | None = None,
@@ -220,6 +261,7 @@ class Settings(BaseSettings):
             "deepseek": self.deepseek_model,
             "mimo": self.mimo_model,
             "opencode": self.opencode_model,
+            "baisub": (self.baisub_model or (self._get_baisub_models() or [""])[0]),
         }
         service_model = (service_models.get(normalized_service_name) or "").strip()
         if service_model:
@@ -249,6 +291,7 @@ class Settings(BaseSettings):
             "deepseek": self.deepseek_api_key,
             "mimo": self.mimo_api_key,
             "opencode": self.opencode_api_key,
+            "baisub": self.baisub_api_key or (self._split_config_list(self.baisub_api_keys) or [None])[0],
         }
         specific_key = service_keys.get(normalized)
         if specific_key and specific_key.strip():
@@ -304,6 +347,7 @@ class Settings(BaseSettings):
             "deepseek": self.deepseek_base_url,
             "mimo": self.mimo_base_url,
             "opencode": self.opencode_base_url,
+            "baisub": self.baisub_base_url,
         }
         specific_url = service_urls.get(normalized)
         if specific_url and specific_url.strip():
@@ -379,7 +423,60 @@ class Settings(BaseSettings):
         resolved_proxy_url = self.resolve_proxy_url(resolved_service_name)
         if resolved_proxy_url:
             kwargs["openai_proxy"] = resolved_proxy_url
+        fallback_kwargs = self.get_chat_openai_fallback_kwargs(
+            resolved_service_name,
+            model_name=resolved_model_name,
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+        )
+        if fallback_kwargs:
+            kwargs["_fallback_kwargs"] = fallback_kwargs
         return {key: value for key, value in kwargs.items() if value is not None}
+
+    def get_chat_openai_fallback_kwargs(
+        self,
+        service_name: str | None = None,
+        *,
+        model_name: str,
+        api_key: str,
+        base_url: str | None,
+    ) -> list[dict]:
+        """返回 OpenAI 兼容客户端的备用 key/model 初始化参数。"""
+        resolved_service_name = self.normalize_service_name(service_name)
+        if resolved_service_name != "baisub":
+            return []
+
+        keys: list[str] = []
+        for key in [api_key, self.baisub_api_key or "", *self._split_config_list(self.baisub_api_keys)]:
+            cleaned = key.strip()
+            if cleaned and cleaned not in keys:
+                keys.append(cleaned)
+        if len(keys) <= 1:
+            return []
+
+        configured_models = self._get_baisub_models()
+        fallback_kwargs: list[dict] = []
+        for index, key in enumerate(keys[1:], start=1):
+            if len(configured_models) > index:
+                candidate_model = configured_models[index]
+            elif len(configured_models) == 1:
+                candidate_model = configured_models[0]
+            else:
+                candidate_model = model_name
+            candidate = {
+                "model": candidate_model,
+                "api_key": key,
+                "base_url": base_url,
+                "temperature": 0.7,
+                "extra_body": {"provider": resolved_service_name},
+            }
+            resolved_proxy_url = self.resolve_proxy_url(resolved_service_name)
+            if resolved_proxy_url:
+                candidate["openai_proxy"] = resolved_proxy_url
+            fallback_kwargs.append(
+                {item_key: value for item_key, value in candidate.items() if value is not None}
+            )
+        return fallback_kwargs
 
 
 settings = Settings()

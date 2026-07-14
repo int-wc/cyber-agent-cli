@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import cyber_agent.model_client as model_client
 from cyber_agent.model_client import (
+    RotatingLlmClient,
     build_llm_with_proxy_fallback,
     get_http_proxy_fallback_url,
 )
@@ -66,6 +67,88 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
         self.assertEqual(first.proxy, "http://192.168.31.47:7892")
         self.assertEqual(second.proxy, "http://192.168.31.47:7892")
         log_warning.assert_called_once()
+
+    def test_provider_fallback_retries_with_next_key_and_model(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class FakeLlm:
+            def __init__(self, **kwargs):
+                self.api_key = kwargs["api_key"]
+                self.model = kwargs["model"]
+
+            def invoke(self, messages):
+                calls.append((self.api_key, self.model))
+                if self.api_key == "bad-key":
+                    raise RuntimeError("401 invalid api key")
+                return f"ok:{self.api_key}:{self.model}"
+
+        llm = build_llm_with_proxy_fallback(
+            FakeLlm,
+            {
+                "api_key": "bad-key",
+                "model": "model-a",
+                "_fallback_kwargs": [
+                    {
+                        "api_key": "good-key",
+                        "model": "model-b",
+                    }
+                ],
+            },
+        )
+
+        self.assertIsInstance(llm, RotatingLlmClient)
+        self.assertEqual(llm.invoke(["hi"]), "ok:good-key:model-b")
+        self.assertEqual(calls, [("bad-key", "model-a"), ("good-key", "model-b")])
+
+    def test_provider_fallback_works_after_bind_tools(self) -> None:
+        calls: list[tuple[str, str, str]] = []
+
+        class FakeBoundLlm:
+            def __init__(self, api_key: str, model: str):
+                self.api_key = api_key
+                self.model = model
+
+            def invoke(self, messages):
+                calls.append(("invoke", self.api_key, self.model))
+                if self.api_key == "bad-key":
+                    raise RuntimeError("403 permission denied")
+                return "bound-ok"
+
+        class FakeLlm:
+            def __init__(self, **kwargs):
+                self.api_key = kwargs["api_key"]
+                self.model = kwargs["model"]
+
+            def bind_tools(self, *args, **kwargs):
+                calls.append(("bind", self.api_key, self.model))
+                return FakeBoundLlm(self.api_key, self.model)
+
+        llm = build_llm_with_proxy_fallback(
+            FakeLlm,
+            {
+                "api_key": "bad-key",
+                "model": "model-a",
+                "_fallback_kwargs": [
+                    {
+                        "api_key": "good-key",
+                        "model": "model-b",
+                    }
+                ],
+            },
+        )
+
+        bound = llm.bind_tools([])
+
+        self.assertEqual(bound.invoke(["hi"]), "bound-ok")
+        self.assertEqual(
+            calls,
+            [
+                ("bind", "bad-key", "model-a"),
+                ("invoke", "bad-key", "model-a"),
+                ("bind", "good-key", "model-b"),
+                ("invoke", "good-key", "model-b"),
+            ],
+        )
 
 
 if __name__ == "__main__":

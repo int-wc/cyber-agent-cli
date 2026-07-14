@@ -2848,7 +2848,7 @@ def ide(
     service: str | None = typer.Option(
         None,
         "--service",
-        help="模型服务商，可选 opencode、openai、deepseek、claude、mimo。",
+        help="模型服务商，可选 opencode、openai、deepseek、claude、mimo、baisub。",
     ),
     model: str | None = typer.Option(
         None,

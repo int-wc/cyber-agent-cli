@@ -323,6 +323,29 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
         self.assertEqual(kwargs["extra_body"], {"provider": "openai"})
 
+    def test_baisub_can_use_ordered_keys_and_models(self) -> None:
+        """
+        测试：BaiSub 支持按 key/model 顺序构建主配置与备用配置。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="baisub",
+            BAISUB_API_KEYS="primary-key, fallback-key",
+            BAISUB_MODELS="model-a, model-b",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(settings.get_service(), "baisub")
+        self.assertEqual(kwargs["api_key"], "primary-key")
+        self.assertEqual(kwargs["model"], "model-a")
+        self.assertEqual(kwargs["base_url"], "https://baisub.bai.edu.kg/v1")
+        self.assertEqual(kwargs["extra_body"], {"provider": "baisub"})
+        self.assertEqual(len(kwargs["_fallback_kwargs"]), 1)
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["api_key"], "fallback-key")
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["model"], "model-b")
+
     def test_package_root_import_should_not_eagerly_import_heavy_submodules(self) -> None:
         """
         测试：导入 cyber_agent 包根模块时，不应立刻加载 CLI 和搜索等重模块。

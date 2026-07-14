@@ -63,6 +63,13 @@ SUBAGENT_MODEL=deepseek-v4-flash-free
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING_MODE=enabled
+
+# BaiSub OpenAI-compatible endpoint. 多个 key/model 按顺序一一对应；
+# 当前 key 不可用、限流或模型不支持时会自动尝试下一个。
+BAISUB_API_KEYS=primary_key,fallback_key
+BAISUB_MODELS=primary_model,fallback_model
+BAISUB_BASE_URL=https://baisub.bai.edu.kg/v1
+
 MAX_CONTEXT_TOKENS=400000
 SEARCH_SHOW_BROWSER=true
 ```
@@ -73,7 +80,7 @@ SEARCH_SHOW_BROWSER=true
 
 - 默认只读取应用主目录下的 `.env`，不会因为从其他工作目录启动就在当地读取或创建 `.env`。
 - 历史会话、动态能力等运行数据默认集中写入应用主目录下的 `.cyber/`。
-- `GATEWAY_DEFAULT_SERVICE`：可选，默认是 `opencode`，当前支持 `opencode`、`openai`、`deepseek`、`claude`、`mimo`，也支持其他 OpenAI 兼容服务商名称。
+- `GATEWAY_DEFAULT_SERVICE`：可选，默认是 `opencode`，当前支持 `opencode`、`openai`、`deepseek`、`claude`、`mimo`、`baisub`，也支持其他 OpenAI 兼容服务商名称。
 - `GATEWAY_DEFAULT_MODEL`：可选，当前默认是 `deepseek-v4-flash-free`。
 - `GATEWAY_BASE_URL`：可选，统一模型网关基址；若服务商配置了专属基址，如 `OPENCODE_BASE_URL`，专属基址优先。
 - `OPENCODE_API_KEY` / `OPENCODE_MODEL` / `OPENCODE_BASE_URL`：可选，OpenCode Zen 专属配置。默认基址是 `https://opencode.ai/zen/v1`。
@@ -82,6 +89,7 @@ SEARCH_SHOW_BROWSER=true
 - `SUBAGENT_MODEL`：可选，四柱/多 Agent 子模型，OpenCode 默认建议使用 `deepseek-v4-flash-free`，避免触发付费模型。
 - `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`：可选，DeepSeek 专属配置。
 - `DEEPSEEK_THINKING_MODE`：可选，默认 `enabled`。DeepSeek thinking 模式在工具调用后要求完整回传 `reasoning_content`，如遇兼容问题可改为 `disabled`。
+- `BAISUB_API_KEY` / `BAISUB_API_KEYS` / `BAISUB_MODEL` / `BAISUB_MODELS` / `BAISUB_BASE_URL`：可选，BaiSub 专属配置。`BAISUB_API_KEYS` 和 `BAISUB_MODELS` 支持逗号分隔，并按顺序配对；当某个 key 不可用、限流、权限不足或模型不支持时，会自动尝试下一个 key/model。默认基址是 `https://baisub.bai.edu.kg/v1`。
 - `MAX_CONTEXT_TOKENS`：模型调用前的上下文保护阈值，默认 `400000`。超过该预算时会先压缩较早历史；若单条消息或工具结果仍过大，会只把首尾片段发送给模型，完整内容仍保存在本地历史中。
 
 ### 3. 启动
