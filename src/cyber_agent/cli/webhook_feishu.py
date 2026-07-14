@@ -2207,12 +2207,16 @@ def _build_hardcoded_feishu_model_config_payload(
         action_rows=[
             *_build_feishu_command_action_rows(
                 (
+                    ("切到 CC-SWITCH", "/service ccswitch"),
+                    ("切到 AI 952048", "/service ai952048"),
                     ("切到 OpenAI", "/service openai"),
                     ("切到 DeepSeek", "/service deepseek"),
+                    ("CC-SWITCH 当前模型", "/model gpt-5.5"),
+                    ("AI 952048 默认模型", "/model grok-4.5"),
                     ("OpenAI 默认模型", "/model gpt-5.4"),
                     ("DeepSeek 默认模型", "/model deepseek-v4-pro"),
                 ),
-                primary_commands=("/service openai", "/service deepseek"),
+                primary_commands=("/service ccswitch", "/service ai952048"),
                 row_size=2,
             ),
             *_build_feishu_command_action_rows(

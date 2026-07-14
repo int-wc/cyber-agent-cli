@@ -150,6 +150,36 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
             ],
         )
 
+    def test_provider_fallback_treats_503_as_retryable(self) -> None:
+        calls: list[str] = []
+
+        class FakeLlm:
+            def __init__(self, **kwargs):
+                self.api_key = kwargs["api_key"]
+
+            def invoke(self, messages):
+                calls.append(self.api_key)
+                if self.api_key == "bad-key":
+                    raise RuntimeError("503 Service temporarily unavailable")
+                return "ok"
+
+        llm = build_llm_with_proxy_fallback(
+            FakeLlm,
+            {
+                "api_key": "bad-key",
+                "model": "model-a",
+                "_fallback_kwargs": [
+                    {
+                        "api_key": "good-key",
+                        "model": "model-b",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(llm.invoke(["hi"]), "ok")
+        self.assertEqual(calls, ["bad-key", "good-key"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -445,7 +445,7 @@ def create_app() -> FastAPI:
     async def config_providers():
         from ..config import settings
         providers = getattr(settings, "provider_configs", {})
-        return {"providers": list(providers.keys()) if providers else ["opencode", "openai", "deepseek", "claude", "mimo"]}
+        return {"providers": list(providers.keys()) if providers else ["ccswitch", "ai952048", "opencode", "openai", "deepseek", "claude", "mimo"]}
 
     # ── 工具列表 ──
 

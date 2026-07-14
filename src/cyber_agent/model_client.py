@@ -47,6 +47,7 @@ def _is_provider_fallback_error(exc: Exception) -> bool:
         "401",
         "403",
         "429",
+        "503",
         "unauthorized",
         "forbidden",
         "invalid api key",
@@ -62,6 +63,7 @@ def _is_provider_fallback_error(exc: Exception) -> bool:
         "not support",
         "unsupported model",
         "freeusagelimiterror",
+        "service temporarily unavailable",
     )
     return any(marker in message for marker in markers)
 

@@ -28,6 +28,8 @@ CONFIG_ENV_KEYS: EnvKeys = (
     "OPENCODE_MODEL",
     "OPENCODE_BASE_URL",
     "OPENCODE_PROXY_URL",
+    "CC_SWITCH_SYNC_ENABLED",
+    "CC_SWITCH_DB_PATH",
     "SUBAGENT_MODEL",
     "MAX_CONTEXT_CHARS",
     "MAX_CONTEXT_TOKENS",
@@ -322,6 +324,141 @@ class SettingsTestCase(unittest.TestCase):
 
         self.assertEqual(kwargs["base_url"], "http://127.0.0.1:8317/v1")
         self.assertEqual(kwargs["extra_body"], {"provider": "openai"})
+
+    def test_ai952048_uses_streaming_user_agent(self) -> None:
+        """
+        测试：新默认供应商在流式调用时会注入稳定的 User-Agent。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="ai952048",
+            GATEWAY_DEFAULT_MODEL="grok-4.5",
+            GATEWAY_BASE_URL="https://ai.952048.xyz/v1",
+            GATEWAY_API_KEY="ai952048-key",
+            BAISUB_API_KEYS="baisub-key-a,baisub-key-b",
+            BAISUB_MODELS="grok-4.5,grok-4.5",
+            OPENCODE_API_KEY="opencode-key",
+            OPENCODE_BASE_URL="https://opencode.ai/zen/v1",
+            OPENCODE_MODEL="deepseek-v4-flash-free",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(kwargs["default_headers"], {"User-Agent": "curl/8.0"})
+        self.assertEqual(kwargs["extra_body"], {"provider": "ai952048"})
+        self.assertEqual(len(kwargs["_fallback_kwargs"]), 3)
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["extra_body"], {"provider": "baisub"})
+        self.assertEqual(kwargs["_fallback_kwargs"][1]["extra_body"], {"provider": "baisub"})
+        self.assertEqual(kwargs["_fallback_kwargs"][2]["extra_body"], {"provider": "opencode"})
+
+    def test_ccswitch_service_reads_current_codex_provider(self) -> None:
+        """
+        测试：ccswitch 服务会从 CC-SWITCH 数据库同步当前 Codex provider。
+        """
+        import json
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "cc-switch.db")
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    """
+                    create table providers (
+                        id text not null,
+                        app_type text not null,
+                        name text not null,
+                        settings_config text not null,
+                        meta text not null default '{}',
+                        is_current integer not null default 0,
+                        in_failover_queue integer not null default 0,
+                        sort_index integer,
+                        created_at integer,
+                        primary key (id, app_type)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    insert into providers (
+                        id, app_type, name, settings_config, meta,
+                        is_current, in_failover_queue, sort_index, created_at
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "provider-a",
+                        "codex",
+                        "CC Current",
+                        json.dumps(
+                            {
+                                "auth": {"OPENAI_API_KEY": "cc-key"},
+                                "config": (
+                                    'model = "gpt-5.5"\n'
+                                    '[model_providers.custom]\n'
+                                    'base_url = "https://ai.952048.xyz"\n'
+                                    'wire_api = "responses"\n'
+                                ),
+                            }
+                        ),
+                        json.dumps({"apiFormat": "openai_responses"}),
+                        1,
+                        0,
+                        0,
+                        1,
+                    ),
+                )
+                connection.execute(
+                    """
+                    insert into providers (
+                        id, app_type, name, settings_config, meta,
+                        is_current, in_failover_queue, sort_index, created_at
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "provider-b",
+                        "codex",
+                        "CC Fallback",
+                        json.dumps(
+                            {
+                                "auth": {"OPENAI_API_KEY": "cc-fallback-key"},
+                                "config": (
+                                    'model = "gpt-5.6"\n'
+                                    '[model_providers.custom]\n'
+                                    'base_url = "https://fallback.example.test/v1/responses"\n'
+                                    'wire_api = "responses"\n'
+                                ),
+                            }
+                        ),
+                        json.dumps({"apiFormat": "openai_responses"}),
+                        0,
+                        0,
+                        1,
+                        2,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with temporary_config_env(
+                GATEWAY_DEFAULT_SERVICE="ccswitch",
+                CC_SWITCH_SYNC_ENABLED="true",
+                CC_SWITCH_DB_PATH=db_path,
+            ):
+                config_module = import_config_module()
+                settings = config_module.Settings(_env_file=None)
+
+            kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+
+        self.assertEqual(settings.get_service(), "ccswitch")
+        self.assertEqual(kwargs["model"], "gpt-5.5")
+        self.assertEqual(kwargs["api_key"], "cc-key")
+        self.assertEqual(kwargs["base_url"], "https://ai.952048.xyz/v1")
+        self.assertEqual(kwargs["default_headers"], {"User-Agent": "curl/8.0"})
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["model"], "gpt-5.6")
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["api_key"], "cc-fallback-key")
+        self.assertEqual(kwargs["_fallback_kwargs"][0]["base_url"], "https://fallback.example.test/v1")
 
     def test_baisub_can_use_ordered_keys_and_models(self) -> None:
         """

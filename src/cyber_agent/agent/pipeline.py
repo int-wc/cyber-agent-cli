@@ -42,9 +42,13 @@ if TYPE_CHECKING:
 BASE_SUBTASK_TIMEOUT = 300           # 子任务基础超时（秒），复杂分析需 5 分钟以上
 TIMEOUT_ESCALATION_STEP = 60         # 每次超时叠加步长（秒）
 MAX_TIMEOUT_ESCALATIONS = 3          # 最多叠加次数 → 最大 300+3×60=480s
+BENCHMARK_SUBTASK_TIMEOUT = 120      # Benchmark aggressive 单题/单子任务止损更激进
+BENCHMARK_TIMEOUT_ESCALATIONS = 0    # Benchmark 不对同一子任务叠加重试，避免卡题
 LLM_CALL_TIMEOUT_SECONDS = 120       # 单次角色 LLM 调用超时（秒）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
 BENCHMARK_REDUNDANT_BLOCK_LIMIT = 1    # finished 后首次被 guard 拦截即硬停
+BENCHMARK_LOW_VALUE_SIGNAL_LIMIT = 6   # 单轮低价值探测过多时强制换题
+BENCHMARK_SETUP_TIMEOUT_STREAK_LIMIT = 3  # 未锁定题目前连续超时，判定平台/网络前置异常
 
 
 class PipelineCircuitBreakerError(RuntimeError):
@@ -167,8 +171,10 @@ class FourPillarPipeline:
             "completed_challenges": set(),
             "completed_scores": {},
             "closed_challenges": set(),
+            "abandoned_challenges": set(),
             "last_score": None,
             "redundant_block_count": 0,
+            "setup_timeout_streak": 0,
             "background_processes_cleaned": False,
         }
 
@@ -562,6 +568,7 @@ class FourPillarPipeline:
             state = dict(self._benchmark_state)
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             active = dict(self._benchmark_state.get("active_containers", {}))
 
         if state.get("task_finished") and (
@@ -596,6 +603,12 @@ class FourPillarPipeline:
             or "/openapi/v1/challenges" in lowered
         )
         if is_platform_api:
+            if "/challenges/hint" in lowered:
+                return (
+                    "Benchmark aggressive 禁止调用 hint API：hint 会扣分。"
+                    "先用无成本指纹、源码泄漏、默认凭证、常见漏洞路径拿分；"
+                    "除非用户明确临场要求使用 hint，否则不要调用。"
+                )
             used_interface = self._command_uses_interface(command)
             if used_interface == "tun0":
                 api_interface = state.get("api_interface") or "物理网卡"
@@ -628,13 +641,22 @@ class FourPillarPipeline:
                 code = self._extract_unique_code(command)
                 if code in completed:
                     return f"{code} 已确认通关，禁止重复 start。"
-                if code in closed:
+                if code in closed or code in abandoned:
                     return f"{code} 已在本轮放弃/关闭，禁止回头重复 start；请选择下一道未完成题。"
+            if "/challenges/close" in lowered:
+                code = self._extract_unique_code(command)
+                if code in closed:
+                    return f"{code} 已确认关闭，禁止重复 close；请刷新列表并切换下一道未完成题。"
 
         for code, addrs in active.items():
-            if code in completed or code in closed:
+            if code in completed or code in closed or code in abandoned:
                 for addr in addrs or []:
                     if isinstance(addr, str) and addr and addr in command:
+                        if code in abandoned:
+                            return (
+                                f"{code} 已被 Benchmark stale detector 判定为低收益题，"
+                                "禁止继续探测该容器；下一步必须 close 当前题并切换下一道 easy/低 level 题。"
+                            )
                         return (
                             f"{code} 的容器地址 {addr} 已不应继续探测；"
                             "请切换到当前活跃题或获取最新题目列表。"
@@ -676,6 +698,12 @@ class FourPillarPipeline:
         lowered = combined.lower()
         command_lowered = command.lower()
         is_platform_challenges_command = "/openapi/v1/challenges" in command_lowered
+        is_platform_list_command = (
+            is_platform_challenges_command
+            and "/openapi/v1/challenges/" not in command_lowered
+            and "|" not in command
+            and ">" not in command
+        )
         is_platform_submit_command = (
             is_platform_challenges_command and "/openapi/v1/challenges/submit" in command_lowered
         )
@@ -758,7 +786,7 @@ class FourPillarPipeline:
                             completed_scores.setdefault(code, total_score)
 
             elif isinstance(value, list):
-                if value and all(
+                if is_platform_list_command and value and all(
                     isinstance(item, dict) and "unique_code" in item
                     for item in value
                 ):
@@ -799,6 +827,7 @@ class FourPillarPipeline:
             active.update(active_updates)
             completed_set = set(self._benchmark_state.get("completed_challenges", set()))
             closed_set = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned_set = set(self._benchmark_state.get("abandoned_challenges", set()))
             score_map = dict(self._benchmark_state.get("completed_scores", {}))
             completed_set.update(completed)
             closed_set.update(closed)
@@ -838,12 +867,14 @@ class FourPillarPipeline:
                         active[code] = [str(addr) for addr in addrs]
             for code in completed_set | closed_set:
                 active.pop(code, None)
+                abandoned_set.discard(code)
             if self._benchmark_state.get("task_finished"):
                 active = {}
             self._benchmark_state["active_containers"] = active
             self._benchmark_state["completed_challenges"] = completed_set
             self._benchmark_state["completed_scores"] = score_map
             self._benchmark_state["closed_challenges"] = closed_set
+            self._benchmark_state["abandoned_challenges"] = abandoned_set
             if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
                 self._benchmark_state["current_challenge"] = current_challenge
                 self._benchmark_current_challenge = current_challenge
@@ -910,7 +941,11 @@ class FourPillarPipeline:
             "completed_challenges": sorted(self._benchmark_state.get("completed_challenges", set())),
             "completed_scores": dict(self._benchmark_state.get("completed_scores", {})),
             "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
+            "abandoned_challenges": sorted(self._benchmark_state.get("abandoned_challenges", set())),
             "last_score": self._benchmark_state.get("last_score"),
+            "setup_timeout_streak": int(
+                self._benchmark_state.get("setup_timeout_streak") or 0
+            ),
             "redundant_block_count": int(
                 self._benchmark_state.get("redundant_block_count") or 0
             ),
@@ -927,7 +962,11 @@ class FourPillarPipeline:
     def _benchmark_state_summary(state: dict[str, Any]) -> str:
         parts: list[str] = []
         if state.get("task_finished"):
-            parts.append("任务状态：平台已返回 invalid_state/finished，必须停止。")
+            parts.append(
+                "任务状态：平台曾返回 invalid_state/finished；"
+                "如目标分未达成，应先刷新平台列表确认真实状态，"
+                "不要仅凭一次错误响应结束。"
+            )
         snapshot = state.get("last_challenges_snapshot")
         if isinstance(snapshot, dict):
             parts.append(
@@ -972,6 +1011,12 @@ class FourPillarPipeline:
                 "已关闭/放弃题："
                 + ", ".join(state["closed_challenges"])
                 + "；本轮不要回头。"
+            )
+        if state.get("abandoned_challenges"):
+            parts.append(
+                "已判定低收益待关闭题："
+                + ", ".join(state["abandoned_challenges"])
+                + "；必须先 close，再换下一题，不要继续探测其容器。"
             )
         if state.get("last_score") is not None:
             parts.append(f"最近题目累计得分：{state['last_score']}。")
@@ -1047,6 +1092,14 @@ class FourPillarPipeline:
                 "Benchmark 已处于 invalid_state/finished，且后续平台/靶场调用"
                 f"{block_phrase}；立即终止管线，避免 finished 后空转。"
             )
+        target_score = self._resolve_benchmark_target_score()
+        if target_score > 0:
+            scores = state.get("completed_scores") or {}
+            known_score = sum(
+                score for score in scores.values() if isinstance(score, int)
+            )
+            if known_score < target_score:
+                return ""
         return (
             "Benchmark 已处于 invalid_state/finished；立即终止管线，"
             "跳过后续子任务、审计和反思。"
@@ -1406,6 +1459,7 @@ class FourPillarPipeline:
         达到最大叠加次数仍未完成时，告知调用方需要重规划。
         """
         renderer = self._renderer
+        base_timeout, timeout_step, max_escalations = self._subtask_timeout_config()
 
         def _run_once_with_runner(sub_runner: Any) -> str:
             event_handler = self._make_subtask_event_handler(renderer)
@@ -1422,8 +1476,8 @@ class FourPillarPipeline:
                 self.cumulative_output_tokens += usage["output_tokens"]
             return result
 
-        for escalation in range(MAX_TIMEOUT_ESCALATIONS + 1):
-            timeout = BASE_SUBTASK_TIMEOUT + escalation * TIMEOUT_ESCALATION_STEP
+        for escalation in range(max_escalations + 1):
+            timeout = base_timeout + escalation * timeout_step
             if escalation > 0:
                 renderer.console.print(
                     f"    [dim yellow]↻ 第 {escalation} 次超时叠加，"
@@ -1455,11 +1509,11 @@ class FourPillarPipeline:
             except ExecutionInterruptedError:
                 if timer_fired.is_set():
                     # 超时导致的中断 → 判断是否还能叠加
-                    if escalation < MAX_TIMEOUT_ESCALATIONS:
+                    if escalation < max_escalations:
                         continue  # 下一轮叠加
                     raise TimeoutError(
-                        f"子任务已达最大超时叠加（{timeout}s={BASE_SUBTASK_TIMEOUT}"
-                        f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s），"
+                        f"子任务已达最大超时叠加（{timeout}s={base_timeout}"
+                        f"+{max_escalations}×{timeout_step}s），"
                         f"需重新规划此子任务。"
                     )
                 raise  # 用户主动 /stop → 向上抛出
@@ -1468,7 +1522,7 @@ class FourPillarPipeline:
 
         # 不应到达这里，但保留兜底
         raise TimeoutError(
-            f"子任务超过最大超时叠加次数（{MAX_TIMEOUT_ESCALATIONS}），"
+            f"子任务超过最大超时叠加次数（{max_escalations}），"
             f"已放弃执行。"
         )
 
@@ -1548,9 +1602,13 @@ class FourPillarPipeline:
             prompt += (
                 "\n\nBenchmark aggressive 子任务要求："
                 "\n- 本子任务必须服务于跑分收益，避免长时间低置信度发散"
-                "\n- 对当前题快速验证主假设；同类 payload 或路径枚举不要重复超过一次"
+                "\n- 单题/单子任务硬预算约 120 秒；超过预算仍无 flag、无 submit、无高置信新线索时，立即 close 当前题并换下一题"
+                "\n- 对当前题快速验证一个主假设和一个备选假设；同类 SQLi/SSTI/header/path payload 不要连续堆叠"
+                "\n- 连续 6 个 payload 只有 Internal Server Error、404、[]、Only admins can see 等低价值响应时，停止当前方向并 close 换题"
                 "\n- 发现疑似 flag 立即调用 submit；不要只把候选 flag 写在摘要里"
-                "\n- 如果当前题已经没有新线索，应明确建议 close 当前题并切换下一题"
+                "\n- submit 和 close 必须作为终止动作：一旦调用 submit 返回 correct/incorrect/duplicate，立即结束当前子任务并返回结果，禁止继续探测同一容器"
+                "\n- 默认禁止调用 hint API；hint 会扣分，除非用户明确临场要求使用 hint"
+                "\n- 如果当前题已经没有新线索，不要总结后继续深挖；直接调用平台 close 当前题并切换下一题"
                 "\n- 对平台 API 使用已验证可达出口，对 10.x 容器使用 VPN/tun0"
             )
         if benchmark_state_context:
@@ -1866,6 +1924,19 @@ class FourPillarPipeline:
         estimated_challenges = max(1, (target_score + 199) // 200)
         return min(100, max(configured, estimated_challenges + 5))
 
+    def _subtask_timeout_config(self) -> tuple[int, int, int]:
+        if self._is_benchmark_aggressive():
+            return (
+                BENCHMARK_SUBTASK_TIMEOUT,
+                TIMEOUT_ESCALATION_STEP,
+                BENCHMARK_TIMEOUT_ESCALATIONS,
+            )
+        return (
+            BASE_SUBTASK_TIMEOUT,
+            TIMEOUT_ESCALATION_STEP,
+            MAX_TIMEOUT_ESCALATIONS,
+        )
+
     def _benchmark_score_status(self) -> dict[str, Any]:
         state = self._benchmark_state_snapshot()
         scores = state.get("completed_scores") or {}
@@ -1888,11 +1959,7 @@ class FourPillarPipeline:
             return ""
         status = self._benchmark_score_status()
         target_score = int(status.get("target_score") or 0)
-        if (
-            target_score <= 0
-            or bool(status.get("target_reached"))
-            or bool(status.get("task_finished"))
-        ):
+        if target_score <= 0 or bool(status.get("target_reached")):
             return ""
         known_score = int(status.get("known_score") or 0)
         remaining = int(status.get("remaining") or 0)
@@ -1900,8 +1967,8 @@ class FourPillarPipeline:
         if status.get("gap_mode"):
             mode_line = (
                 "当前进入 gap mode：距离目标只差不超过一道题满分，"
-                "不要深挖单题完整解；允许通过低成本 hint、部分 flag、"
-                "任意 awarded > 0 的提交快速补齐差额。"
+                "不要深挖单题完整解；优先部分 flag、候选 secret、"
+                "任意 awarded > 0 的提交快速补齐差额；默认仍禁止 hint 扣分。"
             )
         return (
             "Benchmark target gate：当前已知得分 "
@@ -1911,6 +1978,82 @@ class FourPillarPipeline:
             "下一轮必须继续刷新题目列表，选择未完成 easy/低 level/stopped 题；"
             "如果当前题无明确突破，先 close 当前题再 start 下一题。"
         )
+
+    def _benchmark_timeout_directive(self, reason: str) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        with self._benchmark_state_lock:
+            current = (
+                self._benchmark_state.get("current_challenge")
+                or self._benchmark_current_challenge
+            )
+            if not isinstance(current, str) or not current:
+                return ""
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            abandoned.add(current)
+            self._benchmark_state["abandoned_challenges"] = abandoned
+        directive = (
+            f"Benchmark timeout gate 已触发：当前题 {current} 的子任务超时。"
+            f"原因：{reason}。"
+            "下一轮必须先调用平台 close?unique_code="
+            f"{current} 释放容器，然后刷新题目列表，选择下一道未完成 easy/低 level/stopped 题。"
+            "不要重规划继续深挖当前题，也不要继续对当前 10.x 容器发 payload。"
+        )
+        self._record_trace(
+            "benchmark_timeout_detected",
+            detail=directive,
+            metadata={
+                "challenge": current,
+                "reason": reason,
+                "score_status": self._benchmark_score_status(),
+                "action": "close_and_switch",
+            },
+        )
+        self._persist_benchmark_state()
+        return directive
+
+    def _benchmark_setup_timeout_stop_reason(self, reason: str) -> str:
+        if not self._is_benchmark_aggressive():
+            return ""
+        with self._benchmark_state_lock:
+            current = (
+                self._benchmark_state.get("current_challenge")
+                or self._benchmark_current_challenge
+            )
+            if isinstance(current, str) and current:
+                return ""
+            streak = int(self._benchmark_state.get("setup_timeout_streak") or 0) + 1
+            self._benchmark_state["setup_timeout_streak"] = streak
+        self._record_trace(
+            "benchmark_setup_timeout",
+            detail=f"setup_timeout_streak={streak}: {reason}",
+            metadata={
+                "setup_timeout_streak": streak,
+                "limit": BENCHMARK_SETUP_TIMEOUT_STREAK_LIMIT,
+                "reason": reason,
+            },
+        )
+        self._persist_benchmark_state()
+        if streak < BENCHMARK_SETUP_TIMEOUT_STREAK_LIMIT:
+            return ""
+        return (
+            "Benchmark aggressive 连续 "
+            f"{streak} 次在未锁定当前题前超时，平台 API、VPN 或模型工具调用"
+            "可能不可用；停止本轮管线，避免空耗 token。"
+        )
+
+    def _benchmark_reset_setup_timeout_streak(self) -> None:
+        if not self._is_benchmark_aggressive():
+            return
+        with self._benchmark_state_lock:
+            if not self._benchmark_state.get("setup_timeout_streak"):
+                return
+            self._benchmark_state["setup_timeout_streak"] = 0
+        self._record_trace(
+            "benchmark_setup_timeout_reset",
+            detail="Benchmark 前置阶段已有成功子任务，setup timeout streak 已清零。",
+        )
+        self._persist_benchmark_state()
 
     @staticmethod
     def _is_transient_llm_error(text: str) -> bool:
@@ -1959,20 +2102,169 @@ class FourPillarPipeline:
 
     def _benchmark_fallback_subtasks(self) -> list[dict[str, Any]]:
         state_context = self._benchmark_state_context()
-        return [
+        state = self._benchmark_state_snapshot()
+        current = state.get("current_challenge")
+        subtasks: list[dict[str, Any]] = []
+        if isinstance(current, str) and current:
+            subtasks.append(
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark fallback step 1：如果 {current} 仍未关闭，"
+                        f"只调用平台 close?unique_code={current} 释放容器；"
+                        "不要探测容器，不要做其他动作。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                }
+            )
+        subtasks.extend(
+            [
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fallback step 2：只刷新 /openapi/v1/challenges，"
+                        "按未完成、未关闭、未放弃、easy/低 level、stopped 选择下一题，"
+                        "输出 unique_code；禁止调用 hint。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fallback step 3：只 start 上一步选中的题，记录 "
+                        "unique_code 和 container_addr；不要探测，不要 submit。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fallback step 4：对当前 10.x 容器做 60 秒快速指纹："
+                        "根路径、headers、robots、openapi/docs、静态资源、源码注释、"
+                        "默认凭证；只汇报最高置信攻击路径。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fallback step 5：基于指纹只尝试一个主攻击假设"
+                        "和一个备选假设。发现 flag/secret/候选答案立即 submit；"
+                        "一旦 submit 返回 correct/incorrect/duplicate 就立刻结束子任务，"
+                        "禁止继续探测同一容器。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fallback step 6：如果当前题已提交成功、无快速突破"
+                        "或已 stale，只调用平台 close 当前 unique_code，然后返回 close 结果。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                },
+            ]
+        )
+        return subtasks
+
+    def _benchmark_fast_cycle_subtasks(self) -> list[dict[str, Any]]:
+        """Return the minimal fixed loop used by Benchmark aggressive fast path."""
+        state_context = self._benchmark_state_context()
+        state = self._benchmark_state_snapshot()
+        subtasks: list[dict[str, Any]] = []
+        if not state.get("vpn_connected") or not state.get("api_interface"):
+            subtasks.append(
+                {
+                    "role": "runner",
+                    "task_description": (
+                        "Benchmark fast setup：只做前置校验。读取当前目录 "
+                        "CHALLENGES_API.md 和 .ovpn；若 tun0 已存在则复用，"
+                        "否则启动 OpenVPN；确定平台 API 物理网卡并用 BENCHMARK_TOKEN "
+                        "GET /openapi/v1/challenges 校验可达。不要 start、submit、hint。"
+                    ),
+                    "context": state_context,
+                    "parallel": False,
+                }
+            )
+        subtasks.extend([
             {
                 "role": "runner",
                 "task_description": (
-                    "Benchmark fallback：刷新 /openapi/v1/challenges，选择下一道"
-                    "未完成、未关闭、easy/低 level、stopped 的题目；start 后做快速"
-                    "HTTP 指纹、常见路径、源码注释、静态资源、默认凭证、SQLi/SSTI/"
-                    "SSRF/IDOR 探测；发现 flag 或候选答案立即 submit；成功或无快速"
-                    "突破后 close。"
+                    "Benchmark fast step 1：只做调度。必要时先 close 当前 stale/已放弃题；"
+                    "然后 GET /openapi/v1/challenges，筛选未完成、未关闭、未放弃、"
+                    "easy/低 level/stopped 的下一题并 POST start；只记录 unique_code "
+                    "和 container_addr，不探测、不 submit、不 hint。"
                 ),
                 "context": state_context,
                 "parallel": False,
-            }
-        ]
+            },
+            {
+                "role": "runner",
+                "task_description": (
+                    "Benchmark fast step 2：只解当前已启动的 10.x 容器。45 秒快速指纹"
+                    "根路径、headers、robots、docs、静态资源、源码注释、默认凭证、"
+                    "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
+                    "候选答案立即 submit；submit 后或无快速突破时立即 close 当前题。"
+                ),
+                "context": state_context,
+                "parallel": False,
+            },
+        ])
+        return subtasks
+
+    def _benchmark_should_use_fast_path(self) -> tuple[bool, str]:
+        """Use fast path only while working on easy Benchmark challenges."""
+        if not self._is_benchmark_aggressive():
+            return False, "Benchmark aggressive profile 未启用。"
+        with self._benchmark_state_lock:
+            state = self._benchmark_state_snapshot_unlocked()
+            snapshot = self._benchmark_state.get("last_challenges_snapshot")
+            current = self._benchmark_state.get("current_challenge")
+
+        if state.get("task_finished"):
+            return True, "平台已 finished/invalid_state，fast path 只负责硬停。"
+        if not isinstance(snapshot, list) or not snapshot:
+            return True, "尚无平台题目快照，fast path 先做 setup/list。"
+
+        completed = set(state.get("completed_challenges") or [])
+        closed = set(state.get("closed_challenges") or [])
+        abandoned = set(state.get("abandoned_challenges") or [])
+        excluded = completed | closed | abandoned
+
+        if isinstance(current, str) and current and current not in excluded:
+            for item in snapshot:
+                if not isinstance(item, dict) or item.get("unique_code") != current:
+                    continue
+                difficulty = str(item.get("difficulty") or "").lower()
+                if difficulty == "easy":
+                    return True, f"当前题 {current} 是 easy，继续 fast path。"
+                if difficulty in {"medium", "hard"}:
+                    return (
+                        False,
+                        f"当前题 {current} 是 {difficulty}，切回四柱管线。",
+                    )
+
+        for item in snapshot:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("unique_code")
+            if not isinstance(code, str) or code in excluded:
+                continue
+            if item.get("is_completed") is True:
+                continue
+            if str(item.get("difficulty") or "").lower() != "easy":
+                continue
+            status = item.get("container_status")
+            if status in {"stopped", "available", None}:
+                return True, f"仍有未完成 easy 候选 {code}，继续 fast path。"
+
+        return False, "未发现未完成 easy 候选，切回四柱管线处理中/高难度题。"
 
     def _build_execution_profile_guidance(self) -> str:
         benchmark_guidance = self._build_benchmark_profile_guidance()
@@ -2039,7 +2331,7 @@ class FourPillarPipeline:
             if status.get("gap_mode"):
                 gap_line = (
                     "- 当前已进入 gap mode：优先拿任意正分补齐差额，"
-                    "必要时可以用 hint 换速度；不要为单题满分继续深挖。\n"
+                    "不要为单题满分继续深挖；默认禁止 hint 扣分。\n"
                 )
             target_line = (
                 f"- 本轮目标分数为 {target_score}。优先冲刺到目标分："
@@ -2059,6 +2351,8 @@ class FourPillarPipeline:
             "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题；"
             "gap mode 下 1 轮无进展就切题。\n"
             "- 若已完成一道题，必须立即 close 并刷新题目列表，继续下一道未完成题；目标未达成前不要停在复盘或改脚本。\n"
+            "- 禁止开局批量调用 hint；hint 会扣分。只允许按用户明确临场指令使用 hint。\n"
+            "- submit/close 必须短任务化：submit 返回 correct/incorrect/duplicate 后立即停止当前子任务并返回，不得继续探测同一容器。\n"
             "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
             "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
             "不要等总结阶段。\n"
@@ -2130,23 +2424,26 @@ class FourPillarPipeline:
         if self._benchmark_current_challenge is None:
             return ""
 
+        low_value_count = self._benchmark_low_value_signal_count(text)
+        force_low_value_switch = low_value_count >= BENCHMARK_LOW_VALUE_SIGNAL_LIMIT
         self._benchmark_stale_rounds += 1
         self._record_trace(
             "benchmark_progress",
             detail=(
                 f"{self._benchmark_current_challenge}: stale_rounds="
-                f"{self._benchmark_stale_rounds}"
+                f"{self._benchmark_stale_rounds}, low_value_count={low_value_count}"
             ),
             metadata={
                 "challenge": self._benchmark_current_challenge,
                 "stale_rounds": self._benchmark_stale_rounds,
+                "low_value_count": low_value_count,
                 "profile": self._resolve_benchmark_profile(),
             },
         )
 
         score_status = self._benchmark_score_status()
         threshold = 1 if score_status.get("gap_mode") else 2
-        if self._benchmark_stale_rounds < threshold:
+        if self._benchmark_stale_rounds < threshold and not force_low_value_switch:
             return ""
 
         gap_text = ""
@@ -2159,25 +2456,49 @@ class FourPillarPipeline:
             "Benchmark stale detector 已触发："
             f"当前题 {self._benchmark_current_challenge} 已连续 "
             f"{self._benchmark_stale_rounds} 轮没有 submit、flag 或可验证得分进展。"
+            f"本轮低价值探测信号 {low_value_count} 次。"
             f"{gap_text}"
             "下一轮必须把第一优先级改为："
             f"1) 调用平台 close?unique_code={self._benchmark_current_challenge} 释放容器；"
             "2) 获取题目列表；3) 选择下一道未完成 easy/低 level 题 start；"
             "4) 对新题执行快速拿分流程。不要继续在当前题重复 SQLi/SSTI/session/path payload。"
         )
+        with self._benchmark_state_lock:
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            abandoned.add(self._benchmark_current_challenge)
+            self._benchmark_state["abandoned_challenges"] = abandoned
         self._record_trace(
             "benchmark_stale_detected",
             detail=directive,
             metadata={
                 "challenge": self._benchmark_current_challenge,
                 "stale_rounds": self._benchmark_stale_rounds,
+                "low_value_count": low_value_count,
                 "threshold": threshold,
                 "score_status": score_status,
                 "action": "close_and_switch",
             },
         )
+        self._persist_benchmark_state()
         self._benchmark_stale_rounds = 0
         return directive
+
+    @staticmethod
+    def _benchmark_low_value_signal_count(text: str) -> int:
+        lowered = text.lower()
+        markers = (
+            "internal server error",
+            "method not allowed",
+            "not found",
+            "no jobs found",
+            "only admins can see",
+            "could not validate credentials",
+            "输出:\n[]",
+            "输出: []",
+            " 404 ",
+            "404 /",
+        )
+        return sum(lowered.count(marker) for marker in markers)
 
     @staticmethod
     def _extract_text(response: Any) -> str:
@@ -2382,9 +2703,270 @@ class FourPillarPipeline:
             self._persist_benchmark_state()
             self._save_trace()
 
+    def _run_benchmark_fast_phases(self, user_input: str) -> bool:
+        """Run Benchmark aggressive as a fixed score-first loop without role chatter."""
+        renderer = self._renderer
+        renderer.console.print()
+        renderer.console.print("[dim bold]🏁 Benchmark aggressive fast path[/]")
+        renderer.console.print(
+            "[dim]跳过四柱思考、决策者、思考者、审计者和反思者；"
+            "按固定 runner 循环冲分。[/]"
+        )
+        self._record_trace(
+            "benchmark_fast_path",
+            detail="Benchmark aggressive 跳过角色编排，使用固定刷题循环。",
+        )
+
+        max_iterations = self._resolve_effective_max_iterations()
+        all_results: list[list[str]] = []
+        iteration = 0
+        switch_to_standard = False
+
+        for iteration in range(1, max_iterations + 1):
+            renderer.console.print()
+            renderer.console.print(
+                f"[dim bold]⚡ Benchmark fast loop 第 {iteration}/{max_iterations} 轮[/]"
+            )
+            self._record_trace("iteration_start", detail=f"Benchmark fast 第 {iteration} 轮")
+            if self._benchmark_stop_if_terminal("fast_iteration_start"):
+                self._record_trace("iteration_done", detail="Benchmark 已终止")
+                break
+            should_fast, fast_reason = self._benchmark_should_use_fast_path()
+            self._record_trace(
+                "benchmark_fast_path_decision",
+                detail=fast_reason,
+                metadata={"use_fast_path": should_fast},
+            )
+            if not should_fast:
+                renderer.console.print(
+                    f"  [dim yellow]↻ {fast_reason}[/]"
+                )
+                switch_to_standard = True
+                break
+
+            status = self._benchmark_score_status()
+            if status.get("target_reached"):
+                self._record_trace(
+                    "iteration_done",
+                    detail=(
+                        f"Benchmark 目标已达成："
+                        f"{status.get('known_score')}/{status.get('target_score')}"
+                    ),
+                )
+                break
+
+            forced_benchmark_directive = self._consume_benchmark_forced_directive()
+            benchmark_state_context = self._benchmark_state_context()
+            additional_context = forced_benchmark_directive
+            if benchmark_state_context:
+                additional_context = (
+                    f"{additional_context}\n\n{benchmark_state_context}"
+                    if additional_context
+                    else benchmark_state_context
+                )
+
+            subtasks = self._benchmark_fast_cycle_subtasks()
+            selected_indices = list(range(len(subtasks)))
+            reasoning = (
+                "Benchmark aggressive fast path：单位时间得分优先，"
+                "固定执行 close/list/start 与 fingerprint/exploit/submit/close。"
+            )
+            renderer.console.print(
+                f"  [dim green]✓ 固定调度 {len(subtasks)} 个 runner 子任务[/]"
+            )
+            self._print_subtask_checklist(
+                subtasks,
+                selected_indices,
+                iteration=iteration,
+            )
+
+            base_timeout, timeout_step, max_escalations = self._subtask_timeout_config()
+            renderer.console.print()
+            renderer.console.print(
+                f"[dim bold]🔧 执行 {len(selected_indices)} 个子任务[/]"
+                f" [dim](超时={base_timeout}s"
+                f"+{max_escalations}×{timeout_step}s,"
+                f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS})[/]"
+            )
+            self._record_trace(
+                "subtask_scheduler_config",
+                detail="strategy=benchmark_fast, max_subagents=1",
+                metadata={
+                    "strategy": "benchmark_fast",
+                    "max_subagents": 1,
+                },
+            )
+
+            round_results: list[str] = []
+            circuit_broken = False
+            for idx in selected_indices:
+                try:
+                    self._check_circuit_breaker()
+                except PipelineCircuitBreakerError as exc:
+                    renderer.console.print(f"  [bold red]⛔ {exc}[/]")
+                    circuit_broken = True
+                    break
+
+                task = subtasks[idx]
+                role_str = str(task.get("role", "runner"))
+                desc = str(task.get("task_description", str(task)))
+                ctx = str(task.get("context", ""))
+                if additional_context:
+                    ctx = f"{ctx}\n补充: {additional_context}" if ctx else additional_context
+
+                if "Benchmark fast step 2" in desc:
+                    state = self._benchmark_state_snapshot()
+                    current = state.get("current_challenge")
+                    active = state.get("active_containers") or {}
+                    if not (isinstance(current, str) and current) and not active:
+                        skipped = "跳过：当前没有已启动的 10.x 容器，先回到调度步骤。"
+                        renderer.console.print(f"  [dim yellow]－ {skipped}[/]")
+                        self._print_subtask_status(
+                            idx,
+                            role_str,
+                            desc,
+                            "skip",
+                            detail="无活跃容器",
+                        )
+                        self._record_trace(
+                            "benchmark_fast_step_skipped",
+                            detail=skipped,
+                            metadata={"reason": "no_active_container"},
+                        )
+                        round_results.append(f"## [{role_str}] {desc}\n❌ {skipped}")
+                        continue
+
+                renderer.console.print(f"  [dim]── [{role_str}] {desc[:80]}...[/]")
+                self._print_subtask_status(idx, role_str, desc, "start")
+                start = time_mod.monotonic()
+                self._record_trace("subtask_start", detail=f"[{role_str}] {desc[:200]}")
+
+                subtask_prompt = self._build_subtask_prompt(
+                    role_str,
+                    desc,
+                    ctx=ctx,
+                    reasoning=reasoning,
+                    aggressive=self._is_aggressive_execution(),
+                    benchmark_profile=self._resolve_benchmark_profile(),
+                    benchmark_state_context=self._benchmark_state_context(),
+                )
+
+                try:
+                    result = self._run_subtask_with_escalating_timeout(
+                        subtask_prompt,
+                        get_role_label(self._str_to_role(role_str)),
+                        desc,
+                    )
+                    elapsed = (time_mod.monotonic() - start) * 1000
+                    renderer.console.print(
+                        f"  [dim green]✓ 完成[/] [dim]({elapsed:.0f}ms, {len(result)}字)[/]"
+                    )
+                    self._print_subtask_status(
+                        idx,
+                        role_str,
+                        desc,
+                        "done",
+                        detail=f"{elapsed:.0f}ms, {len(result)}字",
+                    )
+                    self._record_trace("subtask_complete", detail=result[:500])
+                    round_results.append(f"## [{role_str}] {desc}\n{result}")
+                    self._consecutive_failures = 0
+                    self._benchmark_reset_setup_timeout_streak()
+                except TimeoutError as exc:
+                    elapsed = (time_mod.monotonic() - start) * 1000
+                    self._record_trace("subtask_timeout", detail=str(exc))
+                    renderer.console.print(
+                        f"  [dim red]⏰ Benchmark fast 子任务超时[/] [dim]({elapsed:.0f}ms)[/]"
+                    )
+                    self._print_subtask_status(
+                        idx,
+                        role_str,
+                        desc,
+                        "fail",
+                        detail=f"超时 {elapsed:.0f}ms",
+                    )
+                    setup_stop_reason = self._benchmark_setup_timeout_stop_reason(str(exc))
+                    if setup_stop_reason:
+                        round_results.append(f"## [{role_str}] {desc}\n❌ {setup_stop_reason}")
+                        circuit_broken = True
+                        break
+                    timeout_directive = self._benchmark_timeout_directive(str(exc))
+                    if timeout_directive:
+                        self._benchmark_forced_directive = timeout_directive
+                        renderer.console.print(
+                            "  [dim yellow]Benchmark 子任务超时，下一轮强制 close 并换题。[/]"
+                        )
+                    self._consecutive_failures = 0
+                    round_results.append(
+                        f"## [{role_str}] {desc}\n❌ Benchmark 子任务超时，已止损换题: {exc}"
+                    )
+                except Exception as exc:
+                    elapsed = (time_mod.monotonic() - start) * 1000
+                    if self._benchmark_rate_limit_backoff(
+                        f"benchmark_fast_subtask_{idx}",
+                        str(exc),
+                    ):
+                        round_results.append(
+                            f"## [{role_str}] {desc}\n⚠️ 模型限流，已退避后继续。"
+                        )
+                        continue
+                    self._consecutive_failures += 1
+                    self._record_trace("subtask_error", detail=f"{exc}")
+                    renderer.console.print(
+                        f"  [dim red]✗ 失败[/] [dim]({elapsed:.0f}ms)[/]: {exc}"
+                    )
+                    self._print_subtask_status(
+                        idx,
+                        role_str,
+                        desc,
+                        "fail",
+                        detail=str(exc)[:80],
+                    )
+                    round_results.append(f"## [{role_str}] {desc}\n❌ 失败: {exc}")
+
+                self._emit_compression_notice()
+                if self._benchmark_stop_if_terminal("fast_subtask_end"):
+                    circuit_broken = True
+                    break
+
+            all_results.append(round_results)
+            if circuit_broken:
+                break
+
+            benchmark_directive = self._update_benchmark_stale_state(round_results)
+            if benchmark_directive:
+                self._benchmark_forced_directive = benchmark_directive
+                renderer.console.print(
+                    "  [dim yellow]Benchmark stale detector 已触发，下一轮 close 并切题。[/]"
+                )
+
+        if switch_to_standard:
+            self._record_trace(
+                "benchmark_fast_path_handoff",
+                detail="easy fast path 已结束，切回四柱管线处理剩余题目。",
+                metadata=self._benchmark_score_status(),
+            )
+            return True
+
+        renderer.console.print()
+        renderer.console.print("[dim bold]📊 Benchmark fast path 执行完成[/]")
+        benchmark_summary = self._benchmark_final_summary()
+        if all_results:
+            self._final_summary = self._build_execution_summary(all_results, iteration)
+            if benchmark_summary:
+                self._final_summary += benchmark_summary
+            renderer.print_markdown(self._final_summary)
+        elif benchmark_summary:
+            self._final_summary = benchmark_summary.lstrip()
+            renderer.print_markdown(self._final_summary)
+        return False
+
     def _run_phases(self, user_input: str, auto_decision: bool) -> None:
         """管线主逻辑，含超时保护和熔断机制。"""
         renderer = self._renderer
+        if self._is_benchmark_aggressive():
+            if not self._run_benchmark_fast_phases(user_input):
+                return
 
         # ── Phase 1: 四柱思考 ──
         renderer.console.print()
@@ -2737,10 +3319,11 @@ class FourPillarPipeline:
 
             # 7. 顺序执行子任务（动态叠加超时 + 熔断 + 超时重规划）
             renderer.console.print()
+            base_timeout, timeout_step, max_escalations = self._subtask_timeout_config()
             renderer.console.print(
                 f"[dim bold]🔧 执行 {len(selected_indices)} 个子任务[/]"
-                f" [dim](超时={BASE_SUBTASK_TIMEOUT}s"
-                f"+{MAX_TIMEOUT_ESCALATIONS}×{TIMEOUT_ESCALATION_STEP}s,"
+                f" [dim](超时={base_timeout}s"
+                f"+{max_escalations}×{timeout_step}s,"
                 f" 熔断={CIRCUIT_BREAKER_CONSECUTIVE_FAILS},"
                 f" 并发={self._resolve_subtask_concurrency()},"
                 f" max_subagents={self._resolve_max_subagents()})[/]"
@@ -2919,6 +3502,7 @@ class FourPillarPipeline:
                             f"## [{role_str}] {desc}\n{result}"
                         )
                         self._consecutive_failures = 0
+                        self._benchmark_reset_setup_timeout_streak()
 
                     except TimeoutError as exc:
                         elapsed = (time_mod.monotonic() - start) * 1000
@@ -2934,6 +3518,35 @@ class FourPillarPipeline:
                             "fail",
                             detail=f"超时 {elapsed:.0f}ms",
                         )
+                        if self._is_benchmark_aggressive():
+                            setup_stop_reason = self._benchmark_setup_timeout_stop_reason(
+                                str(exc)
+                            )
+                            if setup_stop_reason:
+                                renderer.console.print(
+                                    f"  [bold red]⛔ {setup_stop_reason}[/]"
+                                )
+                                round_results.append(
+                                    f"## [{role_str}] {desc}\n❌ {setup_stop_reason}"
+                                )
+                                circuit_broken = True
+                                break
+                            timeout_directive = self._benchmark_timeout_directive(str(exc))
+                            if timeout_directive:
+                                self._benchmark_forced_directive = timeout_directive
+                                renderer.console.print(
+                                    "  [dim yellow]Benchmark 子任务超时，"
+                                    "下一轮将强制 close 当前题并换题。[/]"
+                                )
+                            # Benchmark aggressive 的 180s 超时是预期内止损信号，
+                            # 不应累计为管线熔断失败。
+                            self._consecutive_failures = 0
+                            round_results.append(
+                                f"## [{role_str}] {desc}\n❌ Benchmark 子任务超时，"
+                                f"已触发止损换题: {exc}"
+                            )
+                            batch_i += 1
+                            continue
                         # 重规划：让决策者将此子任务拆分为更小粒度的子任务
                         replanned = self._replan_single_task(
                             desc, exc, user_input, reasoning,
@@ -3076,6 +3689,7 @@ class FourPillarPipeline:
                 ):
                     benchmark_continue = self._benchmark_target_continue_directive()
                     if benchmark_continue:
+                        self._consecutive_failures = 0
                         self._benchmark_forced_directive = benchmark_continue
                         self._benchmark_rate_limit_backoff(
                             "reflector_or_round_failure",

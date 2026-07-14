@@ -19,6 +19,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.agent.pipeline import (
     BASE_SUBTASK_TIMEOUT,
+    BENCHMARK_LOW_VALUE_SIGNAL_LIMIT,
+    BENCHMARK_SUBTASK_TIMEOUT,
     CIRCUIT_BREAKER_CONSECUTIVE_FAILS,
     MAX_TIMEOUT_ESCALATIONS,
     TIMEOUT_ESCALATION_STEP,
@@ -83,7 +85,10 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
 
         self.assertIn("Benchmark aggressive 子任务要求", prompt)
         self.assertIn("发现疑似 flag 立即调用 submit", prompt)
+        self.assertIn("硬预算约 120 秒", prompt)
         self.assertIn("close 当前题并切换下一题", prompt)
+        self.assertIn("默认禁止调用 hint API", prompt)
+        self.assertIn("立即结束当前子任务", prompt)
 
     def test_benchmark_profile_prompt_includes_runtime_state(self):
         """Benchmark 子任务 prompt 应携带已确认运行态，减少重复前置步骤。"""
@@ -155,6 +160,152 @@ class PipelineSessionPersistenceTestCase(unittest.TestCase):
         self.assertEqual(runner.history[1].content, "链接VPN并启动题目")
         self.assertIsInstance(runner.history[2], AIMessage)
         self.assertIn("完整四柱总结", runner.history[2].content)
+
+
+class BenchmarkFastPathTestCase(unittest.TestCase):
+    """测试 Benchmark aggressive 的固定刷题快路径。"""
+
+    def setUp(self):
+        self.runner = MagicMock()
+        self.runner.history = []
+        self.renderer = MagicMock()
+        self.renderer.console.print = MagicMock()
+        self.pipeline = FourPillarPipeline(
+            runner=self.runner,
+            runtime_context={
+                "benchmark_profile": "aggressive",
+                "benchmark_target_score": 4000,
+            },
+            renderer=self.renderer,
+        )
+        self.pipeline._benchmark_profile_active = True
+
+    def test_benchmark_aggressive_run_phases_uses_fast_path(self):
+        with (
+            patch.object(
+                self.pipeline,
+                "_run_benchmark_fast_phases",
+                return_value=False,
+            ) as fast,
+            patch.object(self.pipeline, "_call_role_with_timeout") as role_call,
+        ):
+            self.pipeline._run_phases("TSec Benchmark 跑分", auto_decision=True)
+
+        fast.assert_called_once_with("TSec Benchmark 跑分")
+        role_call.assert_not_called()
+
+    def test_benchmark_fast_path_handoff_runs_standard_roles(self):
+        self.pipeline._runtime_context["benchmark_target_score"] = 0
+        with (
+            patch.object(
+                self.pipeline,
+                "_run_benchmark_fast_phases",
+                return_value=True,
+            ) as fast,
+            patch.object(self.pipeline, "_call_role_with_timeout") as role_call,
+        ):
+            role_call.side_effect = [
+                "analysis",
+                "diffusion",
+                "jump",
+                "reflection",
+                '{"reasoning":"done","subtasks":[]}',
+            ]
+            self.pipeline._run_phases("TSec Benchmark 跑分", auto_decision=True)
+
+        fast.assert_called_once_with("TSec Benchmark 跑分")
+        self.assertGreaterEqual(role_call.call_count, 5)
+
+    def test_benchmark_fast_cycle_uses_two_score_first_runner_tasks(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["vpn_connected"] = True
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        subtasks = self.pipeline._benchmark_fast_cycle_subtasks()
+
+        self.assertEqual(len(subtasks), 2)
+        self.assertTrue(all(task["role"] == "runner" for task in subtasks))
+        joined = "\n".join(task["task_description"] for task in subtasks)
+        self.assertIn("POST start", joined)
+        self.assertIn("45 秒快速指纹", joined)
+        self.assertIn("立即 submit", joined)
+        self.assertIn("立即 close", joined)
+        self.assertIn("不 hint", joined)
+
+    def test_benchmark_fast_cycle_inserts_setup_when_state_unknown(self):
+        subtasks = self.pipeline._benchmark_fast_cycle_subtasks()
+
+        self.assertEqual(len(subtasks), 3)
+        self.assertIn("Benchmark fast setup", subtasks[0]["task_description"])
+        self.assertIn("CHALLENGES_API.md", subtasks[0]["task_description"])
+        self.assertIn("不要 start", subtasks[0]["task_description"])
+
+    def test_benchmark_timeout_and_low_value_thresholds_are_fast(self):
+        self.assertEqual(BENCHMARK_SUBTASK_TIMEOUT, 120)
+        self.assertEqual(BENCHMARK_LOW_VALUE_SIGNAL_LIMIT, 6)
+        self.assertEqual(self.pipeline._subtask_timeout_config()[0], 120)
+
+    def test_benchmark_fast_path_only_when_easy_candidates_exist(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-001-24",
+                    "difficulty": "medium",
+                    "is_completed": False,
+                    "container_status": "stopped",
+                },
+                {
+                    "unique_code": "xben-002-24",
+                    "difficulty": "hard",
+                    "is_completed": False,
+                    "container_status": "stopped",
+                },
+            ]
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertFalse(should_fast)
+        self.assertIn("切回四柱", reason)
+
+    def test_benchmark_fast_path_handles_current_easy(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-038-24",
+                    "difficulty": "easy",
+                    "is_completed": False,
+                    "container_status": "available",
+                }
+            ]
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertTrue(should_fast)
+        self.assertIn("easy", reason)
+
+    def test_benchmark_fast_path_rejects_current_medium(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-001-24"
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-001-24",
+                    "difficulty": "medium",
+                    "is_completed": False,
+                    "container_status": "available",
+                },
+                {
+                    "unique_code": "xben-038-24",
+                    "difficulty": "easy",
+                    "is_completed": False,
+                    "container_status": "stopped",
+                },
+            ]
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertFalse(should_fast)
+        self.assertIn("medium", reason)
 
 
 class SubtaskChecklistTestCase(unittest.TestCase):
@@ -550,6 +701,123 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         events = [item["event"] for item in self.pipeline._trace]
         self.assertIn("benchmark_stale_detected", events)
 
+    def test_benchmark_stale_detector_switches_on_low_value_noise(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        directive = self.pipeline._update_benchmark_stale_state(
+            [
+                "## [runner] 探索 xben-006-24\n"
+                + "\n".join(
+                    ["输出: Internal Server Error"]
+                    * BENCHMARK_LOW_VALUE_SIGNAL_LIMIT
+                )
+            ]
+        )
+
+        self.assertIn("close?unique_code=xben-006-24", directive)
+        self.assertIn("低价值探测", directive)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-006-24", state["abandoned_challenges"])
+
+    def test_benchmark_timeout_directive_marks_abandoned(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-006-24"
+            self.pipeline._benchmark_current_challenge = "xben-006-24"
+
+        directive = self.pipeline._benchmark_timeout_directive("timeout")
+
+        self.assertIn("close?unique_code=xben-006-24", directive)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-006-24", state["abandoned_challenges"])
+
+    def test_benchmark_setup_timeout_stops_after_repeated_pre_challenge_timeouts(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        first = self.pipeline._benchmark_setup_timeout_stop_reason("timeout 1")
+        second = self.pipeline._benchmark_setup_timeout_stop_reason("timeout 2")
+        third = self.pipeline._benchmark_setup_timeout_stop_reason("timeout 3")
+
+        self.assertEqual(first, "")
+        self.assertEqual(second, "")
+        self.assertIn("未锁定当前题前超时", third)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["setup_timeout_streak"], 3)
+
+    def test_benchmark_setup_timeout_does_not_stop_active_challenge(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-006-24"
+            self.pipeline._benchmark_current_challenge = "xben-006-24"
+
+        stop_reason = self.pipeline._benchmark_setup_timeout_stop_reason("timeout")
+        directive = self.pipeline._benchmark_timeout_directive("timeout")
+
+        self.assertEqual(stop_reason, "")
+        self.assertIn("close?unique_code=xben-006-24", directive)
+
+    def test_benchmark_setup_timeout_streak_resets_after_success(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["setup_timeout_streak"] = 2
+
+        self.pipeline._benchmark_reset_setup_timeout_streak()
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["setup_timeout_streak"], 0)
+
+    def test_benchmark_guard_blocks_abandoned_active_container(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-006-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-006-24": ["10.0.185.120:80"],
+            }
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"xben-006-24"}
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nprobe")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {"command": "curl http://10.0.185.120:80/jobs"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("低收益题", decision.reason)
+
+    def test_benchmark_guard_blocks_duplicate_close(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["closed_challenges"] = {"xben-006-24"}
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nclose")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "close?unique_code=xben-006-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("禁止重复 close", decision.reason)
+
     def test_benchmark_stale_detector_resets_on_submit_signal(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -606,6 +874,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertIn("xben-006-24", state["completed_challenges"])
         self.assertIn("xben-005-24", state["closed_challenges"])
+        self.assertEqual(state["abandoned_challenges"], [])
         self.assertEqual(state["last_score"], 200)
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
 
@@ -706,6 +975,36 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
         self.assertNotIn("xben-001-24", state["active_containers"])
 
+    def test_benchmark_runtime_state_does_not_replace_snapshot_from_filtered_pipe(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            "["
+            '{"unique_code":"xben-001-24","is_completed":false,'
+            '"total_score":200,"container_status":"stopped","container_addr":[]},'
+            '{"unique_code":"xben-005-24","is_completed":true,'
+            '"total_score":200,"container_status":"stopped","container_addr":[]}'
+            "]"
+        )
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges | "
+            "python3 -c 'print filtered easy only'\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            "["
+            '{"unique_code":"xben-009-24","is_completed":false,'
+            '"total_score":200,"container_status":"stopped","container_addr":[]}'
+            "]"
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["last_challenges_snapshot"]["total"], 2)
+        self.assertIn("xben-005-24", state["completed_challenges"])
+
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -742,6 +1041,35 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(hard_stops), 1)
         self.assertIn("invalid_state/finished", hard_stops[0]["detail"])
+
+    def test_benchmark_terminal_stop_defers_to_target_gate_before_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["task_finished"] = True
+            self.pipeline._benchmark_state["completed_scores"] = {
+                "xben-005-24": 180,
+            }
+
+        self.assertEqual(self.pipeline._benchmark_terminal_stop_reason(), "")
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("首次被 guard 拦截", self.pipeline._benchmark_terminal_stop_reason())
 
     def test_benchmark_guard_counts_redundant_blocks_after_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -799,6 +1127,21 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("380/4000", directive)
         self.assertIn("不能判定执行完成", directive)
 
+    def test_benchmark_target_gate_continues_after_transient_finished_before_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["task_finished"] = True
+            self.pipeline._benchmark_state["completed_scores"] = {
+                "xben-001-24": 180,
+            }
+
+        directive = self.pipeline._benchmark_target_continue_directive()
+
+        self.assertIn("180/4000", directive)
+        self.assertIn("不能判定执行完成", directive)
+
     @patch("cyber_agent.agent.pipeline.time_mod.sleep")
     def test_benchmark_rate_limit_backoff_resets_failure_counter(self, sleep):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -825,11 +1168,17 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         subtasks = self.pipeline._benchmark_fallback_subtasks()
 
-        self.assertEqual(len(subtasks), 1)
-        self.assertEqual(subtasks[0]["role"], "runner")
-        self.assertIn("/openapi/v1/challenges", subtasks[0]["task_description"])
-        self.assertIn("submit", subtasks[0]["task_description"])
-        self.assertIn("close", subtasks[0]["task_description"])
+        self.assertGreaterEqual(len(subtasks), 5)
+        self.assertTrue(all(task["role"] == "runner" for task in subtasks))
+        joined = "\n".join(task["task_description"] for task in subtasks)
+        self.assertIn("/openapi/v1/challenges", joined)
+        self.assertIn("start", joined)
+        self.assertIn("submit", joined)
+        self.assertIn("close", joined)
+        self.assertIn("禁止调用 hint", joined)
+        self.assertTrue(
+            all(len(task["task_description"]) < 260 for task in subtasks)
+        )
 
     def test_benchmark_stale_detector_switches_after_one_gap_round(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1155,6 +1504,29 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("unique_code", decision.reason)
+
+    def test_benchmark_guard_blocks_hint_api_by_default(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "-H 'BENCHMARK_TOKEN: token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/"
+                        "challenges/hint?unique_code=xben-005-24"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("hint 会扣分", decision.reason)
 
     def test_benchmark_guard_blocks_auto_solve_background_script(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
