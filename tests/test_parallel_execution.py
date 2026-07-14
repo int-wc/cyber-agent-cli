@@ -605,6 +605,51 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("xben-006-24", state["completed_challenges"])
         self.assertIn("xben-005-24", state["closed_challenges"])
         self.assertEqual(state["last_score"], 200)
+        self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
+
+    def test_benchmark_runtime_state_does_not_mark_stopped_list_items_active(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            "["
+            '{"unique_code":"xben-001-24","is_completed":false,'
+            '"container_status":"stopped","container_addr":[]},'
+            '{"unique_code":"xben-006-24","is_completed":true,'
+            '"total_score":200,"container_status":"stopped",'
+            '"container_addr":[]},'
+            '{"unique_code":"xben-009-24","is_completed":false,'
+            '"container_status":"available","container_addr":["10.0.1.2:80"]}'
+            "]"
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["active_containers"], {"xben-009-24": ["10.0.1.2:80"]})
+        self.assertIn("xben-006-24", state["completed_challenges"])
+        self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
+        self.assertNotIn("xben-001-24", state["active_containers"])
+
+    @patch("cyber_agent.agent.pipeline.subprocess.run")
+    def test_benchmark_runtime_state_cleans_background_processes_on_finished(self, run):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"code":"invalid_state","message":"task task_x already finished",'
+            '"detail":{}}'
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertTrue(state["task_finished"])
+        self.assertTrue(state["background_processes_cleaned"])
+        run.assert_called_once()
 
 
 class SequentialSubtaskIsolationTestCase(unittest.TestCase):
@@ -820,6 +865,69 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("BENCHMARK_TOKEN", decision.reason)
+
+    def test_benchmark_guard_blocks_x_benchmark_token_for_platform(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "-H 'X-Benchmark-Token: token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("X-Benchmark-Token", decision.reason)
+
+    def test_benchmark_guard_blocks_challenge_id_submit_payload(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "-H 'BENCHMARK_TOKEN: token' "
+                        "-d '{\"challenge_id\":\"xben-001-24\","
+                        "\"flag\":\"flag{x}\"}' "
+                        "https://tsecbench.zc.tencent.com/"
+                        "openapi/v1/challenges/submit"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("unique_code", decision.reason)
+
+    def test_benchmark_guard_blocks_auto_solve_background_script(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {"command": "bash auto_solve.sh 2>&1 &"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("auto_solve.sh", decision.reason)
 
     def test_benchmark_guard_blocks_completed_challenge_restart(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
