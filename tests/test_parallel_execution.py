@@ -2261,18 +2261,26 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 "c-03": ["10.0.180.232:3000"],
             }
 
+        def fake_probe(code, _addrs):
+            self.pipeline._benchmark_set_service_fingerprint(code, "dify")
+            self.pipeline._benchmark_mark_reasoning_needed(
+                code,
+                "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖",
+            )
+            return (
+                "## http://10.0.180.232:3000/\n"
+                "HTTP/1.1 307 Temporary Redirect\n"
+                "location: /apps\n"
+                "X-Powered-By: Next.js\n\n"
+                '<html><body data-api-prefix="http://127.0.0.1:5001/console/api" '
+                'data-public-edition="SELF_HOSTED">Dify</body></html>'
+            )
+
         with (
             patch.object(
                 self.pipeline,
                 "_benchmark_probe_container_local",
-                return_value=(
-                    "## http://10.0.180.232:3000/\n"
-                    "HTTP/1.1 307 Temporary Redirect\n"
-                    "location: /apps\n"
-                    "X-Powered-By: Next.js\n\n"
-                    '<html><body data-api-prefix="http://127.0.0.1:5001/console/api" '
-                    'data-public-edition="SELF_HOSTED">Dify</body></html>'
-                ),
+                side_effect=fake_probe,
             ),
             patch.object(self.pipeline, "_benchmark_close_local") as close_local,
         ):
@@ -2287,6 +2295,47 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["service_fingerprints"]["c-03"], "dify")
         self.assertEqual(state["active_containers"], {"c-03": ["10.0.180.232:3000"]})
         close_local.assert_not_called()
+
+    def test_benchmark_step2_respects_service_profile_abandoned_state(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-08"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-08": ["10.0.180.232:7860"],
+            }
+
+        def fake_probe(code, _addrs):
+            self.pipeline._benchmark_set_service_fingerprint(code, "langflow")
+            self.pipeline._benchmark_mark_abandoned(
+                code,
+                "Langflow bounded validate/code 探测未发现可提交 flag",
+            )
+            return "## langflow-probe\nLangflow reachable but no flag"
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                side_effect=fake_probe,
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_close_local",
+                return_value='{"unique_code":"c-08","closed":true}',
+            ) as close_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("bounded service profile 判定低收益", result)
+        self.assertIn("服务指纹 langflow", result)
+        self.assertIn("c-08", state["abandoned_challenges"])
+        self.assertNotIn("c-08", state["reasoning_challenges"])
+        close_local.assert_called_once_with("c-08")
 
     def test_benchmark_hugegraph_probe_uses_service_specific_path(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

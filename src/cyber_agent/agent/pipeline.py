@@ -3242,20 +3242,33 @@ class FourPillarPipeline:
                     f"close 返回: {closed[:200]}\n"
                     f"探测摘要:\n{probe[:2500]}"
                 )
-            service_reason = "fast path 已获取可达响应/协议线索但未直接发现 flag"
-            if self._benchmark_probe_suggests_hugegraph(probe):
-                self._benchmark_set_service_fingerprint(code, "hugegraph")
-                service_reason = (
-                    "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖"
+            with self._benchmark_state_lock:
+                abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
+                fingerprints = dict(self._benchmark_state.get("service_fingerprints", {}))
+            if code in abandoned:
+                closed = self._benchmark_close_local(code)
+                fingerprint = fingerprints.get(code)
+                service_note = f"（服务指纹 {fingerprint}）" if fingerprint else ""
+                return (
+                    f"确定性探测：{code} 已由 bounded service profile 判定低收益{service_note}，"
+                    "已 close 释放资源。\n"
+                    f"触发原因: {reason or 'fast path'}\n"
+                    f"close 返回: {closed[:200]}\n"
+                    f"探测摘要:\n{probe[:2500]}"
                 )
-            elif self._benchmark_probe_suggests_dify(probe):
-                self._benchmark_set_service_fingerprint(code, "dify")
-                service_reason = (
-                    "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖"
+            if code in reasoning:
+                fingerprint = fingerprints.get(code)
+                service_note = f"（服务指纹 {fingerprint}）" if fingerprint else ""
+                return (
+                    f"确定性探测：{code} 已由 service profile 标记为需要深挖{service_note}，"
+                    "保留 active 并切回四柱/runner；本轮不 close、不 start 新题。"
+                    f"触发原因: {reason or 'fast path'}\n"
+                    f"探测摘要:\n{probe[:2500]}"
                 )
             self._benchmark_mark_reasoning_needed(
                 code,
-                service_reason,
+                "fast path 已获取可达响应/协议线索但未直接发现 flag",
             )
             return (
                 f"确定性探测：{code} 已获取有效响应但未直接发现 flag，"
