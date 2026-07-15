@@ -3007,6 +3007,25 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
 
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "调用平台list接口获取最新题目列表"
+            ),
+            "schedule",
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "POST start easy candidate and parse container"
+            ),
+            "schedule",
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "若探测发现flag，立即POST submit"
+            ),
+            "probe",
+        )
+
         with patch.object(
             self.pipeline,
             "_benchmark_deterministic_fast_step",

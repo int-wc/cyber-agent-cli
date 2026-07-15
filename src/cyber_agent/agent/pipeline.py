@@ -3281,56 +3281,149 @@ class FourPillarPipeline:
     def _benchmark_deterministic_standard_task(self, desc: str) -> str | None:
         if not self._is_benchmark_aggressive() or "Benchmark " in desc:
             return None
-        lowered = desc.lower()
-        if any(marker in lowered for marker in ("challenges_api", "api文档", "vpn配置")) and (
-            "读取" in desc or "获取" in desc
-        ):
+        classification = self._benchmark_classify_standard_task(desc)
+        if classification == "setup":
             state_context = self._benchmark_state_context()
             return (
                 "确定性标准任务：Benchmark setup 已由 fast path 校验，"
                 "直接复用当前运行态；不再重复慢速读取/搜索配置。\n"
                 f"{state_context[:1200]}"
             )
-        if (
-            "快速指纹" in desc
-            or "obvious flag" in lowered
-            or "寻找flag" in lowered
-            or "尝试提交" in desc
-            or "post submit" in lowered
-            or ("submit" in lowered and ("flag" in lowered or "close" in lowered))
-            or ("探测" in desc and ("容器" in desc or "10.x" in desc))
-        ):
+        if classification == "probe":
             return self._benchmark_deterministic_fast_step(
                 "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
                 reason="standard_mechanical_probe",
             )
-        if (
-            ("列出" in desc and "题目" in desc)
-            or (
-                "题目列表" in desc
-                and (
-                    "获取" in desc
-                    or "筛选" in desc
-                    or "刷新" in desc
-                    or "解析" in desc
-                )
-            )
-            or ("挑战列表" in desc and ("获取" in desc or "调用" in desc or "确定" in desc))
-            or ("可做" in desc and ("题目" in desc or "挑战" in desc))
-            or ("list接口" in lowered and ("题目" in desc or "easy" in lowered))
-            or ("平台api" in lowered and ("挑战列表" in desc or "题目" in desc))
-            or ("筛选" in desc and ("easy" in lowered or "低level" in lowered))
-            or ("post start" in lowered and ("题" in desc or "easy" in lowered))
-            or ("选择一道" in desc and ("easy" in lowered or "低level" in lowered))
-            or ("启动" in desc and "容器" in desc)
-            or ("启动" in desc and "题" in desc and ("easy" in lowered or "低level" in lowered))
-            or ("start接口" in lowered and "启动" in desc)
-            or ("下一道" in desc and "题" in desc)
-        ):
+        if classification == "schedule":
             return self._benchmark_deterministic_fast_step(
                 "Benchmark fast step 1：只做调度。",
                 reason="standard_mechanical_schedule",
             )
+        return None
+
+    @staticmethod
+    def _benchmark_standard_task_rules() -> list[dict[str, Any]]:
+        return [
+            {
+                "kind": "setup",
+                "any": ("challenges_api", "api文档", "vpn配置"),
+                "any_original": ("读取", "获取"),
+            },
+            {
+                "kind": "probe",
+                "any_original": ("快速指纹", "寻找flag", "尝试提交"),
+            },
+            {
+                "kind": "probe",
+                "any": ("obvious flag", "post submit"),
+            },
+            {
+                "kind": "probe",
+                "all": ("submit",),
+                "any": ("flag", "close"),
+            },
+            {
+                "kind": "probe",
+                "any_original": ("探测",),
+                "any_original_2": ("容器", "10.x"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("列出",),
+                "any_original_2": ("题目",),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("题目列表",),
+                "any_original_2": ("获取", "筛选", "刷新", "解析"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("挑战列表",),
+                "any_original_2": ("获取", "调用", "确定"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("可做",),
+                "any_original_2": ("题目", "挑战"),
+            },
+            {
+                "kind": "schedule",
+                "all": ("list接口",),
+                "any_original": ("题目",),
+            },
+            {
+                "kind": "schedule",
+                "all": ("list接口",),
+                "any": ("easy",),
+            },
+            {
+                "kind": "schedule",
+                "all": ("平台api",),
+                "any_original": ("挑战列表", "题目"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("筛选",),
+                "any": ("easy", "低level"),
+            },
+            {
+                "kind": "schedule",
+                "all": ("post start",),
+                "any_original": ("题",),
+            },
+            {
+                "kind": "schedule",
+                "all": ("post start",),
+                "any": ("easy",),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("选择一道",),
+                "any": ("easy", "低level"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("启动",),
+                "any_original_2": ("容器",),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("启动",),
+                "any_original_2": ("题",),
+                "any": ("easy", "低level"),
+            },
+            {
+                "kind": "schedule",
+                "all": ("start接口",),
+                "any_original": ("启动",),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("下一道",),
+                "any_original_2": ("题",),
+            },
+        ]
+
+    @classmethod
+    def _benchmark_classify_standard_task(cls, desc: str) -> str | None:
+        lowered = desc.lower()
+        for rule in cls._benchmark_standard_task_rules():
+            if not all(token in lowered for token in rule.get("all", ())):
+                continue
+            if not all(token in desc for token in rule.get("all_original", ())):
+                continue
+            if rule.get("any") and not any(token in lowered for token in rule["any"]):
+                continue
+            if rule.get("any_original") and not any(
+                token in desc for token in rule["any_original"]
+            ):
+                continue
+            if rule.get("any_original_2") and not any(
+                token in desc for token in rule["any_original_2"]
+            ):
+                continue
+            return str(rule["kind"])
         return None
 
     def _benchmark_active_submit_code(self, evidence: str = "") -> str | None:
