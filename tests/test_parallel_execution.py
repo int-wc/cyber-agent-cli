@@ -2220,6 +2220,105 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["service_fingerprints"]["c-06"], "hugegraph")
         webapp.assert_not_called()
 
+    def test_benchmark_telnet_port_uses_bounded_login_probe(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-07"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-07": ["10.0.180.232:23"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_telnet_login_local",
+            return_value="## telnet-login 10.0.180.232:23\nlogin prompt no flag",
+        ) as telnet_probe:
+            result = self.pipeline._benchmark_probe_container_local(
+                "c-07",
+                ["10.0.180.232:23"],
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("telnet-login", result)
+        self.assertEqual(state["service_fingerprints"]["c-07"], "telnet")
+        self.assertIn("c-07", state["abandoned_challenges"])
+        telnet_probe.assert_called_once_with("c-07", "10.0.180.232:23")
+
+    def test_benchmark_telnet_negotiation_replies_dont_wont(self):
+        plain, reply = self.pipeline._benchmark_telnet_plain_and_reply(
+            bytes([255, 253, 24, 255, 251, 1]) + b"login: "
+        )
+
+        self.assertEqual(plain, "login: ")
+        self.assertEqual(reply, bytes([255, 252, 24, 255, 254, 1]))
+
+    def test_benchmark_langflow_probe_uses_validate_code(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-08"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-08": ["10.0.180.232:7860"],
+            }
+
+        def fake_json(url, **kwargs):
+            if "validate/code" in url:
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=(
+                        '{"imports":{"errors":[]},"function":{"errors":'
+                        '["flag{langflow-owned}"]}}'
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+
+        submit_result = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='{"correct":true,"awarded":100,"cumulative_score":100}',
+            stderr="",
+        )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_curl_local",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout='HTTP/1.1 200 OK\n\n{"title":"Langflow"}',
+                    stderr="",
+                ),
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_curl_json_local",
+                side_effect=fake_json,
+            ) as curl_json,
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch(
+                "cyber_agent.agent.pipeline.subprocess.run",
+                return_value=submit_result,
+            ),
+        ):
+            result = self.pipeline._benchmark_probe_langflow_local(
+                "c-08",
+                "http://10.0.180.232:7860/",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("langflow-probe", result)
+        self.assertIn("validate/code", result)
+        self.assertIn("c-08", state["completed_challenges"])
+        self.assertTrue(any("validate/code" in call.args[0] for call in curl_json.call_args_list))
+
     def test_benchmark_deterministic_step2_keeps_unreachable_active_for_retry(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2605,7 +2704,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("跳过机械 close", result)
         close_local.assert_not_called()
 
-    def test_benchmark_hugegraph_handoff_step2_runs_real_runner(self):
+    def test_benchmark_hugegraph_exploit_step2_runs_deterministic_probe(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -2617,12 +2716,43 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 "c-06": "hugegraph",
             }
 
-        result = self.pipeline._benchmark_deterministic_fast_step(
-            "Benchmark handoff step 2：继续当前题 c-06 的一个最高置信后续假设",
-            reason="test",
-        )
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_hugegraph_local",
+            return_value="HugeGraph/JDWP bounded probe no flag",
+        ) as probe:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark hugegraph exploit step 2：只围绕 c-06 的 HugeGraph/Gremlin/Arthas/JDWP",
+                reason="test",
+            )
 
-        self.assertIsNone(result)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("确定性 HugeGraph exploit", result)
+        self.assertIn("标记 abandoned", result)
+        self.assertIn("c-06", state["abandoned_challenges"])
+        probe.assert_called_once_with("c-06", "http://10.0.180.232:8080/", "")
+
+    def test_benchmark_hugegraph_close_step3_closes_active(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-06"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-06": ["10.0.180.232:8080"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_close_local",
+            return_value='{"closed":true}',
+        ) as close_local:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark hugegraph close step 3：只有当 c-06 的 JDWP 无 flag 时 close",
+                reason="test",
+            )
+
+        self.assertIn("已 close 释放资源", result)
+        close_local.assert_called_once_with("c-06")
 
     def test_benchmark_standard_mechanical_tasks_use_deterministic_steps(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
