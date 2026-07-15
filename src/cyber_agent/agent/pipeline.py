@@ -2353,6 +2353,15 @@ class FourPillarPipeline:
                 "rate limit",
                 "ratelimit",
                 "freeusagelimiterror",
+                "connection error",
+                "apiconnectionerror",
+                "api connection error",
+                "connection aborted",
+                "connection reset",
+                "connection timed out",
+                "service temporarily unavailable",
+                "temporarily unavailable",
+                "error code: 503",
                 "try again later",
             )
         )
@@ -2371,7 +2380,7 @@ class FourPillarPipeline:
         seconds = self._resolve_benchmark_rate_limit_backoff_seconds()
         self._consecutive_failures = 0
         detail = (
-            f"Benchmark target gate 遇到临时 LLM 限流：{reason}；"
+            f"Benchmark target gate 遇到临时 LLM/API 异常：{reason}；"
             f"等待 {seconds:g}s 后继续，不结束未达标任务。"
         )
         self._record_trace(
@@ -4012,6 +4021,15 @@ class FourPillarPipeline:
 
                     except Exception as exc:
                         elapsed = (time_mod.monotonic() - start) * 1000
+                        if self._benchmark_rate_limit_backoff(
+                            f"benchmark_subtask_{idx}",
+                            str(exc),
+                        ):
+                            round_results.append(
+                                f"## [{role_str}] {desc}\n⚠️ 临时模型/API 异常，已退避后继续。"
+                            )
+                            batch_i += 1
+                            continue
                         self._consecutive_failures += 1
                         self._record_trace("subtask_error", detail=f"{exc}")
                         renderer.console.print(

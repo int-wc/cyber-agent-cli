@@ -1362,6 +1362,25 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         events = [item["event"] for item in self.pipeline._trace]
         self.assertIn("benchmark_rate_limit_backoff", events)
 
+    @patch("cyber_agent.agent.pipeline.time_mod.sleep")
+    def test_benchmark_connection_error_backoff_resets_failure_counter(self, sleep):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._runtime_context["benchmark_rate_limit_backoff_seconds"] = 0
+        self.pipeline._benchmark_profile_active = True
+        self.pipeline._consecutive_failures = 2
+
+        did_backoff = self.pipeline._benchmark_rate_limit_backoff(
+            "benchmark_fast_subtask_1",
+            "Connection error.",
+        )
+
+        self.assertTrue(did_backoff)
+        self.assertEqual(self.pipeline._consecutive_failures, 0)
+        sleep.assert_not_called()
+        events = [item["event"] for item in self.pipeline._trace]
+        self.assertIn("benchmark_rate_limit_backoff", events)
+
     def test_benchmark_fallback_subtasks_use_score_first_runner(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._runtime_context["benchmark_target_score"] = 4000
