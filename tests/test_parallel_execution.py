@@ -2356,6 +2356,35 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["service_fingerprints"]["c-06"], "hugegraph")
         webapp.assert_not_called()
 
+    def test_benchmark_service_probe_profiles_drive_probe_dispatch(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        profiles = self.pipeline._benchmark_service_probe_profiles()
+
+        self.assertEqual(
+            [profile["fingerprint"] for profile in profiles],
+            ["hugegraph", "dify", "langflow"],
+        )
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_dify_local",
+            return_value="dify bounded probe",
+        ) as dify_probe:
+            matched, outputs = self.pipeline._benchmark_probe_matching_service_local(
+                "c-03",
+                "http://10.0.180.232:3000/",
+                'HTTP/1.1 200 OK\nx-powered-by: Next.js\n'
+                '<html data-api-prefix="http://127.0.0.1:5001/console/api">'
+                "Dify SELF_HOSTED</html>",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertTrue(matched)
+        self.assertEqual(outputs, ["dify bounded probe"])
+        self.assertEqual(state["service_fingerprints"]["c-03"], "dify")
+        self.assertIn("c-03", state["reasoning_challenges"])
+        dify_probe.assert_called_once()
+
     def test_benchmark_telnet_port_uses_bounded_login_probe(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

@@ -1553,54 +1553,13 @@ class FourPillarPipeline:
                 seen_urls.add(derived)
                 queue.append(derived)
         joined_outputs = "\n".join(outputs)
-        if self._benchmark_probe_suggests_hugegraph(joined_outputs):
-            self._benchmark_set_service_fingerprint(code, "hugegraph")
-            hugegraph_output = self._benchmark_probe_hugegraph_local(
-                code,
-                base,
-                joined_outputs,
-            )
-            if hugegraph_output:
-                outputs.append(hugegraph_output)
-                joined_outputs = "\n".join(outputs)
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                return "\n".join(outputs)
-            self._benchmark_mark_reasoning_needed(
-                code,
-                "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖",
-            )
-            return "\n".join(outputs)
-        if self._benchmark_probe_suggests_dify(joined_outputs):
-            self._benchmark_set_service_fingerprint(code, "dify")
-            dify_output = self._benchmark_probe_dify_local(code, base, joined_outputs)
-            if dify_output:
-                outputs.append(dify_output)
-                joined_outputs = "\n".join(outputs)
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                return "\n".join(outputs)
-            self._benchmark_mark_reasoning_needed(
-                code,
-                "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖",
-            )
-            return "\n".join(outputs)
-        if self._benchmark_probe_suggests_langflow(joined_outputs):
-            self._benchmark_set_service_fingerprint(code, "langflow")
-            langflow_output = self._benchmark_probe_langflow_local(code, base)
-            if langflow_output:
-                outputs.append(langflow_output)
-                joined_outputs = "\n".join(outputs)
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                return "\n".join(outputs)
-            self._benchmark_mark_abandoned(
-                code,
-                "Langflow bounded validate/code 探测未发现可提交 flag",
-            )
+        service_matched, service_outputs = self._benchmark_probe_matching_service_local(
+            code,
+            base,
+            joined_outputs,
+        )
+        if service_matched:
+            outputs.extend(service_outputs)
             return "\n".join(outputs)
         webapp_output = self._benchmark_probe_common_webapp_flows(code, base, joined_outputs)
         if webapp_output:
@@ -1648,6 +1607,68 @@ class FourPillarPipeline:
                 or "server: uvicorn" in lowered
             )
         )
+
+    def _benchmark_service_probe_profiles(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "fingerprint": "hugegraph",
+                "suggests": self._benchmark_probe_suggests_hugegraph,
+                "probe": self._benchmark_probe_hugegraph_local,
+                "unresolved": "reasoning",
+                "reason": (
+                    "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖"
+                ),
+            },
+            {
+                "fingerprint": "dify",
+                "suggests": self._benchmark_probe_suggests_dify,
+                "probe": self._benchmark_probe_dify_local,
+                "unresolved": "reasoning",
+                "reason": (
+                    "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖"
+                ),
+            },
+            {
+                "fingerprint": "langflow",
+                "suggests": self._benchmark_probe_suggests_langflow,
+                "probe": lambda code, base, _evidence: self._benchmark_probe_langflow_local(
+                    code,
+                    base,
+                ),
+                "unresolved": "abandoned",
+                "reason": "Langflow bounded validate/code 探测未发现可提交 flag",
+            },
+        ]
+
+    def _benchmark_probe_matching_service_local(
+        self,
+        code: str,
+        base: str,
+        evidence: str,
+    ) -> tuple[bool, list[str]]:
+        for profile in self._benchmark_service_probe_profiles():
+            suggests = profile.get("suggests")
+            if not callable(suggests) or not suggests(evidence):
+                continue
+            fingerprint = str(profile["fingerprint"])
+            self._benchmark_set_service_fingerprint(code, fingerprint)
+            service_outputs: list[str] = []
+            probe = profile.get("probe")
+            if callable(probe):
+                service_output = probe(code, base, evidence)
+                if service_output:
+                    service_outputs.append(str(service_output))
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return True, service_outputs
+            reason = str(profile.get("reason") or f"{fingerprint} bounded probe 未发现 flag")
+            if profile.get("unresolved") == "reasoning":
+                self._benchmark_mark_reasoning_needed(code, reason)
+            else:
+                self._benchmark_mark_abandoned(code, reason)
+            return True, service_outputs
+        return False, []
 
     def _benchmark_probe_langflow_local(self, code: str, base: str) -> str:
         tun_interface = self._benchmark_tun_interface()
