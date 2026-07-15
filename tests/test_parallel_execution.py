@@ -85,10 +85,11 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
 
         self.assertIn("Benchmark aggressive 子任务要求", prompt)
         self.assertIn("发现疑似 flag 立即调用 submit", prompt)
-        self.assertIn("硬预算约 120 秒", prompt)
+        self.assertIn("硬预算约 90 秒", prompt)
         self.assertIn("close 当前题并切换下一题", prompt)
         self.assertIn("默认禁止调用 hint API", prompt)
         self.assertIn("立即结束当前子任务", prompt)
+        self.assertIn("下一次工具调用必须是 submit", prompt)
 
     def test_benchmark_profile_prompt_includes_runtime_state(self):
         """Benchmark 子任务 prompt 应携带已确认运行态，减少重复前置步骤。"""
@@ -241,9 +242,9 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertIn("不要 start", subtasks[0]["task_description"])
 
     def test_benchmark_timeout_and_low_value_thresholds_are_fast(self):
-        self.assertEqual(BENCHMARK_SUBTASK_TIMEOUT, 120)
-        self.assertEqual(BENCHMARK_LOW_VALUE_SIGNAL_LIMIT, 6)
-        self.assertEqual(self.pipeline._subtask_timeout_config()[0], 120)
+        self.assertEqual(BENCHMARK_SUBTASK_TIMEOUT, 90)
+        self.assertEqual(BENCHMARK_LOW_VALUE_SIGNAL_LIMIT, 4)
+        self.assertEqual(self.pipeline._subtask_timeout_config()[0], 90)
 
     def test_benchmark_fast_path_only_when_easy_candidates_exist(self):
         with self.pipeline._benchmark_state_lock:
@@ -1165,6 +1166,24 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("380/4000", directive)
         self.assertIn("不能判定执行完成", directive)
+
+    def test_benchmark_target_gate_enters_rush_mode_near_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["completed_scores"] = {
+                f"xben-{idx:03d}-24": 200
+                for idx in range(1, 14)
+            }
+
+        status = self.pipeline._benchmark_score_status()
+        directive = self.pipeline._benchmark_target_continue_directive()
+
+        self.assertTrue(status["rush_mode"])
+        self.assertIn("2600/4000", directive)
+        self.assertIn("下一次工具调用必须直接 POST", directive)
+        self.assertIn("禁止先读文档", directive)
 
     def test_benchmark_target_gate_continues_after_transient_finished_before_target(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

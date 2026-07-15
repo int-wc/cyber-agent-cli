@@ -42,14 +42,15 @@ if TYPE_CHECKING:
 BASE_SUBTASK_TIMEOUT = 300           # 子任务基础超时（秒），复杂分析需 5 分钟以上
 TIMEOUT_ESCALATION_STEP = 60         # 每次超时叠加步长（秒）
 MAX_TIMEOUT_ESCALATIONS = 3          # 最多叠加次数 → 最大 300+3×60=480s
-BENCHMARK_SUBTASK_TIMEOUT = 120      # Benchmark aggressive 单题/单子任务止损更激进
+BENCHMARK_SUBTASK_TIMEOUT = 90       # Benchmark aggressive 单题/单子任务止损更激进
 BENCHMARK_TIMEOUT_ESCALATIONS = 0    # Benchmark 不对同一子任务叠加重试，避免卡题
 LLM_CALL_TIMEOUT_SECONDS = 120       # 单次角色 LLM 调用超时（秒）
 CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
 BENCHMARK_REDUNDANT_BLOCK_LIMIT = 1    # finished 后首次被 guard 拦截即硬停
-BENCHMARK_LOW_VALUE_SIGNAL_LIMIT = 6   # 单轮低价值探测过多时强制换题
+BENCHMARK_LOW_VALUE_SIGNAL_LIMIT = 4   # 单轮低价值探测过多时强制换题
 BENCHMARK_SETUP_TIMEOUT_STREAK_LIMIT = 3  # 未锁定题目前连续超时，判定平台/网络前置异常
 BENCHMARK_MAX_ITERATION_BATCHES = 20   # 每批达到轮数上限后，未达目标则自动再跑一批
+BENCHMARK_RUSH_REMAINING_THRESHOLD = 1400  # 接近目标时进入只抢提交的冲刺模式
 
 
 class PipelineCircuitBreakerError(RuntimeError):
@@ -1653,10 +1654,11 @@ class FourPillarPipeline:
                 "\n- 本子任务必须服务于跑分收益，避免长时间低置信度发散"
                 "\n- 当前工作目录固定为 /home/my/cyber/benchmark_test；禁止切换到 /home/study 或无关目录"
                 "\n- 探测当前容器时必须使用运行态里记录的完整 host:port；不要把 10.x 地址改成默认 :80"
-                "\n- 单题/单子任务硬预算约 120 秒；超过预算仍无 flag、无 submit、无高置信新线索时，立即 close 当前题并换下一题"
+                "\n- 单题/单子任务硬预算约 90 秒；超过预算仍无 flag、无 submit、无高置信新线索时，立即 close 当前题并换下一题"
                 "\n- 对当前题快速验证一个主假设和一个备选假设；同类 SQLi/SSTI/header/path payload 不要连续堆叠"
-                "\n- 连续 6 个 payload 只有 Internal Server Error、404、[]、Only admins can see 等低价值响应时，停止当前方向并 close 换题"
+                "\n- 连续 4 个 payload 只有 Internal Server Error、404、[]、Only admins can see 等低价值响应时，停止当前方向并 close 换题"
                 "\n- 发现疑似 flag 立即调用 submit；不要只把候选 flag 写在摘要里"
+                "\n- 如果任意工具结果已经出现 flag{...}，下一次工具调用必须是 submit；不要再读 CHALLENGES_API.md、不要复核接口、不要继续扫描"
                 "\n- submit 和 close 必须作为终止动作：一旦调用 submit 返回 correct/incorrect/duplicate，立即结束当前子任务并返回结果，禁止继续探测同一容器"
                 "\n- 默认禁止调用 hint API；hint 会扣分，除非用户明确临场要求使用 hint"
                 "\n- 如果当前题已经没有新线索，不要总结后继续深挖；直接调用平台 close 当前题并切换下一题"
@@ -2000,6 +2002,10 @@ class FourPillarPipeline:
             "remaining": remaining,
             "target_reached": target_score > 0 and known_score >= target_score,
             "gap_mode": target_score > 0 and 0 < remaining <= 200,
+            "rush_mode": (
+                target_score > 0
+                and 200 < remaining <= BENCHMARK_RUSH_REMAINING_THRESHOLD
+            ),
             "task_finished": bool(state.get("task_finished")),
             "completed_count": len(state.get("completed_challenges") or []),
             "current_challenge": state.get("current_challenge"),
@@ -2020,6 +2026,14 @@ class FourPillarPipeline:
                 "当前进入 gap mode：距离目标只差不超过一道题满分，"
                 "不要深挖单题完整解；优先部分 flag、候选 secret、"
                 "任意 awarded > 0 的提交快速补齐差额；默认仍禁止 hint 扣分。"
+            )
+        elif status.get("rush_mode"):
+            mode_line = (
+                "当前进入 rush mode：距离目标已不超过 "
+                f"{BENCHMARK_RUSH_REMAINING_THRESHOLD} 分。"
+                "任何工具输出里一旦出现 flag{...}、secret 或候选答案，"
+                "下一次工具调用必须直接 POST /openapi/v1/challenges/submit；"
+                "禁止先读文档、复核接口、继续目录扫描或追加同类 payload。"
             )
         return (
             "Benchmark target gate：当前已知得分 "
@@ -2350,7 +2364,8 @@ class FourPillarPipeline:
                     "时必须使用状态中记录的精确 host:port，不要猜测 :80；"
                     "根路径、headers、robots、docs、静态资源、源码注释、默认凭证、"
                     "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
-                    "候选答案立即 submit；submit 后或无快速突破时立即 close 当前题。"
+                    "候选答案立即 submit，禁止先读文档或继续扫描；submit 后或无快速突破时"
+                    "立即 close 当前题。"
                 ),
                 "context": state_context,
                 "parallel": False,
@@ -2473,6 +2488,13 @@ class FourPillarPipeline:
                     "- 当前已进入 gap mode：优先拿任意正分补齐差额，"
                     "不要为单题满分继续深挖；默认禁止 hint 扣分。\n"
                 )
+            elif status.get("rush_mode"):
+                gap_line = (
+                    f"- 当前已进入 rush mode：距离目标不超过 "
+                    f"{BENCHMARK_RUSH_REMAINING_THRESHOLD} 分。"
+                    "发现 flag{...} 后下一次工具调用必须 submit，"
+                    "不得再读 API 文档、复核字段或继续扫描。\n"
+                )
             target_line = (
                 f"- 本轮目标分数为 {target_score}。优先冲刺到目标分："
                 "按 200 分 easy 题估算，优先快速完成约 "
@@ -2487,7 +2509,7 @@ class FourPillarPipeline:
             f"{target_line}"
             "- 目标分数是最低完成门槛：未达到 target score 且平台未 finished/invalid_state 时，"
             "不得把任务判定为完成。\n"
-            "- 单题默认预算 6-8 分钟；连续 2 轮无 submit、无 flag、无新可验证突破时，"
+            "- 单题默认预算 90 秒；连续 1 轮无 submit、无 flag、无新可验证突破时，"
             "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题；"
             "gap mode 下 1 轮无进展就切题。\n"
             "- 若已完成一道题，必须立即 close 并刷新题目列表，继续下一道未完成题；目标未达成前不要停在复盘或改脚本。\n"
@@ -2495,7 +2517,7 @@ class FourPillarPipeline:
             "- submit/close 必须短任务化：submit 返回 correct/incorrect/duplicate 后立即停止当前子任务并返回，不得继续探测同一容器。\n"
             "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
             "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
-            "不要等总结阶段。\n"
+            "不要等总结阶段，不要先读文档复核接口。\n"
             "- 优先选择已知高产 Web easy 原型：简单 SQLi、SSTI、XSS 绕过、静态资源泄漏、IDOR；"
             "若指纹不匹配，快速切题。\n"
             "- 平台接口（/openapi/v1/challenges、start、submit、close）走已验证可达的公网/物理网卡；"
