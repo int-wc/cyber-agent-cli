@@ -428,6 +428,35 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
         self.assertEqual(selected["unique_code"], "e1-01")
 
+    def test_benchmark_select_next_candidate_recovers_closed_easy_before_medium(self):
+        snapshot = [
+            {
+                "unique_code": "c-06",
+                "difficulty": "easy",
+                "level": 1,
+                "total_score": 100,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+            {
+                "unique_code": "e1-01",
+                "difficulty": "medium",
+                "level": 1,
+                "total_score": 250,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+        ]
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["closed_challenges"] = {"c-06"}
+
+        selected = self.pipeline._benchmark_select_next_candidate(snapshot)
+
+        self.assertEqual(selected["unique_code"], "c-06")
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertNotIn("c-06", state["closed_challenges"])
+        self.assertIn("c-06", state["recovery_attempted_challenges"])
+
     def test_benchmark_fast_path_hands_off_reasoning_easy(self):
         with self.pipeline._benchmark_state_lock:
             self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"

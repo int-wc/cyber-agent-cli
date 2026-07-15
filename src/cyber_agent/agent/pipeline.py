@@ -1237,9 +1237,31 @@ class FourPillarPipeline:
             else:
                 candidates.append(item)
         candidates.sort(key=self._benchmark_candidate_rank)
-        if candidates:
+        if candidates and str(candidates[0].get("difficulty") or "").lower() == "easy":
             return candidates[0]
         recovery_candidates.sort(key=self._benchmark_candidate_rank)
+        recovery_easy = [
+            item for item in recovery_candidates
+            if str(item.get("difficulty") or "").lower() == "easy"
+        ]
+        if recovery_easy:
+            code = recovery_easy[0].get("unique_code")
+            if isinstance(code, str):
+                with self._benchmark_state_lock:
+                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                    closed = set(self._benchmark_state.get("closed_challenges", set()))
+                    recovered = set(
+                        self._benchmark_state.get("recovery_attempted_challenges", set())
+                    )
+                    abandoned.discard(code)
+                    closed.discard(code)
+                    recovered.add(code)
+                    self._benchmark_state["abandoned_challenges"] = abandoned
+                    self._benchmark_state["closed_challenges"] = closed
+                    self._benchmark_state["recovery_attempted_challenges"] = recovered
+            return recovery_easy[0]
+        if candidates:
+            return candidates[0]
         if recovery_candidates:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
