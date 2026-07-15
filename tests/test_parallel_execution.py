@@ -286,6 +286,33 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertTrue(should_fast)
         self.assertIn("easy", reason)
 
+    def test_benchmark_fast_path_recovers_locally_abandoned_easy(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-020-24",
+                    "difficulty": "easy",
+                    "level": 1,
+                    "total_score": 200,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                }
+            ]
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"xben-020-24"}
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+        selected = self.pipeline._benchmark_select_next_easy(
+            self.pipeline._benchmark_state["last_challenges_snapshot"]
+        )
+
+        self.assertTrue(should_fast)
+        self.assertIn("恢复 fast path", reason)
+        self.assertEqual(selected["unique_code"], "xben-020-24")
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertNotIn("xben-020-24", state["abandoned_challenges"])
+
     def test_benchmark_fast_path_rejects_current_medium(self):
         with self.pipeline._benchmark_state_lock:
             self.pipeline._benchmark_state["current_challenge"] = "xben-001-24"
@@ -858,6 +885,29 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("start?unique_code=xben-006-24", start_decision.reason)
         self.assertFalse(close_decision.approved)
         self.assertIn("close?unique_code=xben-006-24", close_decision.reason)
+
+    def test_benchmark_guard_blocks_form_body_unique_code(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\napi")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/start "
+                        "-H 'BENCHMARK_TOKEN: token' "
+                        "-d unique_code=xben-020-24"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("start?unique_code=xben-020-24", decision.reason)
 
     def test_benchmark_guard_blocks_medium_start_while_easy_remains(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

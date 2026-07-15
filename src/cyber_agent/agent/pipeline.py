@@ -547,6 +547,12 @@ class FourPillarPipeline:
 
     @staticmethod
     def _extract_unique_code(text: str) -> str | None:
+        match = _re_mod.search(
+            r"\bunique_code\b\s*[:=]\s*['\"]?(xben-\d+-\d+)\b",
+            text,
+        )
+        if match:
+            return match.group(1)
         match = _re_mod.search(r"\bunique_code[\"'=:/\s]+(xben-\d+-\d+)\b", text)
         if match:
             return match.group(1)
@@ -648,10 +654,14 @@ class FourPillarPipeline:
 
             if "/challenges/start" in lowered:
                 code = self._extract_unique_code(command)
-                if code and "?" not in command.split("/challenges/start", 1)[-1].split()[0]:
+                start_path_token = command.split("/challenges/start", 1)[-1].split()[0]
+                if (
+                    "?" not in start_path_token
+                    and ("unique_code" in lowered or code)
+                ):
                     return (
                         "start 接口的 unique_code 必须放在 query 参数中："
-                        f"/openapi/v1/challenges/start?unique_code={code}；"
+                        f"/openapi/v1/challenges/start?unique_code={code or '<selected_code>'}；"
                         "不要用 JSON body 或 form body 传 unique_code。"
                     )
                 if code in completed:
@@ -688,10 +698,14 @@ class FourPillarPipeline:
                         )
             if "/challenges/close" in lowered:
                 code = self._extract_unique_code(command)
-                if code and "?" not in command.split("/challenges/close", 1)[-1].split()[0]:
+                close_path_token = command.split("/challenges/close", 1)[-1].split()[0]
+                if (
+                    "?" not in close_path_token
+                    and ("unique_code" in lowered or code)
+                ):
                     return (
                         "close 接口的 unique_code 必须放在 query 参数中："
-                        f"/openapi/v1/challenges/close?unique_code={code}；"
+                        f"/openapi/v1/challenges/close?unique_code={code or '<selected_code>'}；"
                         "不要用 JSON body 或 form body 传 unique_code。"
                     )
                 if code in closed:
@@ -876,9 +890,10 @@ class FourPillarPipeline:
             abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
         excluded = completed | closed | abandoned
         candidates: list[dict[str, Any]] = []
+        recovery_candidates: list[dict[str, Any]] = []
         for item in challenges:
             code = item.get("unique_code")
-            if not isinstance(code, str) or code in excluded:
+            if not isinstance(code, str) or code in completed:
                 continue
             if item.get("is_completed") is True:
                 continue
@@ -886,7 +901,10 @@ class FourPillarPipeline:
                 continue
             if item.get("container_status") != "stopped":
                 continue
-            candidates.append(item)
+            if code in excluded:
+                recovery_candidates.append(item)
+            else:
+                candidates.append(item)
         candidates.sort(
             key=lambda item: (
                 int(item.get("level") or 999),
@@ -894,7 +912,27 @@ class FourPillarPipeline:
                 str(item.get("unique_code") or ""),
             )
         )
-        return candidates[0] if candidates else None
+        if candidates:
+            return candidates[0]
+        recovery_candidates.sort(
+            key=lambda item: (
+                int(item.get("level") or 999),
+                -int(item.get("total_score") or 0),
+                str(item.get("unique_code") or ""),
+            )
+        )
+        if recovery_candidates:
+            code = recovery_candidates[0].get("unique_code")
+            if isinstance(code, str):
+                with self._benchmark_state_lock:
+                    closed = set(self._benchmark_state.get("closed_challenges", set()))
+                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                    closed.discard(code)
+                    abandoned.discard(code)
+                    self._benchmark_state["closed_challenges"] = closed
+                    self._benchmark_state["abandoned_challenges"] = abandoned
+            return recovery_candidates[0]
+        return None
 
     def _benchmark_mark_abandoned(self, code: str, reason: str) -> None:
         if not code:
@@ -3045,6 +3083,23 @@ class FourPillarPipeline:
             status = item.get("container_status")
             if status in {"stopped", "available", None}:
                 return True, f"仍有未完成 easy 候选 {code}，继续 fast path。"
+
+        for item in snapshot:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("unique_code")
+            if not isinstance(code, str) or code in completed:
+                continue
+            if item.get("is_completed") is True:
+                continue
+            if str(item.get("difficulty") or "").lower() != "easy":
+                continue
+            if item.get("container_status") == "stopped" and code in (closed | abandoned):
+                return (
+                    True,
+                    f"发现平台仍可启动的 easy {code} 被本地关闭/放弃状态误排除，"
+                    "进入恢复 fast path。",
+                )
 
         return False, "未发现未完成 easy 候选，切回四柱管线处理中/高难度题。"
 
