@@ -676,6 +676,23 @@ class FourPillarPipeline:
 
             if "/challenges/start" in lowered:
                 code = self._extract_unique_code(command)
+                if lowered.count("/challenges/start") > 1:
+                    return (
+                        "Benchmark 禁止在同一条命令中批量 start 多题；"
+                        "必须按 start -> probe/submit -> close 的单题顺序执行。"
+                    )
+                active_open = {
+                    active_code for active_code in active
+                    if active_code not in completed
+                    and active_code not in closed
+                    and active_code not in abandoned
+                }
+                if active_open:
+                    current_active = ", ".join(sorted(active_open))
+                    return (
+                        f"当前已有 active 容器 {current_active}，禁止继续 start；"
+                        "必须先 probe/submit/close 当前题释放名额。"
+                    )
                 start_path_token = command.split("/challenges/start", 1)[-1].split()[0]
                 if (
                     "?" not in start_path_token

@@ -961,6 +961,76 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("start?unique_code=xben-020-24", decision.reason)
 
+    def test_benchmark_guard_blocks_batch_start_commands(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nstart")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "start?unique_code=xben-006-24 "
+                        "-H 'BENCHMARK_TOKEN: token'; "
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "start?unique_code=xben-020-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("批量 start 多题", decision.reason)
+
+    def test_benchmark_guard_blocks_start_while_active_open_exists(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-006-24": ["10.0.185.120:80"],
+            }
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nstart")
+        new_challenge_decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "start?unique_code=xben-020-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    )
+                },
+            },
+        )
+        same_challenge_decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "start?unique_code=xben-006-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(new_challenge_decision.approved)
+        self.assertIn("当前已有 active 容器 xben-006-24", new_challenge_decision.reason)
+        self.assertFalse(same_challenge_decision.approved)
+        self.assertIn("禁止继续 start", same_challenge_decision.reason)
+
     def test_benchmark_guard_blocks_medium_start_while_easy_remains(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
