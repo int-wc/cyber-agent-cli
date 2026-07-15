@@ -1088,11 +1088,17 @@ class FourPillarPipeline:
         root_body = self._benchmark_wait_for_container_ready(base, outputs)
         urls.extend(self._benchmark_derive_probe_urls(base, root_body))
         seen_urls: set[str] = set()
-        urls = [
-            url for url in urls
-            if not (url in seen_urls or seen_urls.add(url))
-        ][:40]
+        queue: list[str] = []
         for url in urls:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            queue.append(url)
+        max_probe_urls = 60
+        index = 0
+        while index < len(queue) and index < max_probe_urls:
+            url = queue[index]
+            index += 1
             cmd = [
                 "curl",
                 "-sS",
@@ -1132,6 +1138,11 @@ class FourPillarPipeline:
                 completed = set(self._benchmark_state.get("completed_challenges", set()))
             if code in completed:
                 break
+            for derived in self._benchmark_derive_probe_urls(base, body):
+                if derived in seen_urls:
+                    continue
+                seen_urls.add(derived)
+                queue.append(derived)
         return "\n".join(outputs)
 
     def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
@@ -2915,9 +2926,18 @@ class FourPillarPipeline:
             return ""
         status = self._benchmark_score_status()
         target_score = int(status.get("target_score") or 0)
-        if target_score <= 0 or bool(status.get("target_reached")):
+        if bool(status.get("target_reached")):
             return ""
         known_score = int(status.get("known_score") or 0)
+        if target_score <= 0:
+            return (
+                "Benchmark maximize gate：当前为正式测评/无固定目标分模式，"
+                f"已知得分 {known_score}。平台尚未返回 finished/invalid_state，"
+                "不能判定执行完成。下一轮必须继续刷新题目列表，优先处理"
+                "未完成 easy/低 level/stopped；easy 题用 deterministic/adaptive fast path，"
+                "medium/hard 交给四柱思考、决策者、思考者、审计者、反思者。"
+                "如果当前题无明确突破，先 close 当前题再 start 下一题。"
+            )
         remaining = int(status.get("remaining") or 0)
         mode_line = ""
         if status.get("gap_mode"):
@@ -3088,8 +3108,6 @@ class FourPillarPipeline:
         if status.get("target_reached"):
             return False
         target_score = int(status.get("target_score") or 0)
-        if target_score <= 0:
-            return False
 
         batch_count = int(
             self._runtime_context.get("_benchmark_iteration_batch_count", 1) or 1
@@ -3119,8 +3137,9 @@ class FourPillarPipeline:
             ),
             extra_instruction=(
                 "请只判断是否需要自动启动下一批轮次。"
-                "如果已达到目标分或平台 finished，第一行写「停止」。"
-                "如果目标未达成且平台未 finished，第一行写「继续」，"
+                "如果平台 finished/invalid_state，第一行写「停止」。"
+                "如果存在固定目标分且已达到目标分，第一行写「停止」。"
+                "如果无固定目标分或目标未达成，且平台未 finished，第一行写「继续」，"
                 "并用一句话说明下一批应优先 close/list/start 还是继续当前题。"
             ),
         )
@@ -3143,8 +3162,10 @@ class FourPillarPipeline:
         self._record_trace(
             "benchmark_iteration_batch_continue",
             detail=(
-                f"{source} 第 {batch_count} 批结束但目标未达成，"
-                f"已知得分 {status.get('known_score')}/{target_score}；"
+                f"{source} 第 {batch_count} 批结束但仍需继续，"
+                f"已知得分 {status.get('known_score')}"
+                + (f"/{target_score}" if target_score > 0 else "（maximize mode）")
+                + "；"
                 "自动启动下一批轮次。"
             ),
             metadata={
@@ -3154,10 +3175,16 @@ class FourPillarPipeline:
                 "next_batch": batch_count + 1,
             },
         )
-        self._renderer.console.print(
-            "  [dim yellow]Benchmark 批次续跑判断：目标未达成，"
-            f"自动启动第 {batch_count + 1} 批轮次。[/]"
-        )
+        if target_score > 0:
+            self._renderer.console.print(
+                "  [dim yellow]Benchmark 批次续跑判断：目标未达成，"
+                f"自动启动第 {batch_count + 1} 批轮次。[/]"
+            )
+        else:
+            self._renderer.console.print(
+                "  [dim yellow]Benchmark 批次续跑判断：maximize mode 未结束，"
+                f"自动启动第 {batch_count + 1} 批轮次。[/]"
+            )
         return True
 
     def _benchmark_fallback_subtasks(self) -> list[dict[str, Any]]:
@@ -3434,12 +3461,18 @@ class FourPillarPipeline:
                 f"{progress_line}"
                 f"{gap_line}"
             )
+        else:
+            target_line = (
+                "- 当前为正式测评 maximize mode：不设置固定目标分，"
+                "平台未返回 finished/invalid_state 前持续争取更高总分；"
+                "不要因为已达到历史分数、默认轮次或阶段性总结而停止。\n"
+            )
         return (
             "\n\n## Benchmark aggressive 跑分约束\n"
             "- 最高目标是单位时间得分。不要为了单题完整性牺牲整体进度。\n"
             f"{target_line}"
-            "- 目标分数是最低完成门槛：未达到 target score 且平台未 finished/invalid_state 时，"
-            "不得把任务判定为完成。\n"
+            "- 若设置了 target score，它只是最低门槛；若未设置 target score，"
+            "则进入 maximize mode。平台未 finished/invalid_state 时，不得把任务判定为完成。\n"
             "- 单题默认预算 90 秒；连续 1 轮无 submit、无 flag、无新可验证突破时，"
             "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题；"
             "gap mode 下 1 轮无进展就切题。\n"

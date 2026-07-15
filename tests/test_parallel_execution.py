@@ -204,6 +204,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
                 "_run_benchmark_fast_phases",
                 return_value=True,
             ) as fast,
+            patch.object(self.pipeline, "_auto_select", return_value=([], "")),
             patch.object(self.pipeline, "_call_role_with_timeout") as role_call,
         ):
             role_call.side_effect = [
@@ -1771,6 +1772,40 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.180.232:8000/company-assets/.env", urls)
         self.assertIn("http://10.0.180.232:8000/company-secrets/flag.txt", urls)
 
+    def test_benchmark_probe_container_adapts_to_intermediate_links(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        requested_urls: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            url = cmd[-1]
+            requested_urls.append(url)
+            if url.endswith("/first"):
+                stdout = (
+                    "HTTP/1.1 200 OK\n\n"
+                    '<html><a href="/second">second</a></html>'
+                )
+            else:
+                stdout = "HTTP/1.1 404 Not Found\n\n"
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_wait_for_container_ready",
+                return_value='<html><a href="/first">first</a></html>',
+            ),
+            patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            self.pipeline._benchmark_probe_container_local(
+                "d-01",
+                ["10.0.180.232:8000"],
+            )
+
+        self.assertIn("http://10.0.180.232:8000/first", requested_urls)
+        self.assertIn("http://10.0.180.232:8000/second", requested_urls)
+
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -1964,6 +1999,44 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("380/4000", directive)
         self.assertIn("不能判定执行完成", directive)
+
+    def test_benchmark_maximize_mode_requires_continuation_without_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 0
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["completed_scores"] = {
+                "a-05": 200,
+            }
+
+        directive = self.pipeline._benchmark_target_continue_directive()
+
+        self.assertIn("maximize gate", directive)
+        self.assertIn("已知得分 200", directive)
+        self.assertIn("不能判定执行完成", directive)
+
+    def test_benchmark_maximize_mode_continues_iteration_batches(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 0
+        self.pipeline._runtime_context["_benchmark_iteration_batch_count"] = 1
+        self.pipeline._benchmark_profile_active = True
+
+        with patch.object(
+            self.pipeline,
+            "_call_role_with_timeout",
+            return_value="继续\nmaximize mode 继续刷新题目列表。",
+        ) as role_call:
+            should_continue = self.pipeline._benchmark_should_continue_iteration_batches(
+                source="benchmark_fast",
+                completed_iterations=25,
+            )
+
+        self.assertTrue(should_continue)
+        role_call.assert_called_once()
+        self.assertEqual(
+            self.pipeline._runtime_context["_benchmark_iteration_batch_count"],
+            2,
+        )
 
     def test_benchmark_target_gate_enters_rush_mode_near_target(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
