@@ -1129,6 +1129,42 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["last_score"], 200)
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
 
+    def test_benchmark_runtime_state_tracks_non_xben_codes(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+            "start?unique_code=d-01\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"unique_code":"d-01","container_addr":["10.0.180.232:8000"]}'
+        )
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["current_challenge"], "d-01")
+        self.assertEqual(state["active_containers"], {"d-01": ["10.0.180.232:8000"]})
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "-d '{\"unique_code\":\"d-01\",\"flag\":\"flag{a}\"}' "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/submit\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"correct":true,"awarded":200,"cumulative_score":200}'
+        )
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+            "close?unique_code=d-01\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"unique_code":"d-01","closed":true}'
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("d-01", state["completed_challenges"])
+        self.assertIn("d-01", state["closed_challenges"])
+        self.assertEqual(state["active_containers"], {})
+        self.assertEqual(state["completed_scores"]["d-01"], 200)
+
     def test_benchmark_runtime_state_clears_current_after_close(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

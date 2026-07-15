@@ -555,12 +555,15 @@ class FourPillarPipeline:
     @staticmethod
     def _extract_unique_code(text: str) -> str | None:
         match = _re_mod.search(
-            r"\bunique_code\b\s*[:=]\s*['\"]?(xben-\d+-\d+)\b",
+            r"\bunique_code\b\s*[:=]\s*['\"]?([A-Za-z0-9][A-Za-z0-9_-]*)\b",
             text,
         )
         if match:
             return match.group(1)
-        match = _re_mod.search(r"\bunique_code[\"'=:/\s]+(xben-\d+-\d+)\b", text)
+        match = _re_mod.search(
+            r"\bunique_code[\"'=:/\s]+([A-Za-z0-9][A-Za-z0-9_-]*)\b",
+            text,
+        )
         if match:
             return match.group(1)
         match = _re_mod.search(r"\b(xben-\d+-\d+)\b", text)
@@ -1605,7 +1608,7 @@ class FourPillarPipeline:
         for value in json_fragments:
             if isinstance(value, dict):
                 code = value.get("unique_code")
-                if isinstance(code, str) and _re_mod.fullmatch(r"xben-\d+-\d+", code):
+                if isinstance(code, str) and code:
                     addrs = value.get("container_addr")
                     status = value.get("container_status")
                     if isinstance(addrs, list) and addrs and (
