@@ -3909,6 +3909,103 @@ class FourPillarPipeline:
             "`curl --interface tun0`；平台 API 才使用物理网卡。"
         )
 
+    @staticmethod
+    def _benchmark_service_handoff_profiles() -> dict[str, dict[str, Any]]:
+        return {
+            "hugegraph": {
+                "context": (
+                    "## 当前题专项线索\n"
+                    "fast path 已识别当前服务为 HugeGraph/Gremlin/Arthas/JDWP 类 Java 服务。"
+                    "根路径、/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas "
+                    "和 JDWP 5005 是优先路径。不要继续做普通 Web/PHP/LFI/目录枚举。"
+                    "如果 nmap jdwp-exec 因本机 nselib 解析错误失败，应改用 jdb、自定义 JDWP、"
+                    "Arthas 或 Gremlin 侧信道，不要重复 HTTP 字典扫描。"
+                ),
+                "steps": [
+                    (
+                        "Benchmark handoff step 1：只复核当前 active 题 {current} "
+                        "({addr_text}) 的 HugeGraph 指纹和关键端口。禁止 setup/VPN/"
+                        "toolchain/list/start。只允许访问 /、/versions、/graphs、"
+                        "/graphs/hugegraph/conf、/gremlin、/arthas，并探测 5005/8561/8562。"
+                        "发现 flag{{...}} 立即 submit。"
+                    ),
+                    (
+                        "Benchmark hugegraph exploit step 2：只围绕 {current} 的 "
+                        "HugeGraph/Gremlin/Arthas/JDWP 选择一个最高置信利用路径。"
+                        "优先顺序：1) JDWP 5005 读取 /flag 或执行 cat /flag；"
+                        "2) Arthas 8561/8562 默认/弱口令后执行命令；"
+                        "3) Gremlin System.getenv/System.getProperties 或 HugeGraph API "
+                        "泄露。禁止继续普通 HTTP 目录枚举、SQLi、XSS、PHP/LFI。"
+                        "最多验证一个主假设和一个备选假设；发现 flag 立即 submit。"
+                    ),
+                    (
+                        "Benchmark hugegraph close step 3：只有当 {current} 的 JDWP、"
+                        "Arthas、Gremlin 三条路径均无新线索且无 flag 时，才 close?"
+                        "unique_code={current}；否则保留 active 并返回下一步具体利用点。"
+                    ),
+                ],
+            },
+            "dify": {
+                "context": (
+                    "## 当前题专项线索\n"
+                    "fast path 已识别当前服务为 Dify/Next.js。前端 3000 可达，"
+                    "`data-api-prefix`/`data-public-api-prefix` 指向 127.0.0.1:5001，"
+                    "直连 5001 可能被拒绝。不要按普通 PHP/LFI/目录字典扫；优先基于 "
+                    "Next.js 静态 chunk、RSC payload、Dify public/console API、安装/登录态、"
+                    "SSR/proxy/rewrite 行为和暴露的 app/dataset/workspace 标识推进。"
+                ),
+                "steps": [
+                    (
+                        "Benchmark dify handoff step 1：只深挖当前 active 题 {current} "
+                        "({addr_text}) 的 Dify/Next.js 指纹。禁止 setup/VPN/toolchain/"
+                        "list/start/PHP/LFI 字典扫描。只访问当前 host:port，必须使用 "
+                        "curl --interface tun0。复核 /apps、/signin、RSC payload、"
+                        "有限 Next.js chunk、/console/api/* 与 /api/* 的真实响应；"
+                        "发现 flag{{...}} 立即 submit。"
+                    ),
+                    (
+                        "Benchmark dify exploit step 2：围绕 {current} 选择一个最高置信"
+                        " Dify/Next.js 利用路径。优先顺序：1) chunk/RSC 泄露 app_id、"
+                        "secret、token、flag 或可调用 public API；2) install/setup/signin "
+                        "状态错误暴露初始化或管理员路径；3) Next rewrite/proxy 到 "
+                        "127.0.0.1:5001 的可利用入口。禁止继续泛化目录枚举。最多一个"
+                        "主假设和一个备选假设；发现候选 flag 立即 submit。"
+                    ),
+                    (
+                        "Benchmark dify close step 3：只有当 {current} 的静态 chunk、"
+                        "RSC、public/console API、install/signin 状态均无新线索且无 flag "
+                        "时，才 close?unique_code={current}；否则保留 active 并返回"
+                        "下一步具体利用点。"
+                    ),
+                ],
+            },
+        }
+
+    def _benchmark_render_service_handoff_subtasks(
+        self,
+        *,
+        current: str,
+        addr_text: str,
+        context: str,
+        fingerprint: str,
+    ) -> list[dict[str, Any]]:
+        profile = self._benchmark_service_handoff_profiles().get(fingerprint)
+        if not profile:
+            return []
+        service_context = f"{context}\n\n{profile['context']}"
+        return [
+            {
+                "role": "runner",
+                "task_description": str(step).format(
+                    current=current,
+                    addr_text=addr_text,
+                ),
+                "context": service_context,
+                "parallel": False,
+            }
+            for step in profile.get("steps", [])
+        ]
+
     def _benchmark_reasoning_handoff_subtasks(self) -> list[dict[str, Any]]:
         state = self._benchmark_state_snapshot()
         current = state.get("current_challenge")
@@ -3920,103 +4017,20 @@ class FourPillarPipeline:
         addr_text = ", ".join(str(addr) for addr in addrs or []) or "平台状态中的当前地址"
         context = self._benchmark_state_context()
         fingerprints = state.get("service_fingerprints") or {}
-        if isinstance(fingerprints, dict) and fingerprints.get(current) == "hugegraph":
-            hugegraph_context = (
-                f"{context}\n\n"
-                "## 当前题专项线索\n"
-                "fast path 已识别当前服务为 HugeGraph/Gremlin/Arthas/JDWP 类 Java 服务。"
-                "根路径、/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas "
-                "和 JDWP 5005 是优先路径。不要继续做普通 Web/PHP/LFI/目录枚举。"
-                "如果 nmap jdwp-exec 因本机 nselib 解析错误失败，应改用 jdb、自定义 JDWP、"
-                "Arthas 或 Gremlin 侧信道，不要重复 HTTP 字典扫描。"
+        fingerprint = (
+            fingerprints.get(current)
+            if isinstance(fingerprints, dict)
+            else None
+        )
+        if isinstance(fingerprint, str):
+            profile_handoff = self._benchmark_render_service_handoff_subtasks(
+                current=current,
+                addr_text=addr_text,
+                context=context,
+                fingerprint=fingerprint,
             )
-            return [
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark handoff step 1：只复核当前 active 题 {current} "
-                        f"({addr_text}) 的 HugeGraph 指纹和关键端口。禁止 setup/VPN/"
-                        "toolchain/list/start。只允许访问 /、/versions、/graphs、"
-                        "/graphs/hugegraph/conf、/gremlin、/arthas，并探测 5005/8561/8562。"
-                        "发现 flag{...} 立即 submit。"
-                    ),
-                    "context": hugegraph_context,
-                    "parallel": False,
-                },
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark hugegraph exploit step 2：只围绕 {current} 的 "
-                        "HugeGraph/Gremlin/Arthas/JDWP 选择一个最高置信利用路径。"
-                        "优先顺序：1) JDWP 5005 读取 /flag 或执行 cat /flag；"
-                        "2) Arthas 8561/8562 默认/弱口令后执行命令；"
-                        "3) Gremlin System.getenv/System.getProperties 或 HugeGraph API "
-                        "泄露。禁止继续普通 HTTP 目录枚举、SQLi、XSS、PHP/LFI。"
-                        "最多验证一个主假设和一个备选假设；发现 flag 立即 submit。"
-                    ),
-                    "context": hugegraph_context,
-                    "parallel": False,
-                },
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark hugegraph close step 3：只有当 {current} 的 JDWP、"
-                        "Arthas、Gremlin 三条路径均无新线索且无 flag 时，才 close?"
-                        f"unique_code={current}；否则保留 active 并返回下一步具体利用点。"
-                    ),
-                    "context": hugegraph_context,
-                    "parallel": False,
-                },
-            ]
-        if isinstance(fingerprints, dict) and fingerprints.get(current) == "dify":
-            dify_context = (
-                f"{context}\n\n"
-                "## 当前题专项线索\n"
-                "fast path 已识别当前服务为 Dify/Next.js。前端 3000 可达，"
-                "`data-api-prefix`/`data-public-api-prefix` 指向 127.0.0.1:5001，"
-                "直连 5001 可能被拒绝。不要按普通 PHP/LFI/目录字典扫；优先基于 "
-                "Next.js 静态 chunk、RSC payload、Dify public/console API、安装/登录态、"
-                "SSR/proxy/rewrite 行为和暴露的 app/dataset/workspace 标识推进。"
-            )
-            return [
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark dify handoff step 1：只深挖当前 active 题 {current} "
-                        f"({addr_text}) 的 Dify/Next.js 指纹。禁止 setup/VPN/toolchain/"
-                        "list/start/PHP/LFI 字典扫描。只访问当前 host:port，必须使用 "
-                        "curl --interface tun0。复核 /apps、/signin、RSC payload、"
-                        "有限 Next.js chunk、/console/api/* 与 /api/* 的真实响应；"
-                        "发现 flag{...} 立即 submit。"
-                    ),
-                    "context": dify_context,
-                    "parallel": False,
-                },
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark dify exploit step 2：围绕 {current} 选择一个最高置信"
-                        " Dify/Next.js 利用路径。优先顺序：1) chunk/RSC 泄露 app_id、"
-                        "secret、token、flag 或可调用 public API；2) install/setup/signin "
-                        "状态错误暴露初始化或管理员路径；3) Next rewrite/proxy 到 "
-                        "127.0.0.1:5001 的可利用入口。禁止继续泛化目录枚举。最多一个"
-                        "主假设和一个备选假设；发现候选 flag 立即 submit。"
-                    ),
-                    "context": dify_context,
-                    "parallel": False,
-                },
-                {
-                    "role": "runner",
-                    "task_description": (
-                        f"Benchmark dify close step 3：只有当 {current} 的静态 chunk、"
-                        "RSC、public/console API、install/signin 状态均无新线索且无 flag "
-                        f"时，才 close?unique_code={current}；否则保留 active 并返回"
-                        "下一步具体利用点。"
-                    ),
-                    "context": dify_context,
-                    "parallel": False,
-                },
-            ]
+            if profile_handoff:
+                return profile_handoff
         return [
             {
                 "role": "runner",

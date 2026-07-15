@@ -2668,6 +2668,23 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("禁止继续普通 HTTP 目录枚举", handoff[1]["task_description"])
         self.assertIn("nmap jdwp-exec", handoff[1]["context"])
 
+    def test_benchmark_service_handoff_profiles_are_fingerprint_driven(self):
+        profiles = self.pipeline._benchmark_service_handoff_profiles()
+
+        self.assertIn("hugegraph", profiles)
+        self.assertIn("dify", profiles)
+        rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+            current="any-code-1",
+            addr_text="10.0.1.2:8080",
+            context="state context",
+            fingerprint="hugegraph",
+        )
+
+        self.assertEqual(len(rendered), 3)
+        self.assertIn("any-code-1", rendered[0]["task_description"])
+        self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
+        self.assertIn("HugeGraph", rendered[0]["task_description"])
+
     def test_benchmark_reasoning_handoff_specializes_dify(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
