@@ -2531,6 +2531,8 @@ class FourPillarPipeline:
         if (
             "快速指纹" in desc
             or "obvious flag" in lowered
+            or "寻找flag" in lowered
+            or "尝试提交" in desc
             or ("探测" in desc and ("容器" in desc or "10.x" in desc))
         ):
             return self._benchmark_deterministic_fast_step(
@@ -2539,7 +2541,11 @@ class FourPillarPipeline:
             )
         if (
             ("列出" in desc and "题目" in desc)
+            or ("题目列表" in desc and ("获取" in desc or "筛选" in desc))
+            or ("list接口" in lowered and ("题目" in desc or "easy" in lowered))
+            or ("筛选" in desc and ("easy" in lowered or "低level" in lowered))
             or ("启动" in desc and "容器" in desc)
+            or ("start接口" in lowered and "启动" in desc)
             or ("下一道" in desc and "题" in desc)
         ):
             return self._benchmark_deterministic_fast_step(

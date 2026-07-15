@@ -2551,6 +2551,19 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         with patch.object(
             self.pipeline,
             "_benchmark_deterministic_fast_step",
+            return_value="listed",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "调用平台list接口获取最新题目列表，筛选未完成的easy/低level题目"
+            )
+
+        self.assertEqual(result, "listed")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
             return_value="probed",
         ) as deterministic:
             result = self.pipeline._benchmark_deterministic_standard_task(
@@ -2558,6 +2571,18 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
 
         self.assertEqual(result, "probed")
+        self.assertIn("Benchmark fast step 2", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="submitted",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "探测新容器的IP和端口，寻找flag并尝试提交"
+            )
+
+        self.assertEqual(result, "submitted")
         self.assertIn("Benchmark fast step 2", deterministic.call_args.args[0])
 
     def test_benchmark_loads_shared_closed_tasks_across_sessions(self):
