@@ -2923,115 +2923,125 @@ class FourPillarPipeline:
             return ["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")]
         return ["{{7*7}}", "' OR '1'='1", "../flag"]
 
+    def _benchmark_service_action_profiles(self) -> dict[str, dict[str, Any]]:
+        return {
+            "dify": {
+                "label": "Dify",
+                "probe": self._benchmark_probe_dify_local,
+                "actions": {
+                    "handoff": {
+                        "reasoning_reason": (
+                            "Dify/Next.js 专项静态/API 探测完成，需选择一个最高置信利用假设"
+                        ),
+                        "summary": (
+                            "已对当前题 {code} 执行 bounded Dify/Next.js 静态 chunk、"
+                            "RSC、public/console API、install/signin 探测；未直接发现 flag，"
+                            "保留 active 给 exploit step。"
+                        ),
+                    },
+                    "exploit": {
+                        "abandon_reason": "Dify bounded exploit 未发现可提交 flag",
+                        "summary": (
+                            "{code} 已完成 bounded Dify/Next.js 复核，未发现 flag/可提交候选；"
+                            "为最大化总分，标记 abandoned，下一步 close 换题。"
+                        ),
+                    },
+                    "close": {},
+                },
+            },
+            "hugegraph": {
+                "label": "HugeGraph",
+                "probe": self._benchmark_probe_hugegraph_local,
+                "actions": {
+                    "exploit": {
+                        "abandon_reason": "HugeGraph/JDWP bounded exploit 未发现可提交 flag",
+                        "summary": (
+                            "{code} 已完成 bounded HugeGraph/Gremlin/Arthas/JDWP 探测，"
+                            "未发现 flag/可提交候选；为最大化总分，标记 abandoned，下一步 close 换题。"
+                        ),
+                    },
+                    "close": {},
+                },
+            },
+        }
+
+    def _benchmark_service_action_from_desc(self, desc: str) -> tuple[str, str] | None:
+        lowered = desc.lower()
+        for fingerprint, profile in self._benchmark_service_action_profiles().items():
+            if f"benchmark {fingerprint}" not in lowered:
+                continue
+            actions = profile.get("actions") or {}
+            if "handoff step 1" in lowered and "handoff" in actions:
+                return fingerprint, "handoff"
+            if "exploit step 2" in lowered and "exploit" in actions:
+                return fingerprint, "exploit"
+            if "close step 3" in lowered and "close" in actions:
+                return fingerprint, "close"
+        return None
+
+    def _benchmark_run_service_action_step(
+        self,
+        fingerprint: str,
+        action: str,
+    ) -> str:
+        profile = self._benchmark_service_action_profiles()[fingerprint]
+        label = str(profile.get("label") or fingerprint)
+        code, addrs = self._benchmark_active_challenge_from_state()
+        if not code:
+            verb = action if action != "handoff" else "handoff"
+            return f"确定性 {label} {verb}：当前没有 active 容器，跳过。"
+        action_profile = dict((profile.get("actions") or {}).get(action) or {})
+        if action == "close":
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = self._benchmark_close_local(code)
+            if code in completed:
+                return f"确定性 {label} close：{code} 已完成，close 返回: {closed[:200]}"
+            return f"确定性 {label} close：{code} 已 close 释放资源: {closed[:300]}"
+
+        if not addrs:
+            return f"确定性 {label} {action}：当前 active 容器无地址，跳过。"
+        addr = addrs[0]
+        if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
+            return f"确定性 {label} {action}：容器地址格式异常: {addr}"
+        base = f"http://{addr}/"
+        self._benchmark_set_service_fingerprint(code, fingerprint)
+        probe_func = profile.get("probe")
+        probe = str(probe_func(code, base, "")) if callable(probe_func) else ""
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+        if code in completed:
+            closed = self._benchmark_close_local(code)
+            return (
+                f"确定性 {label} {action}：{code} 已提交成功并关闭。\n"
+                f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
+            )
+        if action == "handoff":
+            self._benchmark_mark_reasoning_needed(
+                code,
+                str(action_profile.get("reasoning_reason") or f"{label} handoff 需要服务专项深挖"),
+            )
+        else:
+            self._benchmark_mark_abandoned(
+                code,
+                str(action_profile.get("abandon_reason") or f"{label} bounded exploit 未发现 flag"),
+            )
+        summary = str(action_profile.get("summary") or "{code} 已完成 bounded 探测。").format(
+            code=code
+        )
+        return (
+            f"确定性 {label} {action}：{summary}\n"
+            f"探测摘要:\n{probe[:3500]}"
+        )
+
     def _benchmark_deterministic_fast_step(self, desc: str, reason: str = "") -> str | None:
         """Run the easy fast path without an LLM when the step is mechanical."""
         if not self._is_benchmark_aggressive():
             return None
-        if "Benchmark dify handoff step 1" in desc:
-            code, addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                return "确定性 Dify handoff：当前没有 active 容器，跳过。"
-            if not addrs:
-                return "确定性 Dify handoff：当前 active 容器无地址，跳过。"
-            addr = addrs[0]
-            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
-                return f"确定性 Dify handoff：容器地址格式异常: {addr}"
-            base = f"http://{addr}/"
-            self._benchmark_set_service_fingerprint(code, "dify")
-            probe = self._benchmark_probe_dify_local(code, base, "")
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                closed = self._benchmark_close_local(code)
-                return (
-                    f"确定性 Dify handoff：{code} 已提交成功并关闭。\n"
-                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
-                )
-            self._benchmark_mark_reasoning_needed(
-                code,
-                "Dify/Next.js 专项静态/API 探测完成，需选择一个最高置信利用假设",
-            )
-            return (
-                f"确定性 Dify handoff：已对当前题 {code} 执行 bounded Dify/Next.js "
-                "静态 chunk、RSC、public/console API、install/signin 探测；"
-                "未直接发现 flag，保留 active 给 exploit step。\n"
-                f"探测摘要:\n{probe[:3500]}"
-            )
-        if "Benchmark dify exploit step 2" in desc:
-            code, addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                return "确定性 Dify exploit：当前没有 active 容器，跳过。"
-            if not addrs:
-                return "确定性 Dify exploit：当前 active 容器无地址，跳过。"
-            addr = addrs[0]
-            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
-                return f"确定性 Dify exploit：容器地址格式异常: {addr}"
-            base = f"http://{addr}/"
-            probe = self._benchmark_probe_dify_local(code, base, "")
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                closed = self._benchmark_close_local(code)
-                return (
-                    f"确定性 Dify exploit：{code} 已提交成功并关闭。\n"
-                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
-                )
-            self._benchmark_mark_abandoned(code, "Dify bounded exploit 未发现可提交 flag")
-            return (
-                f"确定性 Dify exploit：{code} 已完成 bounded Dify/Next.js 复核，"
-                "未发现 flag/可提交候选；为最大化总分，标记 abandoned，下一步 close 换题。\n"
-                f"探测摘要:\n{probe[:3500]}"
-            )
-        if "Benchmark dify close step 3" in desc:
-            code, _addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                return "确定性 Dify close：当前没有 active 容器，无需 close。"
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            closed = self._benchmark_close_local(code)
-            if code in completed:
-                return f"确定性 Dify close：{code} 已完成，close 返回: {closed[:200]}"
-            return f"确定性 Dify close：{code} 已 close 释放资源: {closed[:300]}"
-        if "Benchmark hugegraph exploit step 2" in desc:
-            code, addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                return "确定性 HugeGraph exploit：当前没有 active 容器，跳过。"
-            if not addrs:
-                return "确定性 HugeGraph exploit：当前 active 容器无地址，跳过。"
-            addr = addrs[0]
-            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
-                return f"确定性 HugeGraph exploit：容器地址格式异常: {addr}"
-            base = f"http://{addr}/"
-            self._benchmark_set_service_fingerprint(code, "hugegraph")
-            probe = self._benchmark_probe_hugegraph_local(code, base, "")
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                closed = self._benchmark_close_local(code)
-                return (
-                    f"确定性 HugeGraph exploit：{code} 已提交成功并关闭。\n"
-                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
-                )
-            self._benchmark_mark_abandoned(
-                code,
-                "HugeGraph/JDWP bounded exploit 未发现可提交 flag",
-            )
-            return (
-                f"确定性 HugeGraph exploit：{code} 已完成 bounded HugeGraph/Gremlin/"
-                "Arthas/JDWP 探测，未发现 flag/可提交候选；为最大化总分，"
-                "标记 abandoned，下一步 close 换题。\n"
-                f"探测摘要:\n{probe[:3500]}"
-            )
-        if "Benchmark hugegraph close step 3" in desc:
-            code, _addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                return "确定性 HugeGraph close：当前没有 active 容器，无需 close。"
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            closed = self._benchmark_close_local(code)
-            if code in completed:
-                return f"确定性 HugeGraph close：{code} 已完成，close 返回: {closed[:200]}"
-            return f"确定性 HugeGraph close：{code} 已 close 释放资源: {closed[:300]}"
+        service_action = self._benchmark_service_action_from_desc(desc)
+        if service_action:
+            fingerprint, action = service_action
+            return self._benchmark_run_service_action_step(fingerprint, action)
         if "Benchmark handoff step 1" in desc:
             code, addrs = self._benchmark_active_challenge_from_state()
             if not code:

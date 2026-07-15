@@ -2714,6 +2714,24 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
         self.assertIn("HugeGraph", rendered[0]["task_description"])
 
+    def test_benchmark_service_action_profiles_drive_deterministic_steps(self):
+        profiles = self.pipeline._benchmark_service_action_profiles()
+
+        self.assertIn("dify", profiles)
+        self.assertIn("hugegraph", profiles)
+        self.assertEqual(
+            self.pipeline._benchmark_service_action_from_desc(
+                "Benchmark dify exploit step 2：围绕任意题选择一个最高置信路径"
+            ),
+            ("dify", "exploit"),
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_service_action_from_desc(
+                "Benchmark hugegraph close step 3：无 flag 时 close"
+            ),
+            ("hugegraph", "close"),
+        )
+
     def test_benchmark_reasoning_handoff_specializes_dify(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
