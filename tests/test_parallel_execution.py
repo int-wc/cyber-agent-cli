@@ -417,6 +417,101 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertFalse(should_fast)
         self.assertIn("深挖", reason)
 
+    def test_benchmark_pauses_same_round_generic_plan_after_reasoning_mark(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-038-24": ["10.0.1.2:3000"],
+            }
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"xben-038-24"}
+
+        pause, reason = (
+            self.pipeline._benchmark_should_pause_generic_plan_after_deterministic(
+                "快速指纹当前容器并寻找明显 flag"
+            )
+        )
+
+        self.assertTrue(pause)
+        self.assertIn("xben-038-24", reason)
+        self.assertIn("reasoning_handoff", reason)
+
+    def test_benchmark_does_not_pause_same_round_handoff_plan(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-038-24": ["10.0.1.2:3000"],
+            }
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"xben-038-24"}
+
+        pause, reason = (
+            self.pipeline._benchmark_should_pause_generic_plan_after_deterministic(
+                "Benchmark dify handoff step 1：只深挖当前 active 题"
+            )
+        )
+
+        self.assertFalse(pause)
+        self.assertEqual(reason, "")
+
+    def test_benchmark_handoff_selection_restores_close_step(self):
+        subtasks = [
+            {"task_description": "Benchmark dify handoff step 1：只深挖当前 active"},
+            {"task_description": "Benchmark dify exploit step 2：尝试最高置信利用"},
+            {"task_description": "Benchmark dify close step 3：无 flag 则 close"},
+        ]
+
+        selected, note = self.pipeline._benchmark_normalize_selected_indices(
+            subtasks,
+            [0, 1],
+        )
+
+        self.assertEqual(selected, [0, 1, 2])
+        self.assertIn("完整执行", note)
+
+    def test_benchmark_non_handoff_selection_is_not_forced(self):
+        subtasks = [
+            {"task_description": "读取题目列表"},
+            {"task_description": "选择下一题"},
+            {"task_description": "探测容器"},
+        ]
+
+        selected, note = self.pipeline._benchmark_normalize_selected_indices(
+            subtasks,
+            [0, 2],
+        )
+
+        self.assertEqual(selected, [0, 2])
+        self.assertEqual(note, "")
+
+    def test_benchmark_does_not_recover_closed_easy_when_medium_is_untried(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        snapshot = [
+            {
+                "unique_code": "c-03",
+                "difficulty": "easy",
+                "level": 1,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+            {
+                "unique_code": "m-01",
+                "difficulty": "medium",
+                "level": 2,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+        ]
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = snapshot
+            self.pipeline._benchmark_state["closed_challenges"] = {"c-03"}
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+        selected = self.pipeline._benchmark_select_next_easy(snapshot)
+
+        self.assertFalse(should_fast)
+        self.assertIn("中/高难度", reason)
+        self.assertIsNone(selected)
+
 
 class SubtaskChecklistTestCase(unittest.TestCase):
     """测试子 Agent 任务清单展示。"""
@@ -2787,6 +2882,58 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         with patch.object(
             self.pipeline,
             "_benchmark_deterministic_fast_step",
+            return_value="listed",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "调用平台API获取挑战列表，确定当前可做的题目"
+            )
+
+        self.assertEqual(result, "listed")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="listed",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "刷新题目列表，解析未完成easy/低level题"
+            )
+
+        self.assertEqual(result, "listed")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="started",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "选择一道未完成easy/低level题（如a-01或类似），POST start，解析返回的容器IP和端口"
+            )
+
+        self.assertEqual(result, "started")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="started",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "启动选中的未完成easy/低level题"
+            )
+
+        self.assertEqual(result, "started")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
             return_value="probed",
         ) as deterministic:
             result = self.pipeline._benchmark_deterministic_standard_task(
@@ -2803,6 +2950,18 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         ) as deterministic:
             result = self.pipeline._benchmark_deterministic_standard_task(
                 "探测新容器的IP和端口，寻找flag并尝试提交"
+            )
+
+        self.assertEqual(result, "submitted")
+        self.assertIn("Benchmark fast step 2", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="submitted",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                '若探测发现flag，立即POST submit，JSON格式{"unique_code":"题号","flag":"flag{...}"}。若返回correct则POST close'
             )
 
         self.assertEqual(result, "submitted")

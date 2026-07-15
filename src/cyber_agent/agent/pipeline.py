@@ -1171,6 +1171,17 @@ class FourPillarPipeline:
         )
         if candidates:
             return candidates[0]
+        has_untried_non_easy = any(
+            isinstance(item, dict)
+            and isinstance(item.get("unique_code"), str)
+            and item.get("unique_code") not in excluded
+            and item.get("is_completed") is not True
+            and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
+            and item.get("container_status") in {"stopped", "available", None}
+            for item in challenges
+        )
+        if has_untried_non_easy:
+            return None
         recovery_candidates.sort(
             key=lambda item: (
                 int(item.get("level") or 999),
@@ -3180,6 +3191,8 @@ class FourPillarPipeline:
             or "obvious flag" in lowered
             or "寻找flag" in lowered
             or "尝试提交" in desc
+            or "post submit" in lowered
+            or ("submit" in lowered and ("flag" in lowered or "close" in lowered))
             or ("探测" in desc and ("容器" in desc or "10.x" in desc))
         ):
             return self._benchmark_deterministic_fast_step(
@@ -3188,10 +3201,24 @@ class FourPillarPipeline:
             )
         if (
             ("列出" in desc and "题目" in desc)
-            or ("题目列表" in desc and ("获取" in desc or "筛选" in desc))
+            or (
+                "题目列表" in desc
+                and (
+                    "获取" in desc
+                    or "筛选" in desc
+                    or "刷新" in desc
+                    or "解析" in desc
+                )
+            )
+            or ("挑战列表" in desc and ("获取" in desc or "调用" in desc or "确定" in desc))
+            or ("可做" in desc and ("题目" in desc or "挑战" in desc))
             or ("list接口" in lowered and ("题目" in desc or "easy" in lowered))
+            or ("平台api" in lowered and ("挑战列表" in desc or "题目" in desc))
             or ("筛选" in desc and ("easy" in lowered or "低level" in lowered))
+            or ("post start" in lowered and ("题" in desc or "easy" in lowered))
+            or ("选择一道" in desc and ("easy" in lowered or "低level" in lowered))
             or ("启动" in desc and "容器" in desc)
+            or ("启动" in desc and "题" in desc and ("easy" in lowered or "低level" in lowered))
             or ("start接口" in lowered and "启动" in desc)
             or ("下一道" in desc and "题" in desc)
         ):
@@ -4001,6 +4028,58 @@ class FourPillarPipeline:
                 "benchmark dify",
                 "只深挖当前 active",
             )
+        )
+
+    def _benchmark_should_pause_generic_plan_after_deterministic(
+        self,
+        desc: str,
+    ) -> tuple[bool, str]:
+        """Stop same-round generic subtasks once a challenge needs focused handoff."""
+        if not self._is_benchmark_aggressive():
+            return False, ""
+        if self._benchmark_plan_is_handoff_like([{"task_description": desc}]):
+            return False, ""
+
+        state = self._benchmark_state_snapshot()
+        reasoning = set(state.get("reasoning_challenges") or [])
+        if not reasoning:
+            return False, ""
+
+        completed = set(state.get("completed_challenges") or [])
+        closed = set(state.get("closed_challenges") or [])
+        abandoned = set(state.get("abandoned_challenges") or [])
+        inactive = completed | closed | abandoned
+        current = state.get("current_challenge")
+        active = state.get("active_containers") or {}
+
+        candidates: list[str] = []
+        if isinstance(current, str) and current:
+            candidates.append(current)
+        candidates.extend(code for code in active if isinstance(code, str))
+        for code in dict.fromkeys(candidates):
+            if code in reasoning and code not in inactive:
+                return (
+                    True,
+                    f"{code} 已进入 reasoning_handoff，跳过本轮剩余泛化子任务",
+                )
+        return False, ""
+
+    def _benchmark_normalize_selected_indices(
+        self,
+        subtasks: list[dict[str, Any]],
+        selected_indices: list[int],
+    ) -> tuple[list[int], str]:
+        """Keep Benchmark handoff plans intact so their close/stop-loss step runs."""
+        if not self._is_benchmark_aggressive():
+            return selected_indices, ""
+        if not self._benchmark_plan_is_handoff_like(subtasks):
+            return selected_indices, ""
+        all_indices = list(range(len(subtasks)))
+        if selected_indices == all_indices:
+            return selected_indices, ""
+        return (
+            all_indices,
+            "Benchmark handoff 计划必须完整执行，已恢复被筛掉的专项/close 步骤",
         )
 
     def _benchmark_final_summary(self) -> str:
@@ -5383,6 +5462,18 @@ class FourPillarPipeline:
             if status in {"stopped", "available", None}:
                 return True, f"仍有未完成 easy 候选 {code}，继续 fast path。"
 
+        has_untried_non_easy = any(
+            isinstance(item, dict)
+            and isinstance(item.get("unique_code"), str)
+            and item.get("unique_code") not in excluded
+            and item.get("is_completed") is not True
+            and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
+            and item.get("container_status") in {"stopped", "available", None}
+            for item in snapshot
+        )
+        if has_untried_non_easy:
+            return False, "easy 已无新候选，切回四柱处理中/高难度题。"
+
         for item in snapshot:
             if not isinstance(item, dict):
                 continue
@@ -6698,6 +6789,18 @@ class FourPillarPipeline:
                         else selected_context
                     )
 
+            selected_indices, selection_note = self._benchmark_normalize_selected_indices(
+                subtasks,
+                selected_indices,
+            )
+            if selection_note:
+                renderer.console.print(f"  [dim yellow]↻ {selection_note}。[/]")
+                self._record_trace(
+                    "benchmark_handoff_selection_normalized",
+                    detail=selection_note,
+                    metadata={"subtask_count": len(subtasks)},
+                )
+
             if not selected_indices:
                 renderer.console.print("  [dim]未选择任何子任务，结束执行。[/]")
                 break
@@ -6918,6 +7021,21 @@ class FourPillarPipeline:
                         self._benchmark_reset_setup_timeout_streak()
                         if self._benchmark_stop_if_terminal("handoff_deterministic_step_end"):
                             circuit_broken = True
+                            break
+                        pause_generic, pause_reason = (
+                            self._benchmark_should_pause_generic_plan_after_deterministic(
+                                desc
+                            )
+                        )
+                        if pause_generic:
+                            renderer.console.print(
+                                f"  [dim yellow]↻ {pause_reason}；下一轮进入 focused handoff。[/]"
+                            )
+                            self._record_trace(
+                                "benchmark_pause_generic_plan_for_handoff",
+                                detail=pause_reason,
+                                metadata={"desc": desc[:200]},
+                            )
                             break
                         batch_i += 1
                         continue
