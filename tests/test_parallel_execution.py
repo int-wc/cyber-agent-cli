@@ -232,7 +232,8 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertIn("POST start", joined)
         self.assertIn("45 秒快速指纹", joined)
         self.assertIn("立即 submit", joined)
-        self.assertIn("立即 close", joined)
+        self.assertIn("保留 active", joined)
+        self.assertIn("连续不可达才 close", joined)
         self.assertIn("不 hint", joined)
 
     def test_benchmark_fast_cycle_inserts_setup_when_state_unknown(self):
@@ -391,6 +392,27 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
         self.assertFalse(should_fast)
         self.assertIn("medium", reason)
+
+    def test_benchmark_fast_path_hands_off_reasoning_easy(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-038-24": ["10.0.1.2:3000"],
+            }
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"xben-038-24"}
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-038-24",
+                    "difficulty": "easy",
+                    "is_completed": False,
+                    "container_status": "available",
+                }
+            ]
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertFalse(should_fast)
+        self.assertIn("深挖", reason)
 
 
 class SubtaskChecklistTestCase(unittest.TestCase):
@@ -1108,6 +1130,11 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
     def test_benchmark_runtime_state_tracks_submit_and_close(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"xben-005-24"}
+            self.pipeline._benchmark_state["probe_unreachable_streaks"] = {
+                "xben-005-24": 1,
+            }
 
         self.pipeline._update_benchmark_runtime_state(
             '命令: curl --interface enp0s20f0u3u4 '
@@ -1132,6 +1159,8 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["abandoned_challenges"], [])
         self.assertEqual(state["last_score"], 200)
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
+        self.assertNotIn("xben-005-24", state["reasoning_challenges"])
+        self.assertNotIn("xben-005-24", state["probe_unreachable_streaks"])
 
     def test_benchmark_runtime_state_tracks_non_xben_codes(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1168,6 +1197,20 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("d-01", state["closed_challenges"])
         self.assertEqual(state["active_containers"], {})
         self.assertEqual(state["completed_scores"]["d-01"], 200)
+
+    def test_benchmark_runtime_state_does_not_record_tun_as_platform_interface(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface tun1 "
+            "-H 'BENCHMARK_TOKEN: token' "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n[]"
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIsNone(state["api_interface"])
 
     def test_benchmark_runtime_state_clears_current_after_close(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1524,6 +1567,42 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertEqual(state["last_challenges_snapshot"]["total"], 2)
         self.assertIn("xben-005-24", state["completed_challenges"])
+
+    def test_benchmark_deterministic_setup_reuses_any_tun_for_vpn_only(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if cmd[:4] == ["ip", "-o", "-4", "addr"]:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout="32: tun1    inet 10.254.0.4/24 scope global tun1\n",
+                    stderr="",
+                )
+            if cmd and cmd[0] == "curl":
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast setup：只做前置校验。"
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("复用已连接 VPN：tun1", result)
+        self.assertEqual(state["tun_interface"], "tun1")
+        self.assertEqual(state["api_interface"], "enp0s20f0u3u4")
+        self.assertFalse(any("openvpn" in part for cmd in calls for part in cmd))
 
     def test_benchmark_deterministic_step1_starts_next_easy(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1897,6 +1976,109 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("xben-009-24", state["completed_challenges"])
         self.assertIn("xben-009-24", state["closed_challenges"])
         self.assertEqual(state["active_containers"], {})
+
+    def test_benchmark_deterministic_step2_keeps_reachable_easy_for_reasoning(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                return_value=(
+                    "## http://10.0.180.232:3000/\n"
+                    "HTTP/1.1 307 Temporary Redirect\n"
+                    "location: /apps\n"
+                    "X-Powered-By: Next.js\n\n"
+                    "<html>Dify</html>"
+                ),
+            ),
+            patch.object(self.pipeline, "_benchmark_close_local") as close_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("保留 active", result)
+        self.assertIn("c-03", state["reasoning_challenges"])
+        self.assertEqual(state["active_containers"], {"c-03": ["10.0.180.232:3000"]})
+        close_local.assert_not_called()
+
+    def test_benchmark_deterministic_step2_keeps_unreachable_active_for_retry(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["current_challenge"] = "d-01"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "d-01": ["10.0.180.232:8000"],
+            }
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                return_value=(
+                    "## readiness 1 http://10.0.180.232:8000/\n"
+                    "curl: (7) Failed to connect to 10.0.180.232 port 8000: "
+                    "Could not connect to server"
+                ),
+            ),
+            patch.object(self.pipeline, "_benchmark_close_local") as close_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("暂不可达", result)
+        self.assertEqual(state["probe_unreachable_streaks"], {"d-01": 1})
+        self.assertEqual(state["active_containers"], {"d-01": ["10.0.180.232:8000"]})
+        close_local.assert_not_called()
+
+    def test_benchmark_deterministic_step2_closes_after_unreachable_retry_limit(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["current_challenge"] = "d-01"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "d-01": ["10.0.180.232:8000"],
+            }
+            self.pipeline._benchmark_state["probe_unreachable_streaks"] = {"d-01": 1}
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                return_value=(
+                    "## readiness 1 http://10.0.180.232:8000/\n"
+                    "curl: (7) Failed to connect to 10.0.180.232 port 8000: "
+                    "Could not connect to server"
+                ),
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_close_local",
+                return_value='{"unique_code":"d-01","closed":true}',
+            ) as close_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        self.assertIn("连续 2 次不可达", result)
+        close_local.assert_called_once_with("d-01")
 
     def test_benchmark_derives_payload_urls_from_html(self):
         html = (
@@ -2426,6 +2608,29 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("平台 API 禁止走 tun0", decision.reason)
+
+    def test_benchmark_guard_blocks_platform_api_on_any_tun(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface tun1 "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("平台 API 禁止走 tun1", decision.reason)
 
     def test_benchmark_guard_blocks_container_on_physical_interface(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

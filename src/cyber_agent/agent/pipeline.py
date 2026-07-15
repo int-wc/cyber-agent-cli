@@ -181,6 +181,8 @@ class FourPillarPipeline:
             "closed_challenges": set(),
             "abandoned_challenges": set(),
             "recovery_attempted_challenges": set(),
+            "reasoning_challenges": set(),
+            "probe_unreachable_streaks": {},
             "auto_submitted_flags": set(),
             "last_score": None,
             "redundant_block_count": 0,
@@ -635,7 +637,7 @@ class FourPillarPipeline:
             tun_interface = str(state.get("tun_interface") or "tun0")
             if tool_name == "fetch_web_page":
                 return (
-                    "Benchmark 容器地址 10.x 必须通过 VPN/tun0 访问；"
+                    f"Benchmark 容器地址 10.x 必须通过 VPN/{tun_interface} 访问；"
                     f"fetch_web_page 无法绑定出口，请改用 curl --interface {tun_interface}。"
                 )
             if used_interface and used_interface != tun_interface:
@@ -650,10 +652,10 @@ class FourPillarPipeline:
                     "先用无成本指纹、源码泄漏、默认凭证、常见漏洞路径拿分；"
                     "除非用户明确临场要求使用 hint，否则不要调用。"
                 )
-            if used_interface == "tun0":
+            if used_interface and _re_mod.fullmatch(r"tun\d+", used_interface):
                 api_interface = state.get("api_interface") or "物理网卡"
                 return (
-                    "平台 API 禁止走 tun0；tun0 只用于访问 10.x 容器。"
+                    f"平台 API 禁止走 {used_interface}；VPN/tun 只用于访问 10.x 容器。"
                     f"请改用 --interface {api_interface} 并携带 BENCHMARK_TOKEN。"
                 )
             if state.get("api_interface") and used_interface is None:
@@ -851,6 +853,11 @@ class FourPillarPipeline:
             interface = self._benchmark_state.get("api_interface")
         return str(interface or "enp0s20f0u3u4")
 
+    def _benchmark_tun_interface(self) -> str:
+        with self._benchmark_state_lock:
+            interface = self._benchmark_state.get("tun_interface")
+        return str(interface or "tun0")
+
     def _benchmark_platform_request(
         self,
         *,
@@ -907,6 +914,68 @@ class FourPillarPipeline:
             synthetic_content += f"\n错误输出:\n{result.stderr}"
         self._update_benchmark_runtime_state(synthetic_content)
         return result.returncode, result.stdout, result.stderr
+
+    def _benchmark_detect_tun_local(self) -> tuple[str, str] | None:
+        try:
+            result = subprocess.run(
+                ["ip", "-o", "-4", "addr", "show"],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        for line in (result.stdout or "").splitlines():
+            match = _re_mod.search(r"\b(tun\d+)\b.*\binet\s+([0-9.]+)/\d+", line)
+            if not match:
+                continue
+            tun, ip_addr = match.group(1), match.group(2)
+            with self._benchmark_state_lock:
+                self._benchmark_state["vpn_connected"] = True
+                self._benchmark_state["tun_interface"] = tun
+                self._benchmark_state["tun_ip"] = ip_addr
+            self._persist_benchmark_state()
+            return tun, ip_addr
+        return None
+
+    def _benchmark_start_vpn_local(self) -> str:
+        workdir = Path("/home/my/cyber/benchmark_test")
+        configs = sorted(workdir.glob("*.ovpn"))
+        if not configs:
+            return "未找到 .ovpn 配置，无法启动 VPN。"
+        config = configs[0]
+        log_path = Path("/tmp/openvpn.log")
+        cmd = [
+            "sudo",
+            "openvpn",
+            "--config",
+            str(config),
+            "--daemon",
+            "--log",
+            str(log_path),
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+        except Exception as exc:
+            return f"启动 VPN 异常: {exc}"
+        with self._benchmark_state_lock:
+            self._benchmark_state["vpn_config"] = str(config)
+        self._persist_benchmark_state()
+        time_mod.sleep(2)
+        detected = self._benchmark_detect_tun_local()
+        note = f"stdout={result.stdout[:200]} stderr={result.stderr[:300]}"
+        if detected:
+            return f"已启动 VPN 并检测到 {detected[0]} {detected[1]}。{note}"
+        return f"VPN 启动命令已执行但尚未检测到 tun。{note}"
 
     def _benchmark_list_challenges_local(self) -> list[dict[str, Any]]:
         code, stdout, stderr = self._benchmark_platform_request(
@@ -999,6 +1068,88 @@ class FourPillarPipeline:
             metadata={"challenge": code, "reason": reason},
         )
         self._persist_benchmark_state()
+
+    def _benchmark_mark_reasoning_needed(self, code: str, reason: str) -> None:
+        if not code:
+            return
+        with self._benchmark_state_lock:
+            reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
+            reasoning.add(code)
+            self._benchmark_state["reasoning_challenges"] = reasoning
+            streaks = dict(self._benchmark_state.get("probe_unreachable_streaks", {}))
+            streaks.pop(code, None)
+            self._benchmark_state["probe_unreachable_streaks"] = streaks
+        self._record_trace(
+            "benchmark_challenge_needs_reasoning",
+            detail=f"{code} 已保留 active 并切回推理管线：{reason}",
+            metadata={"challenge": code, "reason": reason},
+        )
+        self._persist_benchmark_state()
+
+    def _benchmark_note_probe_unreachable(self, code: str) -> int:
+        if not code:
+            return 0
+        with self._benchmark_state_lock:
+            streaks = dict(self._benchmark_state.get("probe_unreachable_streaks", {}))
+            streak = int(streaks.get(code) or 0) + 1
+            streaks[code] = streak
+            self._benchmark_state["probe_unreachable_streaks"] = streaks
+        self._persist_benchmark_state()
+        return streak
+
+    def _benchmark_clear_probe_unreachable(self, code: str) -> None:
+        if not code:
+            return
+        with self._benchmark_state_lock:
+            streaks = dict(self._benchmark_state.get("probe_unreachable_streaks", {}))
+            if code not in streaks:
+                return
+            streaks.pop(code, None)
+            self._benchmark_state["probe_unreachable_streaks"] = streaks
+        self._persist_benchmark_state()
+
+    @staticmethod
+    def _benchmark_probe_has_reachable_signal(probe: str) -> bool:
+        lowered = probe.lower()
+        reachable_markers = (
+            "http/1.0 ",
+            "http/1.1 ",
+            "http/2 ",
+            "server:",
+            "content-type:",
+            "location:",
+            "<html",
+            "<body",
+            "<script",
+            "<form",
+            "_next/static",
+            "x-powered-by:",
+            "set-cookie:",
+            "api/",
+            "/api/",
+            "swagger",
+            "openapi",
+            "docs",
+            "flag{",
+        )
+        return any(marker in lowered for marker in reachable_markers)
+
+    @staticmethod
+    def _benchmark_probe_looks_unreachable(probe: str) -> bool:
+        lowered = probe.lower()
+        if FourPillarPipeline._benchmark_probe_has_reachable_signal(probe):
+            return False
+        unreachable_markers = (
+            "failed to connect",
+            "could not connect to server",
+            "connection refused",
+            "connection timed out",
+            "no route to host",
+            "network is unreachable",
+            "operation timed out",
+            "empty reply from server",
+        )
+        return any(marker in lowered for marker in unreachable_markers)
 
     def _benchmark_active_challenge_from_state(self) -> tuple[str | None, list[str]]:
         with self._benchmark_state_lock:
@@ -1098,6 +1249,7 @@ class FourPillarPipeline:
         outputs: list[str] = []
         root_body = self._benchmark_wait_for_container_ready(base, outputs)
         urls.extend(self._benchmark_derive_probe_urls(base, root_body))
+        tun_interface = self._benchmark_tun_interface()
         seen_urls: set[str] = set()
         queue: list[str] = []
         for url in urls:
@@ -1115,7 +1267,7 @@ class FourPillarPipeline:
                 "-sS",
                 "-k",
                 "--interface",
-                "tun0",
+                tun_interface,
                 "--connect-timeout",
                 "2",
                 "--max-time",
@@ -1159,6 +1311,7 @@ class FourPillarPipeline:
 
     def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
         root_body = ""
+        tun_interface = self._benchmark_tun_interface()
         for index, delay in enumerate((0.0, 0.5, 1.0, 2.0)):
             if delay:
                 time_mod.sleep(delay)
@@ -1167,7 +1320,7 @@ class FourPillarPipeline:
                 "-sS",
                 "-k",
                 "--interface",
-                "tun0",
+                tun_interface,
                 "--connect-timeout",
                 "1",
                 "--max-time",
@@ -1341,6 +1494,25 @@ class FourPillarPipeline:
         """Run the easy fast path without an LLM when the step is mechanical."""
         if not self._is_benchmark_aggressive():
             return None
+        if "Benchmark fast setup" in desc:
+            notes: list[str] = []
+            detected = self._benchmark_detect_tun_local()
+            if detected:
+                notes.append(f"复用已连接 VPN：{detected[0]} {detected[1]}")
+            else:
+                notes.append(self._benchmark_start_vpn_local())
+                detected = self._benchmark_detect_tun_local()
+            with self._benchmark_state_lock:
+                if not self._benchmark_state.get("api_interface"):
+                    self._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            try:
+                challenges = self._benchmark_list_challenges_local()
+                notes.append(f"平台 API 校验成功，题目数={len(challenges)}")
+            except Exception as exc:
+                notes.append(f"平台 API 校验失败: {exc}")
+            self._persist_benchmark_state()
+            return "确定性 setup：" + "；".join(notes)
+
         if "Benchmark fast step 1" in desc:
             challenges = self._benchmark_list_challenges_local()
             if not challenges:
@@ -1425,12 +1597,39 @@ class FourPillarPipeline:
             probe = self._benchmark_probe_container_local(code, addrs)
             with self._benchmark_state_lock:
                 completed = set(self._benchmark_state.get("completed_challenges", set()))
-            closed = self._benchmark_close_local(code)
-            status = "已提交成功并关闭" if code in completed else "未发现 flag，已关闭止损"
+            if code in completed:
+                self._benchmark_clear_probe_unreachable(code)
+                closed = self._benchmark_close_local(code)
+                return (
+                    f"确定性探测：{code} 已提交成功并关闭。"
+                    f"触发原因: {reason or 'fast path'}\n"
+                    f"close 返回: {closed[:200]}\n"
+                    f"探测摘要:\n{probe[:2500]}"
+                )
+            if self._benchmark_probe_looks_unreachable(probe):
+                streak = self._benchmark_note_probe_unreachable(code)
+                if streak < 2:
+                    return (
+                        f"确定性探测：{code} 容器暂不可达（第 {streak} 次），"
+                        "保留 active，下一轮重试 readiness/probe，不 start 新题。"
+                        f"触发原因: {reason or 'fast path'}\n"
+                        f"探测摘要:\n{probe[:2500]}"
+                    )
+                closed = self._benchmark_close_local(code)
+                return (
+                    f"确定性探测：{code} 连续 {streak} 次不可达，已关闭止损。"
+                    f"触发原因: {reason or 'fast path'}\n"
+                    f"close 返回: {closed[:200]}\n"
+                    f"探测摘要:\n{probe[:2500]}"
+                )
+            self._benchmark_mark_reasoning_needed(
+                code,
+                "fast path 已获取可达响应/协议线索但未直接发现 flag",
+            )
             return (
-                f"确定性探测：{code} {status}。"
+                f"确定性探测：{code} 已获取有效响应但未直接发现 flag，"
+                "保留 active 并切回四柱/runner 深挖；本轮不 close、不 start 新题。"
                 f"触发原因: {reason or 'fast path'}\n"
-                f"close 返回: {closed[:200]}\n"
                 f"探测摘要:\n{probe[:2500]}"
             )
         return None
@@ -1658,7 +1857,7 @@ class FourPillarPipeline:
             and "task_not_found" not in lowered
         ):
             used_interface = self._command_uses_interface(command)
-            if used_interface and used_interface != "tun0":
+            if used_interface and not _re_mod.fullmatch(r"tun\d+", used_interface):
                 updates["api_interface"] = used_interface
 
         if is_platform_challenges_command and "invalid_state" in lowered and "finished" in lowered:
@@ -1777,6 +1976,10 @@ class FourPillarPipeline:
             recovered_set = set(
                 self._benchmark_state.get("recovery_attempted_challenges", set())
             )
+            reasoning_set = set(self._benchmark_state.get("reasoning_challenges", set()))
+            unreachable_streaks = dict(
+                self._benchmark_state.get("probe_unreachable_streaks", {})
+            )
             score_map = dict(self._benchmark_state.get("completed_scores", {}))
             completed_set.update(completed)
             closed_set.update(closed)
@@ -1817,6 +2020,8 @@ class FourPillarPipeline:
             for code in completed_set | closed_set:
                 active.pop(code, None)
                 abandoned_set.discard(code)
+                reasoning_set.discard(code)
+                unreachable_streaks.pop(code, None)
             if self._benchmark_state.get("task_finished"):
                 active = {}
             self._benchmark_state["active_containers"] = active
@@ -1825,6 +2030,8 @@ class FourPillarPipeline:
             self._benchmark_state["closed_challenges"] = closed_set
             self._benchmark_state["abandoned_challenges"] = abandoned_set
             self._benchmark_state["recovery_attempted_challenges"] = recovered_set
+            self._benchmark_state["reasoning_challenges"] = reasoning_set
+            self._benchmark_state["probe_unreachable_streaks"] = unreachable_streaks
             if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
                 self._benchmark_state["current_challenge"] = current_challenge
                 self._benchmark_current_challenge = current_challenge
@@ -1912,6 +2119,12 @@ class FourPillarPipeline:
             "abandoned_challenges": sorted(self._benchmark_state.get("abandoned_challenges", set())),
             "recovery_attempted_challenges": sorted(
                 self._benchmark_state.get("recovery_attempted_challenges", set())
+            ),
+            "reasoning_challenges": sorted(
+                self._benchmark_state.get("reasoning_challenges", set())
+            ),
+            "probe_unreachable_streaks": dict(
+                self._benchmark_state.get("probe_unreachable_streaks", {})
             ),
             "auto_submitted_flags": sorted(self._benchmark_state.get("auto_submitted_flags", set())),
             "last_score": self._benchmark_state.get("last_score"),
@@ -3312,8 +3525,9 @@ class FourPillarPipeline:
                     "时必须使用状态中记录的精确 host:port，不要猜测 :80；"
                     "根路径、headers、robots、docs、静态资源、源码注释、默认凭证、"
                     "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
-                    "候选答案立即 submit，禁止先读文档或继续扫描；submit 后或无快速突破时"
-                    "立即 close 当前题。"
+                    "候选答案立即 submit，禁止先读文档或继续扫描；若页面/API/框架线索已可达"
+                    "但没有直接 flag，保留 active 并切回推理管线；只有确认低价值或连续不可达"
+                    "才 close 当前题。"
                 ),
                 "context": state_context,
                 "parallel": False,
@@ -3339,9 +3553,15 @@ class FourPillarPipeline:
         closed = set(state.get("closed_challenges") or [])
         abandoned = set(state.get("abandoned_challenges") or [])
         recovered = set(state.get("recovery_attempted_challenges") or [])
+        reasoning = set(state.get("reasoning_challenges") or [])
         excluded = completed | closed | abandoned
 
         if isinstance(current, str) and current and current not in excluded:
+            if current in reasoning:
+                return (
+                    False,
+                    f"当前 easy 题 {current} 已有有效响应线索，切回四柱管线深挖。",
+                )
             for item in snapshot:
                 if not isinstance(item, dict) or item.get("unique_code") != current:
                     continue
@@ -3358,7 +3578,7 @@ class FourPillarPipeline:
             if not isinstance(item, dict):
                 continue
             code = item.get("unique_code")
-            if not isinstance(code, str) or code in excluded:
+            if not isinstance(code, str) or code in excluded or code in reasoning:
                 continue
             if item.get("is_completed") is True:
                 continue
@@ -3997,14 +4217,19 @@ class FourPillarPipeline:
                 deterministic_step = ""
                 score_status = self._benchmark_score_status()
                 should_run_deterministic = (
-                    "Benchmark fast step 1" in desc
+                    "Benchmark fast setup" in desc
+                    or "Benchmark fast step 1" in desc
                     or "Benchmark fast step 2" in desc
                 )
                 if should_run_deterministic:
                     deterministic_step = (
-                        "step2"
-                        if "Benchmark fast step 2" in desc
-                        else "step1"
+                        "setup"
+                        if "Benchmark fast setup" in desc
+                        else (
+                            "step2"
+                            if "Benchmark fast step 2" in desc
+                            else "step1"
+                        )
                     )
                     try:
                         deterministic_result = self._benchmark_deterministic_fast_step(
