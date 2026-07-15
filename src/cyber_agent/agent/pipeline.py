@@ -174,6 +174,7 @@ class FourPillarPipeline:
             "completed_scores": {},
             "closed_challenges": set(),
             "abandoned_challenges": set(),
+            "auto_submitted_flags": set(),
             "last_score": None,
             "redundant_block_count": 0,
             "setup_timeout_streak": 0,
@@ -647,12 +648,52 @@ class FourPillarPipeline:
 
             if "/challenges/start" in lowered:
                 code = self._extract_unique_code(command)
+                if code and "?" not in command.split("/challenges/start", 1)[-1].split()[0]:
+                    return (
+                        "start 接口的 unique_code 必须放在 query 参数中："
+                        f"/openapi/v1/challenges/start?unique_code={code}；"
+                        "不要用 JSON body 或 form body 传 unique_code。"
+                    )
                 if code in completed:
                     return f"{code} 已确认通关，禁止重复 start。"
                 if code in closed or code in abandoned:
                     return f"{code} 已在本轮放弃/关闭，禁止回头重复 start；请选择下一道未完成题。"
+                snapshot = state.get("last_challenges_snapshot")
+                if isinstance(snapshot, list) and code:
+                    target_item = next(
+                        (
+                            item for item in snapshot
+                            if isinstance(item, dict) and item.get("unique_code") == code
+                        ),
+                        None,
+                    )
+                    target_difficulty = str(
+                        (target_item or {}).get("difficulty") or ""
+                    ).lower()
+                    has_easy_candidate = any(
+                        isinstance(item, dict)
+                        and isinstance(item.get("unique_code"), str)
+                        and item.get("unique_code") not in completed
+                        and item.get("unique_code") not in closed
+                        and item.get("unique_code") not in abandoned
+                        and item.get("is_completed") is not True
+                        and str(item.get("difficulty") or "").lower() == "easy"
+                        and item.get("container_status") in {"stopped", "available", None}
+                        for item in snapshot
+                    )
+                    if target_difficulty in {"medium", "hard"} and has_easy_candidate:
+                        return (
+                            f"仍存在未完成 easy 候选，禁止在 fast path 中 start {code} "
+                            f"({target_difficulty})；请先选择未完成 easy/stopped 题。"
+                        )
             if "/challenges/close" in lowered:
                 code = self._extract_unique_code(command)
+                if code and "?" not in command.split("/challenges/close", 1)[-1].split()[0]:
+                    return (
+                        "close 接口的 unique_code 必须放在 query 参数中："
+                        f"/openapi/v1/challenges/close?unique_code={code}；"
+                        "不要用 JSON body 或 form body 传 unique_code。"
+                    )
                 if code in closed:
                     return f"{code} 已确认关闭，禁止重复 close；请刷新列表并切换下一道未完成题。"
 
@@ -699,6 +740,171 @@ class FourPillarPipeline:
                         )
 
         return None
+
+    def _benchmark_api_config_from_workspace(self) -> tuple[str, str] | None:
+        """Read Benchmark API base URL and token from the current benchmark workspace."""
+        workdir = Path("/home/my/cyber/benchmark_test")
+        doc = workdir / "CHALLENGES_API.md"
+        try:
+            text = doc.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        base_match = _re_mod.search(
+            r"^BENCHMARK_BASE_URL为[:：]?\s*(\S+)\s*$",
+            text,
+            _re_mod.MULTILINE,
+        )
+        token_match = _re_mod.search(
+            r"^BENCHMARK_TOKEN为[:：]?\s*([0-9a-fA-F-]+)\s*$",
+            text,
+            _re_mod.MULTILINE,
+        )
+        if not base_match or not token_match:
+            return None
+        return base_match.group(1).rstrip("/"), token_match.group(1)
+
+    def _benchmark_active_submit_code(self) -> str | None:
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            active = dict(self._benchmark_state.get("active_containers", {}))
+            current = self._benchmark_state.get("current_challenge")
+        excluded = completed | closed | abandoned
+        if isinstance(current, str) and current and current not in excluded:
+            return current
+        active_candidates = [
+            code for code in active
+            if isinstance(code, str) and code not in excluded
+        ]
+        if len(active_candidates) == 1:
+            return active_candidates[0]
+        return None
+
+    def _benchmark_auto_submit_flags_from_tool_result(self, content: str) -> None:
+        """Submit flags immediately when a container tool output exposes one.
+
+        This is intentionally outside the model loop: if the subtask times out
+        after discovering a flag, the score is still claimed before close/switch.
+        """
+        if not self._is_benchmark_aggressive() or not content:
+            return
+        command = self._extract_command_from_tool_result(content)
+        output = self._extract_output_from_tool_result(content)
+        lowered_command = command.lower()
+        if (
+            "/openapi/v1/challenges" in lowered_command
+            or "challenges_api.md" in lowered_command
+            or ".events.jsonl" in lowered_command
+        ):
+            return
+        if "10." not in command and "http://10." not in output and "https://10." not in output:
+            return
+        flags = _re_mod.findall(
+            r"\b(?:flag|ctf|tsec)\{[^}\s]{4,}\}",
+            output,
+            flags=_re_mod.IGNORECASE,
+        )
+        if not flags:
+            return
+        code = self._benchmark_active_submit_code()
+        if not code:
+            self._record_trace(
+                "benchmark_auto_submit_skipped",
+                detail="工具输出包含 flag，但无法唯一确定当前 active unique_code。",
+                metadata={"flags": flags[:3]},
+            )
+            return
+        api_config = self._benchmark_api_config_from_workspace()
+        if api_config is None:
+            self._record_trace(
+                "benchmark_auto_submit_skipped",
+                detail="工具输出包含 flag，但无法读取 CHALLENGES_API.md 中的 API 配置。",
+                metadata={"challenge": code},
+            )
+            return
+        base_url, token = api_config
+        with self._benchmark_state_lock:
+            submitted = set(self._benchmark_state.get("auto_submitted_flags", set()))
+            api_interface = self._benchmark_state.get("api_interface") or "enp0s20f0u3u4"
+
+        for flag in dict.fromkeys(flags):
+            submit_key = f"{code}:{flag}"
+            if submit_key in submitted:
+                continue
+            body = json.dumps(
+                {"unique_code": code, "flag": flag},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            cmd = [
+                "curl",
+                "-sS",
+                "--interface",
+                str(api_interface),
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "20",
+                "-X",
+                "POST",
+                f"{base_url}/openapi/v1/challenges/submit",
+                "-H",
+                f"BENCHMARK_TOKEN: {token}",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                body,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                )
+            except Exception as exc:
+                self._record_trace(
+                    "benchmark_auto_submit_failed",
+                    detail=f"{code} 自动提交 flag 失败：{exc}",
+                    metadata={"challenge": code},
+                )
+                continue
+
+            with self._benchmark_state_lock:
+                submitted = set(self._benchmark_state.get("auto_submitted_flags", set()))
+                submitted.add(submit_key)
+                self._benchmark_state["auto_submitted_flags"] = submitted
+
+            synthetic_content = (
+                f"命令: curl --interface {api_interface} "
+                "-X POST "
+                f"{base_url}/openapi/v1/challenges/submit "
+                f"-H 'BENCHMARK_TOKEN: {token}' "
+                f"-d '{body}'\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{result.stdout}"
+            )
+            self._record_trace(
+                "benchmark_auto_submit",
+                detail=f"{code} 自动提交工具输出中的 flag，返回码 {result.returncode}。",
+                metadata={
+                    "challenge": code,
+                    "stdout": result.stdout[:500],
+                    "stderr": result.stderr[:500],
+                },
+            )
+            self._update_benchmark_runtime_state(synthetic_content)
+            if result.returncode == 0 and (
+                '"correct":true' in result.stdout.lower()
+                or '"duplicate"' in result.stdout.lower()
+                or '"code":"duplicate"' in result.stdout.lower()
+            ):
+                break
 
     @staticmethod
     def _extract_command_from_tool_result(content: str) -> str:
@@ -928,6 +1134,21 @@ class FourPillarPipeline:
             if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
                 self._benchmark_state["current_challenge"] = current_challenge
                 self._benchmark_current_challenge = current_challenge
+            else:
+                stored_current = self._benchmark_state.get("current_challenge")
+                if (
+                    isinstance(stored_current, str)
+                    and stored_current
+                    and (
+                        stored_current in completed_set
+                        or stored_current in closed_set
+                        or stored_current in abandoned_set
+                    )
+                    and stored_current not in active
+                ):
+                    self._benchmark_state["current_challenge"] = None
+                    if self._benchmark_current_challenge == stored_current:
+                        self._benchmark_current_challenge = None
             if last_score is not None:
                 self._benchmark_state["last_score"] = last_score
             should_cleanup = (
@@ -992,6 +1213,7 @@ class FourPillarPipeline:
             "completed_scores": dict(self._benchmark_state.get("completed_scores", {})),
             "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
             "abandoned_challenges": sorted(self._benchmark_state.get("abandoned_challenges", set())),
+            "auto_submitted_flags": sorted(self._benchmark_state.get("auto_submitted_flags", set())),
             "last_score": self._benchmark_state.get("last_score"),
             "setup_timeout_streak": int(
                 self._benchmark_state.get("setup_timeout_streak") or 0
@@ -1473,6 +1695,7 @@ class FourPillarPipeline:
                     },
                 )
                 self._update_benchmark_runtime_state(content)
+                self._benchmark_auto_submit_flags_from_tool_result(content)
                 elapsed = time_mod.monotonic() - subtask_start
                 if _pending_tool_calls:
                     pinfo = _pending_tool_calls.pop(0)
