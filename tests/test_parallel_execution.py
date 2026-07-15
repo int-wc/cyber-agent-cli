@@ -2258,6 +2258,140 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             urls,
         )
 
+    def test_benchmark_extracts_demo_credentials_for_stateful_probe(self):
+        creds = self.pipeline._benchmark_extract_demo_credentials(
+            "<p>测试账号: employee / employee123</p>"
+            "$USERS = ['admin' => ['password' => 'admin123']];"
+        )
+
+        self.assertIn(("employee", "employee123"), creds)
+        self.assertIn(("admin", "admin123"), creds)
+
+    def test_benchmark_lfi_urls_follow_download_parameter_and_source_names(self):
+        body = (
+            "错误：缺少文件ID\n"
+            "define('CONTRACTS_DIR', '/var/www/html/contracts/');"
+            "'file' => 'init_config.txt',"
+            "<a href=\"/download.php?id=CONTRACT-2024-001.pdf\">下载</a>"
+        )
+
+        urls = self.pipeline._benchmark_lfi_probe_urls_from_response(
+            "http://10.0.180.232/",
+            "http://10.0.180.232/download.php?id=CONTRACT-2024-001.pdf",
+            body,
+            body,
+        )
+        joined = "\n".join(urls)
+
+        self.assertIn(
+            "http://10.0.180.232/download.php?id=..%2F..%2F..%2F..%2Fetc%2Fpasswd",
+            joined,
+        )
+        self.assertIn(
+            "http://10.0.180.232/download.php?id=..%2F..%2F..%2F..%2Fvar%2Fwww%2Fhtml%2Fincludes%2Fconfig.php",
+            joined,
+        )
+        self.assertIn("init_config.txt", joined)
+        self.assertIn("CONTRACT-2024-001.pdf", joined)
+
+    def test_benchmark_reasoning_handoff_replaces_setup_like_plan(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "a-05"
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"a-05"}
+            self.pipeline._benchmark_state["active_containers"] = {
+                "a-05": ["10.0.180.232:80"],
+            }
+
+        setup_plan = [
+            {"task_description": "读取当前工作目录文件并检查 VPN/openvpn 工具链"},
+            {"task_description": "刷新题目列表并 start 下一题"},
+        ]
+        handoff = self.pipeline._benchmark_reasoning_handoff_subtasks()
+
+        self.assertTrue(self.pipeline._benchmark_plan_is_setup_like(setup_plan))
+        self.assertEqual(len(handoff), 3)
+        self.assertIn("只深挖当前 active 题 a-05", handoff[0]["task_description"])
+        self.assertIn("禁止 setup/VPN/toolchain/list/start", handoff[0]["task_description"])
+
+    def test_benchmark_deterministic_handoff_probes_and_closes(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "a-05"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "a-05": ["10.0.180.232:80"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_container_local",
+            return_value="download.php LFI includes/config.php",
+        ) as probe:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark handoff step 1：只深挖当前 active 题 a-05",
+                reason="test",
+            )
+
+        self.assertIn("确定性 handoff", result)
+        probe.assert_called_once_with("a-05", ["10.0.180.232:80"])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_handoff_followup_local",
+            return_value="no flag",
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark handoff step 2：继续当前题 a-05 的一个最高置信后续假设",
+                reason="test",
+            )
+
+        self.assertIn("已标记为 abandoned", result)
+        self.assertIn("a-05", self.pipeline._benchmark_state_snapshot()["abandoned_challenges"])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_close_local",
+            return_value='{"closed":true}',
+        ) as close_local:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark handoff step 3：如果 a-05 仍无 flag",
+                reason="test",
+            )
+
+        self.assertIn("已 close 释放资源", result)
+        close_local.assert_called_once_with("a-05")
+
+    def test_benchmark_standard_mechanical_tasks_use_deterministic_steps(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="scheduled",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "从题目列表中选择下一道未完成的easy/低level题，调用平台API启动该容器"
+            )
+
+        self.assertEqual(result, "scheduled")
+        deterministic.assert_called_once()
+        self.assertIn("Benchmark fast step 1", deterministic.call_args.args[0])
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_deterministic_fast_step",
+            return_value="probed",
+        ) as deterministic:
+            result = self.pipeline._benchmark_deterministic_standard_task(
+                "对新启动的容器进行快速指纹识别和obvious flag检查"
+            )
+
+        self.assertEqual(result, "probed")
+        self.assertIn("Benchmark fast step 2", deterministic.call_args.args[0])
+
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
