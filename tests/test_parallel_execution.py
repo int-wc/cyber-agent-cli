@@ -2817,7 +2817,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             ) as auth_mock,
         ):
             result = self.pipeline._benchmark_probe_common_webapp_flows(
-                "a-05",
+                "web-login-generic",
                 "http://10.0.180.232/",
                 probe,
             )
@@ -2829,6 +2829,14 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(first_login.kwargs["data"]["username"], "admin")
         self.assertEqual(first_login.kwargs["data"]["password"], "admin123")
         auth_mock.assert_called()
+
+    def test_benchmark_webapp_flow_profile_matches_form_without_challenge_code(self):
+        profile = self.pipeline._benchmark_matching_webapp_flow_profile(
+            '<form action="/login"><input name="password"></form>'.lower()
+        )
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["name"], "form-login-and-file-download")
 
     def test_benchmark_lfi_urls_follow_download_parameter_and_source_names(self):
         body = (
