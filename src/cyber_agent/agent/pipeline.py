@@ -174,6 +174,7 @@ class FourPillarPipeline:
             "completed_scores": {},
             "closed_challenges": set(),
             "abandoned_challenges": set(),
+            "recovery_attempted_challenges": set(),
             "auto_submitted_flags": set(),
             "last_score": None,
             "redundant_block_count": 0,
@@ -888,6 +889,9 @@ class FourPillarPipeline:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
             abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            recovered = set(
+                self._benchmark_state.get("recovery_attempted_challenges", set())
+            )
         excluded = completed | closed | abandoned
         candidates: list[dict[str, Any]] = []
         recovery_candidates: list[dict[str, Any]] = []
@@ -901,8 +905,10 @@ class FourPillarPipeline:
                 continue
             if item.get("container_status") != "stopped":
                 continue
-            if code in excluded:
+            if code in abandoned and code not in closed and code not in recovered:
                 recovery_candidates.append(item)
+            elif code in excluded:
+                continue
             else:
                 candidates.append(item)
         candidates.sort(
@@ -925,12 +931,14 @@ class FourPillarPipeline:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
                 with self._benchmark_state_lock:
-                    closed = set(self._benchmark_state.get("closed_challenges", set()))
                     abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
-                    closed.discard(code)
+                    recovered = set(
+                        self._benchmark_state.get("recovery_attempted_challenges", set())
+                    )
                     abandoned.discard(code)
-                    self._benchmark_state["closed_challenges"] = closed
+                    recovered.add(code)
                     self._benchmark_state["abandoned_challenges"] = abandoned
+                    self._benchmark_state["recovery_attempted_challenges"] = recovered
             return recovery_candidates[0]
         return None
 
@@ -1514,6 +1522,9 @@ class FourPillarPipeline:
             completed_set = set(self._benchmark_state.get("completed_challenges", set()))
             closed_set = set(self._benchmark_state.get("closed_challenges", set()))
             abandoned_set = set(self._benchmark_state.get("abandoned_challenges", set()))
+            recovered_set = set(
+                self._benchmark_state.get("recovery_attempted_challenges", set())
+            )
             score_map = dict(self._benchmark_state.get("completed_scores", {}))
             completed_set.update(completed)
             closed_set.update(closed)
@@ -1561,6 +1572,7 @@ class FourPillarPipeline:
             self._benchmark_state["completed_scores"] = score_map
             self._benchmark_state["closed_challenges"] = closed_set
             self._benchmark_state["abandoned_challenges"] = abandoned_set
+            self._benchmark_state["recovery_attempted_challenges"] = recovered_set
             if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
                 self._benchmark_state["current_challenge"] = current_challenge
                 self._benchmark_current_challenge = current_challenge
@@ -1646,6 +1658,9 @@ class FourPillarPipeline:
             "completed_scores": dict(self._benchmark_state.get("completed_scores", {})),
             "closed_challenges": sorted(self._benchmark_state.get("closed_challenges", set())),
             "abandoned_challenges": sorted(self._benchmark_state.get("abandoned_challenges", set())),
+            "recovery_attempted_challenges": sorted(
+                self._benchmark_state.get("recovery_attempted_challenges", set())
+            ),
             "auto_submitted_flags": sorted(self._benchmark_state.get("auto_submitted_flags", set())),
             "last_score": self._benchmark_state.get("last_score"),
             "setup_timeout_streak": int(
@@ -3055,6 +3070,7 @@ class FourPillarPipeline:
         completed = set(state.get("completed_challenges") or [])
         closed = set(state.get("closed_challenges") or [])
         abandoned = set(state.get("abandoned_challenges") or [])
+        recovered = set(state.get("recovery_attempted_challenges") or [])
         excluded = completed | closed | abandoned
 
         if isinstance(current, str) and current and current not in excluded:
@@ -3094,7 +3110,12 @@ class FourPillarPipeline:
                 continue
             if str(item.get("difficulty") or "").lower() != "easy":
                 continue
-            if item.get("container_status") == "stopped" and code in (closed | abandoned):
+            if (
+                item.get("container_status") == "stopped"
+                and code in abandoned
+                and code not in closed
+                and code not in recovered
+            ):
                 return (
                     True,
                     f"发现平台仍可启动的 easy {code} 被本地关闭/放弃状态误排除，"

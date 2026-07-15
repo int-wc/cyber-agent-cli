@@ -312,6 +312,58 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertEqual(selected["unique_code"], "xben-020-24")
         state = self.pipeline._benchmark_state_snapshot()
         self.assertNotIn("xben-020-24", state["abandoned_challenges"])
+        self.assertIn("xben-020-24", state["recovery_attempted_challenges"])
+
+    def test_benchmark_fast_path_does_not_recover_closed_easy(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-006-24",
+                    "difficulty": "easy",
+                    "level": 1,
+                    "total_score": 200,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                }
+            ]
+            self.pipeline._benchmark_state["closed_challenges"] = {"xben-006-24"}
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+        selected = self.pipeline._benchmark_select_next_easy(
+            self.pipeline._benchmark_state["last_challenges_snapshot"]
+        )
+
+        self.assertFalse(should_fast)
+        self.assertIn("切回四柱", reason)
+        self.assertIsNone(selected)
+
+    def test_benchmark_fast_path_recovers_abandoned_easy_only_once(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-071-24",
+                    "difficulty": "easy",
+                    "level": 1,
+                    "total_score": 200,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                }
+            ]
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"xben-071-24"}
+            self.pipeline._benchmark_state["recovery_attempted_challenges"] = {"xben-071-24"}
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+        selected = self.pipeline._benchmark_select_next_easy(
+            self.pipeline._benchmark_state["last_challenges_snapshot"]
+        )
+
+        self.assertFalse(should_fast)
+        self.assertIn("切回四柱", reason)
+        self.assertIsNone(selected)
 
     def test_benchmark_fast_path_rejects_current_medium(self):
         with self.pipeline._benchmark_state_lock:
