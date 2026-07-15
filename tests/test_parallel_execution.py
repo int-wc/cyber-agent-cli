@@ -2169,6 +2169,47 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("平台 API 禁止走 tun0", decision.reason)
 
+    def test_benchmark_guard_blocks_container_on_physical_interface(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["tun_interface"] = "tun0"
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nprobe")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 "
+                        "http://10.0.180.232:80/"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("--interface tun0", decision.reason)
+
+    def test_benchmark_guard_blocks_fetch_web_page_for_container(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["tun_interface"] = "tun0"
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nprobe")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "fetch_web_page",
+                "args": {"url": "http://10.0.180.232:80/"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("curl --interface tun0", decision.reason)
+
     def test_benchmark_guard_blocks_platform_api_without_known_interface(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

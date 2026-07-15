@@ -566,7 +566,7 @@ class FourPillarPipeline:
             return None
 
         tool_name = str(tool_call.get("name", ""))
-        if tool_name != "run_shell_command":
+        if tool_name not in {"run_shell_command", "fetch_web_page"}:
             return None
 
         command = self._extract_tool_text(tool_call)
@@ -618,6 +618,22 @@ class FourPillarPipeline:
             "tsecbench.zc.tencent.com" in lowered
             or "/openapi/v1/challenges" in lowered
         )
+        used_interface = self._command_uses_interface(command)
+        has_container_url = bool(
+            _re_mod.search(r"https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}", command)
+        )
+        if has_container_url and not is_platform_api:
+            tun_interface = str(state.get("tun_interface") or "tun0")
+            if tool_name == "fetch_web_page":
+                return (
+                    "Benchmark 容器地址 10.x 必须通过 VPN/tun0 访问；"
+                    f"fetch_web_page 无法绑定出口，请改用 curl --interface {tun_interface}。"
+                )
+            if used_interface and used_interface != tun_interface:
+                return (
+                    "Benchmark 容器地址 10.x 禁止走物理网卡；"
+                    f"请改用 --interface {tun_interface} 访问靶场容器。"
+                )
         if is_platform_api:
             if "/challenges/hint" in lowered:
                 return (
@@ -625,7 +641,6 @@ class FourPillarPipeline:
                     "先用无成本指纹、源码泄漏、默认凭证、常见漏洞路径拿分；"
                     "除非用户明确临场要求使用 hint，否则不要调用。"
                 )
-            used_interface = self._command_uses_interface(command)
             if used_interface == "tun0":
                 api_interface = state.get("api_interface") or "物理网卡"
                 return (
@@ -3723,12 +3738,9 @@ class FourPillarPipeline:
                 deterministic_result: str | None = None
                 deterministic_step = ""
                 score_status = self._benchmark_score_status()
-                should_run_deterministic = "Benchmark fast step 1" in desc or (
-                    "Benchmark fast step 2" in desc
-                    and (
-                        bool(score_status.get("rush_mode"))
-                        or bool(score_status.get("gap_mode"))
-                    )
+                should_run_deterministic = (
+                    "Benchmark fast step 1" in desc
+                    or "Benchmark fast step 2" in desc
                 )
                 if should_run_deterministic:
                     deterministic_step = (
@@ -3740,7 +3752,7 @@ class FourPillarPipeline:
                         deterministic_result = self._benchmark_deterministic_fast_step(
                             desc,
                             reason=(
-                                "rush_or_gap_mode"
+                                "deterministic_probe_submit_close"
                                 if deterministic_step == "step2"
                                 else "deterministic_scheduler"
                             ),
