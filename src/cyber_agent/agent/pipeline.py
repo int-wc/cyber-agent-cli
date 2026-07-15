@@ -946,7 +946,7 @@ class FourPillarPipeline:
                 continue
             if item.get("container_status") != "stopped":
                 continue
-            if code in abandoned and code not in closed and code not in recovered:
+            if code in (closed | abandoned) and code not in recovered:
                 recovery_candidates.append(item)
             elif code in excluded:
                 continue
@@ -973,12 +973,15 @@ class FourPillarPipeline:
             if isinstance(code, str):
                 with self._benchmark_state_lock:
                     abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                    closed = set(self._benchmark_state.get("closed_challenges", set()))
                     recovered = set(
                         self._benchmark_state.get("recovery_attempted_challenges", set())
                     )
                     abandoned.discard(code)
+                    closed.discard(code)
                     recovered.add(code)
                     self._benchmark_state["abandoned_challenges"] = abandoned
+                    self._benchmark_state["closed_challenges"] = closed
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
             return recovery_candidates[0]
         return None
@@ -1062,27 +1065,35 @@ class FourPillarPipeline:
         addr = addrs[0]
         if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
             return f"容器地址格式异常: {addr}"
-        base = f"http://{addr}/"
+        _, port = addr.rsplit(":", 1)
+        base_urls = [f"http://{addr}/"]
+        if port in {"443", "8443"}:
+            base_urls = [f"https://{addr}/", f"http://{addr}/"]
+        base = base_urls[0]
         urls = [
-            f"http://{addr}/",
-            f"http://{addr}/robots.txt",
-            f"http://{addr}/sitemap.xml",
-            f"http://{addr}/openapi.json",
-            f"http://{addr}/docs",
-            f"http://{addr}/flag",
-            f"http://{addr}/flag.txt",
-            f"http://{addr}/admin",
-            f"http://{addr}/api/flag",
-            f"http://{addr}/.git/config",
-            f"http://{addr}/backup.zip",
-            f"http://{addr}/page?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
-            f"http://{addr}/?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
-            f"http://{addr}/?name={{{{7*7}}}}",
-            f"http://{addr}/page?name={{{{7*7}}}}",
-            f"http://{addr}/search?q=%27%20OR%20%271%27%3D%271",
-            f"http://{addr}/?id=1%20OR%201=1",
-            f"http://{addr}/user?id=1",
-            f"http://{addr}/api/user?id=1",
+            f"{base_url}{path}"
+            for base_url in base_urls
+            for path in (
+                "",
+                "robots.txt",
+                "sitemap.xml",
+                "openapi.json",
+                "docs",
+                "flag",
+                "flag.txt",
+                "admin",
+                "api/flag",
+                ".git/config",
+                "backup.zip",
+                "page?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+                "?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+                "?name={{{{7*7}}}}",
+                "page?name={{{{7*7}}}}",
+                "search?q=%27%20OR%20%271%27%3D%271",
+                "?id=1%20OR%201=1",
+                "user?id=1",
+                "api/user?id=1",
+            )
         ]
         outputs: list[str] = []
         root_body = self._benchmark_wait_for_container_ready(base, outputs)
@@ -1102,6 +1113,7 @@ class FourPillarPipeline:
             cmd = [
                 "curl",
                 "-sS",
+                "-k",
                 "--interface",
                 "tun0",
                 "--connect-timeout",
@@ -1153,6 +1165,7 @@ class FourPillarPipeline:
             cmd = [
                 "curl",
                 "-sS",
+                "-k",
                 "--interface",
                 "tun0",
                 "--connect-timeout",
@@ -3367,8 +3380,7 @@ class FourPillarPipeline:
                 continue
             if (
                 item.get("container_status") == "stopped"
-                and code in abandoned
-                and code not in closed
+                and code in (closed | abandoned)
                 and code not in recovered
             ):
                 return (

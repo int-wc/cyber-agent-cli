@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -315,7 +315,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertNotIn("xben-020-24", state["abandoned_challenges"])
         self.assertIn("xben-020-24", state["recovery_attempted_challenges"])
 
-    def test_benchmark_fast_path_does_not_recover_closed_easy(self):
+    def test_benchmark_fast_path_recovers_closed_easy_once_when_platform_stopped(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -336,9 +336,12 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
             self.pipeline._benchmark_state["last_challenges_snapshot"]
         )
 
-        self.assertFalse(should_fast)
-        self.assertIn("切回四柱", reason)
-        self.assertIsNone(selected)
+        self.assertTrue(should_fast)
+        self.assertIn("恢复 fast path", reason)
+        self.assertEqual(selected["unique_code"], "xben-006-24")
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertNotIn("xben-006-24", state["closed_challenges"])
+        self.assertIn("xben-006-24", state["recovery_attempted_challenges"])
 
     def test_benchmark_fast_path_recovers_abandoned_easy_only_once(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1805,6 +1808,43 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("http://10.0.180.232:8000/first", requested_urls)
         self.assertIn("http://10.0.180.232:8000/second", requested_urls)
+
+    def test_benchmark_probe_container_prefers_https_for_tls_ports(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        requested_commands: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            requested_commands.append(list(cmd))
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="HTTP/1.1 404 Not Found\n\n",
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_wait_for_container_ready",
+                return_value="",
+            ) as ready,
+            patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            self.pipeline._benchmark_probe_container_local(
+                "c-09",
+                ["10.0.180.232:8443"],
+            )
+
+        ready.assert_called_once_with(
+            "https://10.0.180.232:8443/",
+            ANY,
+        )
+        requested_urls = [cmd[-1] for cmd in requested_commands]
+        self.assertIn("https://10.0.180.232:8443/", requested_urls)
+        self.assertIn("http://10.0.180.232:8443/", requested_urls)
+        self.assertTrue(all("-k" in cmd for cmd in requested_commands))
 
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
