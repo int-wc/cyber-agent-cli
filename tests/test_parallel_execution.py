@@ -871,6 +871,19 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertEqual(reason, "sensitive_operation")
 
+    def test_non_xben_benchmark_start_stays_sequential(self):
+        self.pipeline._runtime_context["subtask_concurrency"] = "force"
+
+        allowed, reason = self.pipeline._subtask_parallel_decision(
+            {
+                "task_description": "POST start c-03 并解析容器地址",
+                "parallel": True,
+            }
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "sensitive_operation")
+
     def test_resource_keys_extract_challenge_host_and_file(self):
         keys = self.pipeline._extract_subtask_resource_keys(
             {
@@ -884,6 +897,20 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("challenge:xben-013-24", keys)
         self.assertIn("host:10.0.166.193:80", keys)
         self.assertIn("file:/home/my/cyber/test/challenges.json", keys)
+
+    def test_resource_keys_extract_current_benchmark_code_shapes(self):
+        keys = self.pipeline._extract_subtask_resource_keys(
+            {
+                "task_description": (
+                    "分析 c-03 和 f1-04，访问 10.0.180.232:3000，"
+                    "然后 close 当前题"
+                )
+            }
+        )
+
+        self.assertIn("challenge:c-03", keys)
+        self.assertIn("challenge:f1-04", keys)
+        self.assertIn("api:tsecbench-close", keys)
 
     def test_max_subagents_one_disables_concurrency(self):
         self.pipeline._runtime_context["subtask_concurrency"] = "force"
@@ -924,6 +951,20 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("低价值探测", directive)
         state = self.pipeline._benchmark_state_snapshot()
         self.assertIn("xben-006-24", state["abandoned_challenges"])
+
+    def test_benchmark_stale_detector_handles_non_xben_code(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        directive = ""
+        for _ in range(2):
+            directive = self.pipeline._update_benchmark_stale_state(
+                ["## [runner] 探索 c-03\n测试登录/API/路径，未发现有效结果。"]
+            )
+
+        self.assertIn("close?unique_code=c-03", directive)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("c-03", state["abandoned_challenges"])
 
     def test_benchmark_timeout_directive_marks_abandoned(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

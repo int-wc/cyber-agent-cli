@@ -705,6 +705,67 @@ class FourPillarPipeline:
         match = _re_mod.search(r"\b(xben-\d+-\d+)\b", text)
         return match.group(1) if match else None
 
+    def _benchmark_known_unique_codes(self) -> set[str]:
+        codes: set[str] = set()
+        with self._benchmark_state_lock:
+            state = self._benchmark_state_snapshot_unlocked()
+        for key in (
+            "current_challenge",
+        ):
+            value = state.get(key)
+            if isinstance(value, str) and value:
+                codes.add(value)
+        for key in (
+            "completed_challenges",
+            "closed_challenges",
+            "abandoned_challenges",
+            "recovery_attempted_challenges",
+            "reasoning_challenges",
+        ):
+            values = state.get(key) or []
+            if isinstance(values, (list, set, tuple)):
+                codes.update(str(value) for value in values if value)
+        active = state.get("active_containers") or {}
+        if isinstance(active, dict):
+            codes.update(str(code) for code in active if code)
+        scores = state.get("completed_scores") or {}
+        if isinstance(scores, dict):
+            codes.update(str(code) for code in scores if code)
+        snapshot = state.get("last_challenges_snapshot")
+        if isinstance(snapshot, list):
+            for item in snapshot:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("unique_code")
+                if isinstance(code, str) and code:
+                    codes.add(code)
+        elif isinstance(snapshot, dict):
+            for key in ("completed_challenges", "active_challenges"):
+                values = snapshot.get(key) or []
+                if isinstance(values, (list, set, tuple)):
+                    codes.update(str(value) for value in values if value)
+        return codes
+
+    def _benchmark_extract_unique_codes(self, text: str) -> list[str]:
+        if not text:
+            return []
+        lowered = text.lower()
+        found: list[str] = []
+        explicit = self._extract_unique_code(text)
+        if explicit:
+            found.append(explicit)
+        for code in sorted(self._benchmark_known_unique_codes(), key=len, reverse=True):
+            if code and code.lower() in lowered:
+                found.append(code)
+        challenge_code_pattern = r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b"
+        for match in _re_mod.findall(challenge_code_pattern, text):
+            found.append(match)
+        return list(dict.fromkeys(found))
+
+    def _benchmark_extract_unique_code(self, text: str) -> str | None:
+        codes = self._benchmark_extract_unique_codes(text)
+        return codes[0] if codes else None
+
     def _benchmark_tool_guard(self, tool_call: dict) -> str | None:
         """Block Benchmark actions that are known to waste time or corrupt state."""
         if not self._is_benchmark_aggressive():
@@ -815,7 +876,7 @@ class FourPillarPipeline:
                 )
 
             if "/challenges/start" in lowered:
-                code = self._extract_unique_code(command)
+                code = self._benchmark_extract_unique_code(command)
                 if lowered.count("/challenges/start") > 1:
                     return (
                         "Benchmark 禁止在同一条命令中批量 start 多题；"
@@ -876,7 +937,7 @@ class FourPillarPipeline:
                             f"({target_difficulty})；请先选择未完成 easy/stopped 题。"
                         )
             if "/challenges/close" in lowered:
-                code = self._extract_unique_code(command)
+                code = self._benchmark_extract_unique_code(command)
                 close_path_token = command.split("/challenges/close", 1)[-1].split()[0]
                 if (
                     "?" not in close_path_token
@@ -3498,12 +3559,12 @@ class FourPillarPipeline:
                     if value.get("closed") is True:
                         closed.add(code)
                 elif value.get("closed") is True:
-                    close_code = self._extract_unique_code(command)
+                    close_code = self._benchmark_extract_unique_code(command)
                     if close_code:
                         closed.add(close_code)
 
                 if value.get("correct") is True:
-                    submit_code = self._extract_unique_code(command)
+                    submit_code = self._benchmark_extract_unique_code(command)
                     if submit_code:
                         completed.add(submit_code)
                         current_challenge = submit_code
@@ -4255,7 +4316,8 @@ class FourPillarPipeline:
         lowered = text.lower()
         keys: set[str] = set()
 
-        for match in _re_mod.findall(r"\bxben-\d+-\d+\b", lowered):
+        challenge_code_pattern = r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b"
+        for match in _re_mod.findall(challenge_code_pattern, text):
             keys.add(f"challenge:{match}")
 
         for match in _re_mod.findall(
@@ -4275,9 +4337,20 @@ class FourPillarPipeline:
 
         if any(word in lowered for word in ("submit", "提交 flag", "提交flag")):
             keys.add("api:tsecbench-submit")
-        if any(word in lowered for word in ("start", "启动")) and "xben-" in lowered:
+        has_challenge_key = any(key.startswith("challenge:") for key in keys)
+        if any(word in lowered for word in ("start", "启动")) and (
+            has_challenge_key
+            or "unique_code" in lowered
+            or "/challenges/start" in lowered
+            or "未完成" in lowered
+        ):
             keys.add("api:tsecbench-start")
-        if any(word in lowered for word in ("close", "关闭", "释放")) and "xben-" in lowered:
+        if any(word in lowered for word in ("close", "关闭", "释放")) and (
+            has_challenge_key
+            or "unique_code" in lowered
+            or "/challenges/close" in lowered
+            or "当前题" in lowered
+        ):
             keys.add("api:tsecbench-close")
 
         return keys
@@ -4302,9 +4375,24 @@ class FourPillarPipeline:
         )
         if any(marker in text for marker in sensitive_markers):
             return True
-        if "start" in text and "xben-" in text:
+        has_challenge_like_code = bool(
+            _re_mod.search(
+                r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b",
+                text,
+            )
+        )
+        if "start" in text and (
+            has_challenge_like_code
+            or "unique_code" in text
+            or "/challenges/start" in text
+        ):
             return True
-        if "启动" in text and "xben-" in text:
+        if "启动" in text and (
+            has_challenge_like_code
+            or "unique_code" in text
+            or "未完成" in text
+            or "当前题" in text
+        ):
             return True
         return False
 
@@ -5631,7 +5719,7 @@ class FourPillarPipeline:
 
         text = "\n".join(round_results)
         lowered = text.lower()
-        challenges = _re_mod.findall(r"\bxben-\d+-\d+\b", lowered)
+        challenges = self._benchmark_extract_unique_codes(text)
         latest_challenge = challenges[-1] if challenges else self._benchmark_current_challenge
         if latest_challenge and latest_challenge != self._benchmark_current_challenge:
             self._benchmark_current_challenge = latest_challenge
