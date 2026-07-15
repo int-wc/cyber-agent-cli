@@ -24,6 +24,17 @@ def _detect_task_complexity(user_input: str) -> bool:
     if len(text) <= 4:
         return False
 
+    benchmark_markers = (
+        "tsec benchmark",
+        "tsecbench",
+        "benchmark 跑分",
+        "benchmark 正式测评",
+        "benchmark 测评",
+    )
+    lowered = text.lower()
+    if any(marker in lowered for marker in benchmark_markers):
+        return True
+
     sentence_seps = len(re.findall(r"[。？！；\n]", text))
     if sentence_seps >= 3:
         return True

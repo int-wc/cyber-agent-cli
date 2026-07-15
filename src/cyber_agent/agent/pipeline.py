@@ -23,6 +23,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re as _re_mod
+import socket as socket_mod
 import subprocess
 import threading
 import time as time_mod
@@ -590,6 +591,7 @@ class FourPillarPipeline:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
             abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
             active = dict(self._benchmark_state.get("active_containers", {}))
 
         if "/home/study" in lowered:
@@ -754,6 +756,12 @@ class FourPillarPipeline:
                     )
                 if code in closed:
                     return f"{code} 已确认关闭，禁止重复 close；请刷新列表并切换下一道未完成题。"
+                if code in reasoning and code not in completed and code not in abandoned:
+                    return (
+                        f"{code} 已有 fast path 可达响应/API/框架线索，禁止作为无进展题 close；"
+                        "必须继续围绕该线索深挖、尝试登录/API/源码/默认凭证/配置泄漏，"
+                        "只有提交成功、明确低价值或用户要求放弃后才能 close。"
+                    )
                 current = state.get("current_challenge")
                 snapshot = state.get("last_challenges_snapshot")
                 if (
@@ -1307,7 +1315,76 @@ class FourPillarPipeline:
                     continue
                 seen_urls.add(derived)
                 queue.append(derived)
+        joined_outputs = "\n".join(outputs)
+        if self._benchmark_probe_suggests_raw_text_protocol(joined_outputs):
+            raw_output = self._benchmark_probe_raw_text_protocol(code, addr)
+            if raw_output:
+                outputs.append(raw_output)
         return "\n".join(outputs)
+
+    @staticmethod
+    def _benchmark_probe_suggests_raw_text_protocol(probe: str) -> bool:
+        lowered = probe.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "received http/0.9",
+                "responsd ready",
+                "unknown command",
+            )
+        )
+
+    def _benchmark_probe_raw_text_protocol(self, code: str, addr: str) -> str:
+        host, port_text = addr.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError:
+            return ""
+        outputs: list[str] = [f"## raw-text-protocol {addr}"]
+        try:
+            with socket_mod.create_connection((host, port), timeout=3) as sock:
+                sock.settimeout(1.5)
+
+                def recv_some() -> str:
+                    try:
+                        return sock.recv(4096).decode("utf-8", errors="replace")
+                    except TimeoutError:
+                        return ""
+                    except OSError as exc:
+                        return f"ERROR: {exc}\n"
+
+                banner = recv_some()
+                if banner:
+                    outputs.append(banner)
+                for command in ("HELP", "SETBODY hello", "BUILD", "QUIT"):
+                    try:
+                        sock.sendall(f"{command}\n".encode("utf-8"))
+                    except OSError as exc:
+                        outputs.append(f"> {command}\nERROR: {exc}")
+                        break
+                    time_mod.sleep(0.1)
+                    outputs.append(f"> {command}\n{recv_some()}")
+        except OSError as exc:
+            outputs.append(f"ERROR: {exc}")
+        output = "\n".join(outputs)
+        synthetic_content = (
+            "命令: raw_text_protocol_probe "
+            f"{addr} HELP SETBODY BUILD QUIT\n"
+            "工作目录: /home/my/cyber/benchmark_test\n"
+            "退出码: 0\n"
+            "输出:\n"
+            f"{output}"
+        )
+        self._benchmark_auto_submit_flags_from_tool_result(synthetic_content)
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+        if code in completed:
+            self._record_trace(
+                "benchmark_raw_protocol_flag",
+                detail=f"{code} raw text protocol probe submitted a flag.",
+                metadata={"challenge": code},
+            )
+        return output
 
     def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
         root_body = ""
@@ -1363,6 +1440,7 @@ class FourPillarPipeline:
             url = _urljoin(base, value)
             if self._benchmark_url_is_same_container(base, url):
                 urls.append(url)
+        urls.extend(self._benchmark_text_path_probe_urls(base, html))
         urls.extend(self._benchmark_object_storage_probe_urls(base, html, attr_values))
 
         discovered_names = {
@@ -1383,6 +1461,20 @@ class FourPillarPipeline:
         for name in sorted(discovered_names):
             urls.extend(self._benchmark_payload_urls_for_param(base, name))
         return urls
+
+    def _benchmark_text_path_probe_urls(self, base: str, text: str) -> list[str]:
+        urls: list[str] = []
+        for raw in _re_mod.findall(r"/(?:api|admin|flag|config|internal)[A-Za-z0-9_./-]{0,160}", text):
+            url = _urljoin(base, raw)
+            if self._benchmark_url_is_same_container(base, url):
+                urls.append(url)
+        lowered = text.lower()
+        if "/api/functions" in lowered:
+            urls.append(_urljoin(base, "api/functions"))
+        if '"functions"' in text or "/api/functions" in lowered:
+            for name in _re_mod.findall(r'"name"\s*:\s*"([A-Za-z0-9_.-]{1,80})"', text):
+                urls.append(_urljoin(base, f"api/functions/{name}/config"))
+        return list(dict.fromkeys(urls))[:40]
 
     def _benchmark_object_storage_probe_urls(
         self,
@@ -1407,8 +1499,19 @@ class FourPillarPipeline:
         for raw in _re_mod.findall(r"/([A-Za-z0-9][A-Za-z0-9_.-]{1,63})/", html):
             if raw.lower() not in {"html", "body", "head"}:
                 discovered_buckets.add(raw)
+        for raw in _re_mod.findall(r"""["']([A-Za-z0-9][A-Za-z0-9_.-]{1,63})["']""", html):
+            if any(token in raw.lower() for token in ("secret", "private", "internal", "data")):
+                discovered_buckets.add(raw)
+        for raw in _re_mod.findall(r"<Name>([^<]{1,120})</Name>", html):
+            if _re_mod.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,63}", raw):
+                discovered_buckets.add(raw)
+        listed_keys = [
+            key for key in _re_mod.findall(r"<Key>([^<]{1,240})</Key>", html)
+            if not key.startswith("/")
+        ]
         common_buckets = [
             "company-secrets",
+            "secret-data",
             "secret",
             "secrets",
             "private",
@@ -1433,12 +1536,15 @@ class FourPillarPipeline:
             "config.json",
             "backup.zip",
             "README.md",
+            "README.txt",
         )
         urls: list[str] = []
         for bucket in buckets:
             for key in keys:
                 path = f"{bucket}/" if not key else f"{bucket}/{key}"
                 urls.append(_urljoin(base, path))
+            for key in listed_keys:
+                urls.append(_urljoin(base, f"{bucket}/{key}"))
         return urls[:30]
 
     @staticmethod
@@ -2202,6 +2308,12 @@ class FourPillarPipeline:
                 "已判定低收益待关闭题："
                 + ", ".join(state["abandoned_challenges"])
                 + "；必须先 close，再换下一题，不要继续探测其容器。"
+            )
+        if state.get("reasoning_challenges"):
+            parts.append(
+                "已有有效响应线索、必须深挖的题："
+                + ", ".join(state["reasoning_challenges"])
+                + "；禁止当作无进展题 close，需继续围绕页面/API/框架/配置线索验证。"
             )
         if state.get("last_score") is not None:
             parts.append(f"最近题目累计得分：{state['last_score']}。")
@@ -3199,6 +3311,21 @@ class FourPillarPipeline:
             )
             if not isinstance(current, str) or not current:
                 return ""
+            reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
+            if current in reasoning:
+                self._record_trace(
+                    "benchmark_timeout_suppressed",
+                    detail=(
+                        f"{current} 已有有效响应线索，子任务超时不自动 close；"
+                        "下一轮应收窄探测范围继续深挖。"
+                    ),
+                    metadata={
+                        "challenge": current,
+                        "reason": reason,
+                        "score_status": self._benchmark_score_status(),
+                    },
+                )
+                return ""
             abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             abandoned.add(current)
             self._benchmark_state["abandoned_challenges"] = abandoned
@@ -3774,12 +3901,36 @@ class FourPillarPipeline:
             "close?unique_code" in lowered
             or bool(_re_mod.search(r"['\"]closed['\"]\s*:\s*true", text))
         )
+        has_reasoning_signal = any(
+            marker in text
+            for marker in (
+                "已获取有效响应",
+                "保留 active",
+                "切回四柱",
+                "切回推理",
+                "已有有效响应线索",
+            )
+        )
 
-        if has_success_signal or has_flag_signal or has_close_signal:
+        if has_success_signal or has_flag_signal or has_close_signal or has_reasoning_signal:
             self._benchmark_stale_rounds = 0
             return ""
 
         if self._benchmark_current_challenge is None:
+            return ""
+
+        with self._benchmark_state_lock:
+            reasoning = set(self._benchmark_state.get("reasoning_challenges", set()))
+        if self._benchmark_current_challenge in reasoning:
+            self._benchmark_stale_rounds = 0
+            self._record_trace(
+                "benchmark_stale_suppressed",
+                detail=(
+                    f"{self._benchmark_current_challenge} 已有有效响应线索，"
+                    "跳过 stale/abandoned 判定。"
+                ),
+                metadata={"challenge": self._benchmark_current_challenge},
+            )
             return ""
 
         low_value_count = self._benchmark_low_value_signal_count(text)

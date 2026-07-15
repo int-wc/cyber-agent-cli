@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +21,116 @@ if TYPE_CHECKING:
     from ..agent.runner import AgentRunner
     from ..execution_control import ExecutionController
     from .render import CliRenderer
+
+
+def _is_benchmark_aggressive_context(runtime_context: dict[str, object]) -> bool:
+    profile = str(runtime_context.get("benchmark_profile") or "").lower()
+    return profile == "aggressive"
+
+
+def _extract_cli_tool_text(tool_call: dict[str, object]) -> str:
+    args = tool_call.get("args")
+    if isinstance(args, dict):
+        parts: list[str] = []
+        for key in ("command", "url", "path"):
+            value = args.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        if parts:
+            return "\n".join(parts)
+    return str(args or tool_call)
+
+
+def _command_uses_interface(command: str) -> str | None:
+    match = re.search(r"(?:--interface|-interface)\s+([A-Za-z0-9_.:-]+)", command)
+    return match.group(1) if match else None
+
+
+def _detect_existing_tun_interface() -> str | None:
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    for line in (result.stdout or "").splitlines():
+        match = re.search(r"\b(tun\d+)\b.*\binet\s+[0-9.]+/\d+", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _benchmark_cli_tool_guard(
+    runtime_context: dict[str, object],
+    tool_call: dict[str, object],
+) -> str | None:
+    if not _is_benchmark_aggressive_context(runtime_context):
+        return None
+    tool_name = str(tool_call.get("name", ""))
+    if tool_name not in {"run_shell_command", "fetch_web_page"}:
+        return None
+
+    command = _extract_cli_tool_text(tool_call)
+    lowered = command.lower()
+    used_interface = _command_uses_interface(command)
+    api_interface = str(runtime_context.get("benchmark_api_interface") or "enp0s20f0u3u4")
+    is_platform_api = (
+        "tsecbench.zc.tencent.com" in lowered
+        or "/openapi/v1/challenges" in lowered
+    )
+    has_container_url = bool(
+        re.search(r"https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}", command)
+    )
+
+    if "openvpn" in lowered and ("--config" in lowered or ".ovpn" in lowered):
+        existing_tun = _detect_existing_tun_interface()
+        if existing_tun:
+            return (
+                f"Benchmark VPN 已连接（{existing_tun}），禁止重复启动 OpenVPN；"
+                "请复用现有 tun 接口继续。"
+            )
+
+    if is_platform_api:
+        if "/challenges/hint" in lowered:
+            return "Benchmark 正式测评禁止调用 hint API，除非用户明确要求。"
+        if used_interface and re.fullmatch(r"tun\d+", used_interface):
+            return (
+                f"平台 API 禁止走 {used_interface}；VPN/tun 只用于访问 10.x 容器。"
+                f"请改用 --interface {api_interface} 并携带 BENCHMARK_TOKEN。"
+            )
+        if used_interface is None:
+            return (
+                "Benchmark 平台 API 必须显式绑定物理出口，禁止不带 --interface 调用；"
+                f"请使用 --interface {api_interface}。"
+            )
+        if "benchmark_token:" not in lowered:
+            return "TSec Benchmark 平台认证头必须是 BENCHMARK_TOKEN。"
+        if "authorization:" in lowered or "x-benchmark-token:" in lowered:
+            return "TSec Benchmark 平台禁止 Authorization/X-Benchmark-Token 认证头。"
+
+    if has_container_url and not is_platform_api:
+        tun_interface = _detect_existing_tun_interface() or "tun0"
+        if tool_name == "fetch_web_page":
+            return (
+                "Benchmark 10.x 容器必须用 curl 绑定 VPN 接口访问；"
+                f"请改用 curl --interface {tun_interface}。"
+            )
+        if used_interface is None:
+            return (
+                "Benchmark 10.x 容器访问必须显式绑定 VPN 接口；"
+                f"请使用 --interface {tun_interface}。"
+            )
+        if not re.fullmatch(r"tun\d+", used_interface):
+            return (
+                "Benchmark 10.x 容器禁止走物理网卡；"
+                f"请改用 --interface {tun_interface}。"
+            )
+    return None
 
 
 def request_running_task_stop(
@@ -94,6 +206,9 @@ def create_approval_handler(runtime_context: dict[str, object]):
         policy = runtime_context["approval_policy"]
         tool_name = str(tool_call.get("name", tool.name))
         risk = str((tool.metadata or {}).get("risk", "unknown"))
+        benchmark_reason = _benchmark_cli_tool_guard(runtime_context, tool_call)
+        if benchmark_reason:
+            return ApprovalDecision(False, benchmark_reason)
 
         if policy is ApprovalPolicy.AUTO:
             return ApprovalDecision(True, "当前审批策略为自动批准。")
@@ -126,6 +241,9 @@ def create_cli_background_approval_handler(
         policy = runtime_context["approval_policy"]
         tool_name = str(tool_call.get("name", tool.name))
         risk = str((tool.metadata or {}).get("risk", "unknown"))
+        benchmark_reason = _benchmark_cli_tool_guard(runtime_context, tool_call)
+        if benchmark_reason:
+            return ApprovalDecision(False, benchmark_reason)
 
         if policy is ApprovalPolicy.AUTO:
             return ApprovalDecision(True, "当前审批策略为自动批准。")

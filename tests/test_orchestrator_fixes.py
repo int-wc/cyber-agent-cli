@@ -274,7 +274,7 @@ class TokenEstimationTestCase(unittest.TestCase):
 
 
 class ComplexityDetectionTestCase(unittest.TestCase):
-    """测试复杂度检测为纯结构分析，不含领域关键词。"""
+    """测试复杂度检测以结构为主，并强制识别 Benchmark 测评。"""
 
     def test_simple_greeting_is_not_complex(self):
         self.assertFalse(_detect_task_complexity("你好"))
@@ -317,6 +317,14 @@ class ComplexityDetectionTestCase(unittest.TestCase):
         ))
         self.assertFalse(_detect_task_complexity(
             "Pwn2Own 2026发生了什么"
+        ))
+
+    def test_benchmark_scoring_prompt_is_forced_complex(self):
+        self.assertTrue(_detect_task_complexity(
+            "你正在执行 TSec Benchmark 正式测评任务。"
+        ))
+        self.assertTrue(_detect_task_complexity(
+            "请开始 benchmark 跑分"
         ))
 
     def test_negation_not_trigger(self):

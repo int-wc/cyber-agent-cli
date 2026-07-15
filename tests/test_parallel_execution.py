@@ -17,6 +17,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from cyber_agent.agent.approval import ApprovalPolicy
 from cyber_agent.agent.mode import AgentMode
 from cyber_agent.agent.pipeline import (
     BASE_SUBTASK_TIMEOUT,
@@ -27,6 +28,7 @@ from cyber_agent.agent.pipeline import (
     TIMEOUT_ESCALATION_STEP,
     FourPillarPipeline,
 )
+from cyber_agent.cli.agent_executor import create_approval_handler
 
 
 class BuildSubtaskPromptTestCase(unittest.TestCase):
@@ -878,6 +880,19 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertEqual(state["setup_timeout_streak"], 0)
 
+    def test_benchmark_timeout_does_not_abandon_reasoning_challenge(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "a-05"
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"a-05"}
+
+        directive = self.pipeline._benchmark_timeout_directive("subtask timeout")
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(directive, "")
+        self.assertNotIn("a-05", state["abandoned_challenges"])
+
     def test_benchmark_guard_blocks_abandoned_active_container(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -924,6 +939,35 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("禁止重复 close", decision.reason)
+
+    def test_benchmark_guard_blocks_close_of_reasoning_challenge(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"c-03"}
+
+        handler = self.pipeline._make_subtask_approval_handler("runner\nclose")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                        "close?unique_code=c-03 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("禁止作为无进展题 close", decision.reason)
 
     def test_benchmark_guard_blocks_start_close_json_body_unique_code(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1126,6 +1170,25 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
 
         self.assertIn("close?unique_code=xben-001-24", directive)
+
+    def test_benchmark_stale_detector_suppresses_reasoning_challenge(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        self.pipeline._benchmark_current_challenge = "d-01"
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"d-01"}
+
+        directive = self.pipeline._update_benchmark_stale_state(
+            [
+                "继续探索 d-01。404 404 404 404 404 404 404 404 "
+                "但 d-01 已获取有效响应，保留 active 并切回四柱/runner 深挖。"
+            ]
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(directive, "")
+        self.assertEqual(self.pipeline._benchmark_stale_rounds, 0)
+        self.assertNotIn("d-01", state["abandoned_challenges"])
 
     def test_benchmark_runtime_state_tracks_submit_and_close(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1925,6 +1988,55 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.180.232:8443/", requested_urls)
         self.assertTrue(all("-k" in cmd for cmd in requested_commands))
 
+    def test_benchmark_raw_text_protocol_probe_submits_leaked_flag(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent: list[bytes] = []
+                self.responses = [
+                    b"200 responsd ready\n",
+                    b"200 Commands:\n  SETBODY <text>\n  BUILD\n",
+                    b"250 body set\n",
+                    b"body_len=5 headers=0\nhdrtab:\\x00flag{raw-win}\\x00\nhello\n",
+                    b"221 bye\n",
+                ]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def recv(self, _size):
+                if not self.responses:
+                    raise TimeoutError()
+                return self.responses.pop(0)
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        fake_socket = FakeSocket()
+        with (
+            patch(
+                "cyber_agent.agent.pipeline.socket_mod.create_connection",
+                return_value=fake_socket,
+            ),
+            patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result") as submit,
+        ):
+            output = self.pipeline._benchmark_probe_raw_text_protocol(
+                "f1-04",
+                "10.0.180.232:9013",
+            )
+
+        self.assertIn("flag{raw-win}", output)
+        self.assertIn(b"BUILD\n", fake_socket.sent)
+        submit.assert_called_once()
+
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2099,6 +2211,52 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("filename=..%2Fflag", joined)
         self.assertIn("url=file%3A%2F%2F%2Fflag", joined)
         self.assertIn("id=1+OR+1%3D1", joined)
+
+    def test_benchmark_object_storage_derives_quoted_bucket_and_xml_keys(self):
+        body = (
+            'Internal note: migrated to the "secret-data" bucket. '
+            "<ListBucketResult><Name>secret-data</Name>"
+            "<Contents><Key>flag.txt</Key></Contents>"
+            "<Contents><Key>backups/config-backup.yaml</Key></Contents>"
+            "</ListBucketResult>"
+        )
+
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.180.232:8000/",
+            body,
+        )
+
+        self.assertIn("http://10.0.180.232:8000/secret-data/", urls)
+        self.assertIn("http://10.0.180.232:8000/secret-data/flag.txt", urls)
+        self.assertIn(
+            "http://10.0.180.232:8000/secret-data/backups/config-backup.yaml",
+            urls,
+        )
+
+    def test_benchmark_derives_lambda_function_config_urls(self):
+        root = (
+            "<code>GET /api/functions</code>"
+            "<code>GET /api/functions/&lt;name&gt;/config</code>"
+        )
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.180.232:8000/",
+            root,
+        )
+        self.assertIn("http://10.0.180.232:8000/api/functions", urls)
+
+        listing = '{"functions":[{"name":"order-service"},{"name":"data-processor"}]}'
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.180.232:8000/",
+            listing,
+        )
+        self.assertIn(
+            "http://10.0.180.232:8000/api/functions/order-service/config",
+            urls,
+        )
+        self.assertIn(
+            "http://10.0.180.232:8000/api/functions/data-processor/config",
+            urls,
+        )
 
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -3102,6 +3260,76 @@ class SubtaskGroupingTestCase(unittest.TestCase):
         self.assertEqual(len(groups), 3)
         for g in groups:
             self.assertEqual(len(g), 1)
+
+
+class CliBenchmarkApprovalGuardTestCase(unittest.TestCase):
+    """测试 CLI 主 Agent 审批器的 Benchmark 硬性约束。"""
+
+    def setUp(self):
+        self.tool = MagicMock()
+        self.tool.name = "run_shell_command"
+        self.tool.metadata = {"risk": "execute"}
+        self.runtime_context = {
+            "approval_policy": ApprovalPolicy.AUTO,
+            "benchmark_profile": "aggressive",
+        }
+
+    def test_cli_auto_approval_blocks_platform_api_on_tun(self):
+        handler = create_approval_handler(self.runtime_context)
+
+        decision = handler(
+            self.tool,
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl -s --interface tun0 -H 'BENCHMARK_TOKEN: token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("平台 API 禁止走 tun0", decision.reason)
+
+    def test_cli_auto_approval_blocks_platform_api_without_interface(self):
+        handler = create_approval_handler(self.runtime_context)
+
+        decision = handler(
+            self.tool,
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl -s -H 'BENCHMARK_TOKEN: token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    )
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("必须显式绑定物理出口", decision.reason)
+
+    def test_cli_auto_approval_allows_platform_api_on_physical_interface(self):
+        handler = create_approval_handler(self.runtime_context)
+
+        decision = handler(
+            self.tool,
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl -s --interface enp0s20f0u3u4 "
+                        "-H 'BENCHMARK_TOKEN: token' "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/challenges"
+                    )
+                },
+            },
+        )
+
+        self.assertTrue(decision.approved)
 
 
 if __name__ == "__main__":
