@@ -1752,6 +1752,25 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertIn("xben-084-24", state["abandoned_challenges"])
 
+    def test_benchmark_derive_probe_urls_adds_object_storage_paths(self):
+        html = """
+        <html><title>CloudAssets · S3 Static Host</title>
+        <body>
+        <p>本服务基于对象存储（S3 兼容），以 path-style URL 对外提供资产访问。</p>
+        <a href="/company-assets/">/company-assets/</a>
+        </body></html>
+        """
+
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.180.232:8000/",
+            html,
+        )
+
+        self.assertIn("http://10.0.180.232:8000/company-assets/", urls)
+        self.assertIn("http://10.0.180.232:8000/company-assets/flag.txt", urls)
+        self.assertIn("http://10.0.180.232:8000/company-assets/.env", urls)
+        self.assertIn("http://10.0.180.232:8000/company-secrets/flag.txt", urls)
+
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

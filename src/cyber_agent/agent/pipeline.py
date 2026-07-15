@@ -1186,6 +1186,7 @@ class FourPillarPipeline:
             url = _urljoin(base, value)
             if self._benchmark_url_is_same_container(base, url):
                 urls.append(url)
+        urls.extend(self._benchmark_object_storage_probe_urls(base, html, attr_values))
 
         discovered_names = {
             name for name in _re_mod.findall(
@@ -1205,6 +1206,63 @@ class FourPillarPipeline:
         for name in sorted(discovered_names):
             urls.extend(self._benchmark_payload_urls_for_param(base, name))
         return urls
+
+    def _benchmark_object_storage_probe_urls(
+        self,
+        base: str,
+        html: str,
+        attr_values: list[str],
+    ) -> list[str]:
+        lowered = html.lower()
+        if not any(
+            marker in lowered
+            for marker in ("s3", "bucket", "object storage", "对象存储", "path-style")
+        ):
+            return []
+        discovered_buckets: set[str] = set()
+        for value in attr_values:
+            parsed = _urlparse(_urljoin(base, value))
+            if not self._benchmark_url_is_same_container(base, _urlunparse(parsed)):
+                continue
+            first_segment = parsed.path.strip("/").split("/", 1)[0]
+            if _re_mod.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,63}", first_segment):
+                discovered_buckets.add(first_segment)
+        for raw in _re_mod.findall(r"/([A-Za-z0-9][A-Za-z0-9_.-]{1,63})/", html):
+            if raw.lower() not in {"html", "body", "head"}:
+                discovered_buckets.add(raw)
+        common_buckets = [
+            "company-secrets",
+            "secret",
+            "secrets",
+            "private",
+            "internal",
+            "flag",
+            "flags",
+            "backup",
+            "backups",
+        ]
+        buckets = sorted(discovered_buckets) + [
+            bucket for bucket in common_buckets
+            if bucket not in discovered_buckets
+        ]
+        keys = (
+            "",
+            "flag",
+            "flag.txt",
+            "flags.txt",
+            "secret",
+            "secret.txt",
+            ".env",
+            "config.json",
+            "backup.zip",
+            "README.md",
+        )
+        urls: list[str] = []
+        for bucket in buckets:
+            for key in keys:
+                path = f"{bucket}/" if not key else f"{bucket}/{key}"
+                urls.append(_urljoin(base, path))
+        return urls[:30]
 
     @staticmethod
     def _benchmark_url_is_same_container(base: str, url: str) -> bool:
