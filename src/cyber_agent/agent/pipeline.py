@@ -696,6 +696,33 @@ class FourPillarPipeline:
                     )
                 if code in closed:
                     return f"{code} 已确认关闭，禁止重复 close；请刷新列表并切换下一道未完成题。"
+                current = state.get("current_challenge")
+                snapshot = state.get("last_challenges_snapshot")
+                if (
+                    code
+                    and code not in completed
+                    and code not in abandoned
+                    and code != current
+                    and code not in active
+                    and isinstance(snapshot, list)
+                ):
+                    target_item = next(
+                        (
+                            item for item in snapshot
+                            if isinstance(item, dict) and item.get("unique_code") == code
+                        ),
+                        None,
+                    )
+                    if (
+                        isinstance(target_item, dict)
+                        and target_item.get("is_completed") is not True
+                        and str(target_item.get("difficulty") or "").lower() == "easy"
+                        and target_item.get("container_status") == "stopped"
+                    ):
+                        return (
+                            f"{code} 是未启动、未完成的 stopped easy，禁止直接 close；"
+                            "只能 close 当前 active/stale 题，或先 start 后探测。"
+                        )
 
         active_host_ports: dict[str, set[str]] = {}
         for addrs in active.values():
@@ -762,6 +789,265 @@ class FourPillarPipeline:
         if not base_match or not token_match:
             return None
         return base_match.group(1).rstrip("/"), token_match.group(1)
+
+    def _benchmark_api_interface(self) -> str:
+        with self._benchmark_state_lock:
+            interface = self._benchmark_state.get("api_interface")
+        return str(interface or "enp0s20f0u3u4")
+
+    def _benchmark_platform_request(
+        self,
+        *,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        timeout: int = 30,
+    ) -> tuple[int, str, str]:
+        api_config = self._benchmark_api_config_from_workspace()
+        if api_config is None:
+            raise RuntimeError("无法从 CHALLENGES_API.md 读取 Benchmark API 配置")
+        base_url, token = api_config
+        api_interface = self._benchmark_api_interface()
+        url = f"{base_url}{path}"
+        cmd = [
+            "curl",
+            "-sS",
+            "--interface",
+            api_interface,
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            str(timeout),
+            "-X",
+            method.upper(),
+            url,
+            "-H",
+            f"BENCHMARK_TOKEN: {token}",
+        ]
+        if body is not None:
+            cmd.extend([
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+            ])
+        result = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout + 5,
+        )
+        command_text = " ".join(cmd)
+        synthetic_content = (
+            f"命令: {command_text}\n"
+            "工作目录: /home/my/cyber/benchmark_test\n"
+            f"退出码: {result.returncode}\n"
+            "输出:\n"
+            f"{result.stdout}"
+        )
+        if result.stderr:
+            synthetic_content += f"\n错误输出:\n{result.stderr}"
+        self._update_benchmark_runtime_state(synthetic_content)
+        return result.returncode, result.stdout, result.stderr
+
+    def _benchmark_list_challenges_local(self) -> list[dict[str, Any]]:
+        code, stdout, stderr = self._benchmark_platform_request(
+            method="GET",
+            path="/openapi/v1/challenges",
+        )
+        if code != 0:
+            raise RuntimeError(stderr.strip() or f"curl 退出码 {code}")
+        data = json.loads(stdout)
+        if isinstance(data, dict) and data.get("code") == "invalid_state":
+            return []
+        if not isinstance(data, list):
+            raise RuntimeError(f"题目列表响应不是数组: {stdout[:200]}")
+        return [dict(item) for item in data if isinstance(item, dict)]
+
+    def _benchmark_select_next_easy(
+        self,
+        challenges: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+        excluded = completed | closed | abandoned
+        candidates: list[dict[str, Any]] = []
+        for item in challenges:
+            code = item.get("unique_code")
+            if not isinstance(code, str) or code in excluded:
+                continue
+            if item.get("is_completed") is True:
+                continue
+            if str(item.get("difficulty") or "").lower() != "easy":
+                continue
+            if item.get("container_status") != "stopped":
+                continue
+            candidates.append(item)
+        candidates.sort(
+            key=lambda item: (
+                int(item.get("level") or 999),
+                -int(item.get("total_score") or 0),
+                str(item.get("unique_code") or ""),
+            )
+        )
+        return candidates[0] if candidates else None
+
+    def _benchmark_active_challenge_from_state(self) -> tuple[str | None, list[str]]:
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            current = self._benchmark_state.get("current_challenge")
+            active = dict(self._benchmark_state.get("active_containers", {}))
+        excluded = completed | closed
+        if isinstance(current, str) and current and current in active and current not in excluded:
+            return current, [str(addr) for addr in active.get(current) or []]
+        for code, addrs in sorted(active.items()):
+            if isinstance(code, str) and code not in excluded:
+                return code, [str(addr) for addr in addrs or []]
+        return None, []
+
+    def _benchmark_close_local(self, code: str) -> str:
+        _, stdout, _ = self._benchmark_platform_request(
+            method="POST",
+            path=f"/openapi/v1/challenges/close?unique_code={code}",
+        )
+        return stdout
+
+    def _benchmark_start_local(self, code: str) -> str:
+        _, stdout, _ = self._benchmark_platform_request(
+            method="POST",
+            path=f"/openapi/v1/challenges/start?unique_code={code}",
+        )
+        return stdout
+
+    def _benchmark_probe_container_local(self, code: str, addrs: list[str]) -> str:
+        if not addrs:
+            return "无容器地址，无法探测。"
+        addr = addrs[0]
+        if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
+            return f"容器地址格式异常: {addr}"
+        urls = [
+            f"http://{addr}/",
+            f"http://{addr}/robots.txt",
+            f"http://{addr}/sitemap.xml",
+            f"http://{addr}/openapi.json",
+            f"http://{addr}/docs",
+            f"http://{addr}/flag",
+            f"http://{addr}/flag.txt",
+            f"http://{addr}/admin",
+            f"http://{addr}/api/flag",
+            f"http://{addr}/.git/config",
+            f"http://{addr}/backup.zip",
+        ]
+        outputs: list[str] = []
+        for url in urls:
+            cmd = [
+                "curl",
+                "-sS",
+                "--interface",
+                "tun0",
+                "--connect-timeout",
+                "3",
+                "--max-time",
+                "6",
+                "-i",
+                url,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=8,
+                )
+            except Exception as exc:
+                outputs.append(f"## {url}\nERROR: {exc}")
+                continue
+            body = (result.stdout or "")[:4000]
+            err = (result.stderr or "")[:1000]
+            outputs.append(f"## {url}\n{body}\n{err}")
+            synthetic_content = (
+                f"命令: {' '.join(cmd)}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(synthetic_content)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                break
+        return "\n".join(outputs)
+
+    def _benchmark_deterministic_fast_step(self, desc: str, reason: str = "") -> str | None:
+        """Run the easy fast path without an LLM when the step is mechanical."""
+        if not self._is_benchmark_aggressive():
+            return None
+        if "Benchmark fast step 1" in desc:
+            challenges = self._benchmark_list_challenges_local()
+            if not challenges:
+                return "确定性调度：平台已返回终止状态或无题目列表。"
+            active_items = [
+                item for item in challenges
+                if item.get("container_status") == "available"
+                and item.get("is_completed") is not True
+            ]
+            with self._benchmark_state_lock:
+                abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            for item in active_items:
+                code = item.get("unique_code")
+                if isinstance(code, str) and code in abandoned:
+                    closed = self._benchmark_close_local(code)
+                    return f"确定性调度：先关闭 stale 当前题 {code}: {closed[:200]}"
+            if active_items:
+                code = active_items[0].get("unique_code")
+                addrs = active_items[0].get("container_addr") or []
+                return f"确定性调度：继续当前 active 题 {code} => {addrs}"
+            next_item = self._benchmark_select_next_easy(challenges)
+            if next_item is None:
+                return "确定性调度：未发现未完成 stopped easy，后续应切回四柱处理。"
+            code = str(next_item["unique_code"])
+            started = self._benchmark_start_local(code)
+            return f"确定性调度：启动下一道 easy {code}: {started[:300]}"
+
+        if "Benchmark fast step 2" in desc:
+            code, addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                challenges = self._benchmark_list_challenges_local()
+                active_items = [
+                    item for item in challenges
+                    if item.get("container_status") == "available"
+                    and item.get("is_completed") is not True
+                ]
+                if active_items:
+                    code = str(active_items[0].get("unique_code"))
+                    addrs = [str(addr) for addr in active_items[0].get("container_addr") or []]
+            if not code:
+                return "确定性探测：当前没有 active 容器，跳过。"
+            with self._benchmark_state_lock:
+                abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            if code in abandoned:
+                closed = self._benchmark_close_local(code)
+                return f"确定性探测：{code} 已 stale，直接 close: {closed[:200]}"
+            probe = self._benchmark_probe_container_local(code, addrs)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = self._benchmark_close_local(code)
+            status = "已提交成功并关闭" if code in completed else "未发现 flag，已关闭止损"
+            return (
+                f"确定性探测：{code} {status}。"
+                f"触发原因: {reason or 'fast path'}\n"
+                f"close 返回: {closed[:200]}\n"
+                f"探测摘要:\n{probe[:2500]}"
+            )
+        return None
 
     def _benchmark_active_submit_code(self) -> str | None:
         with self._benchmark_state_lock:
@@ -1018,6 +1304,10 @@ class FourPillarPipeline:
                         current_challenge = code
                     if value.get("closed") is True:
                         closed.add(code)
+                elif value.get("closed") is True:
+                    close_code = self._extract_unique_code(command)
+                    if close_code:
+                        closed.add(close_code)
 
                 if value.get("correct") is True:
                     submit_code = self._extract_unique_code(command)
@@ -1164,10 +1454,13 @@ class FourPillarPipeline:
         )
         if (
             bool(self._benchmark_state.get("task_finished"))
+            or updates
             or completed
             or completed_scores
             or closed
+            or active_updates
             or challenges_snapshot is not None
+            or current_challenge
             or last_score is not None
         ):
             self._persist_benchmark_state()
@@ -3249,6 +3542,46 @@ class FourPillarPipeline:
                 start = time_mod.monotonic()
                 self._record_trace("subtask_start", detail=f"[{role_str}] {desc[:200]}")
 
+                deterministic_result: str | None = None
+                if "Benchmark fast step 1" in desc:
+                    try:
+                        deterministic_result = self._benchmark_deterministic_fast_step(
+                            desc,
+                            reason="deterministic_scheduler",
+                        )
+                    except Exception as exc:
+                        self._record_trace(
+                            "benchmark_deterministic_fast_failed",
+                            detail=str(exc),
+                            metadata={"step": "step1"},
+                        )
+                        deterministic_result = None
+                if deterministic_result is not None:
+                    elapsed = (time_mod.monotonic() - start) * 1000
+                    renderer.console.print(
+                        f"  [dim green]✓ 确定性调度完成[/] [dim]({elapsed:.0f}ms)[/]"
+                    )
+                    self._print_subtask_status(
+                        idx,
+                        role_str,
+                        desc,
+                        "done",
+                        detail=f"deterministic {elapsed:.0f}ms",
+                    )
+                    self._record_trace(
+                        "benchmark_deterministic_fast_step",
+                        detail=deterministic_result[:1000],
+                        metadata={"step": "step1"},
+                    )
+                    round_results.append(f"## [{role_str}] {desc}\n{deterministic_result}")
+                    self._consecutive_failures = 0
+                    self._benchmark_reset_setup_timeout_streak()
+                    self._emit_compression_notice()
+                    if self._benchmark_stop_if_terminal("fast_deterministic_step_end"):
+                        circuit_broken = True
+                        break
+                    continue
+
                 subtask_prompt = self._build_subtask_prompt(
                     role_str,
                     desc,
@@ -3310,6 +3643,48 @@ class FourPillarPipeline:
                     )
                 except Exception as exc:
                     elapsed = (time_mod.monotonic() - start) * 1000
+                    fallback_result: str | None = None
+                    if self._is_transient_llm_error(str(exc)):
+                        try:
+                            fallback_result = self._benchmark_deterministic_fast_step(
+                                desc,
+                                reason=str(exc)[:200],
+                            )
+                        except Exception as fallback_exc:
+                            self._record_trace(
+                                "benchmark_deterministic_fast_failed",
+                                detail=str(fallback_exc),
+                                metadata={
+                                    "step": "step2"
+                                    if "Benchmark fast step 2" in desc
+                                    else "unknown",
+                                    "original_error": str(exc)[:300],
+                                },
+                            )
+                            fallback_result = None
+                    if fallback_result is not None:
+                        self._record_trace(
+                            "benchmark_deterministic_fast_step",
+                            detail=fallback_result[:1000],
+                            metadata={
+                                "reason": "llm_transient_error",
+                                "original_error": str(exc)[:300],
+                            },
+                        )
+                        renderer.console.print(
+                            "  [dim yellow]↻ 模型临时异常，已用确定性 fallback 推进当前 fast step。[/]"
+                        )
+                        self._print_subtask_status(
+                            idx,
+                            role_str,
+                            desc,
+                            "done",
+                            detail="deterministic fallback",
+                        )
+                        round_results.append(f"## [{role_str}] {desc}\n{fallback_result}")
+                        self._consecutive_failures = 0
+                        self._benchmark_reset_setup_timeout_streak()
+                        continue
                     if self._benchmark_rate_limit_backoff(
                         f"benchmark_fast_subtask_{idx}",
                         str(exc),

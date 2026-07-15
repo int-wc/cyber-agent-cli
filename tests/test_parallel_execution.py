@@ -980,6 +980,29 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["active_containers"], {})
         self.assertIn("xben-006-24", state["closed_challenges"])
 
+    def test_benchmark_runtime_state_handles_close_without_unique_code(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "xben-006-24"
+            self.pipeline._benchmark_current_challenge = "xben-006-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-006-24": ["10.0.1.2:80"],
+            }
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+            "close?unique_code=xben-006-24\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            '{"closed":true}'
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIsNone(state["current_challenge"])
+        self.assertEqual(state["active_containers"], {})
+        self.assertIn("xben-006-24", state["closed_challenges"])
+
     def test_benchmark_auto_submits_flag_from_container_output(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -1044,6 +1067,31 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["state"]["completed_scores"]["xben-006-24"], 200)
             self.assertIn("xben-006-24", saved["state"]["completed_challenges"])
+
+    def test_benchmark_runtime_state_persists_active_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+            self.pipeline._runtime_context["session_id"] = "bench-session"
+            self.pipeline._runtime_context["session_base_dir"] = tmpdir
+            self.pipeline._benchmark_profile_active = True
+
+            self.pipeline._update_benchmark_runtime_state(
+                "命令: curl --interface enp0s20f0u3u4 -X POST "
+                "https://tsecbench.zc.tencent.com/openapi/v1/challenges/"
+                "start?unique_code=xben-006-24\n"
+                "工作目录: /tmp\n退出码: 0\n输出:\n"
+                '{"unique_code":"xben-006-24",'
+                '"container_addr":["10.0.1.2:80"]}'
+            )
+
+            saved = json.loads(
+                self.pipeline._benchmark_state_path().read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["state"]["current_challenge"], "xben-006-24")
+            self.assertEqual(
+                saved["state"]["active_containers"],
+                {"xben-006-24": ["10.0.1.2:80"]},
+            )
 
     def test_benchmark_runtime_state_ignores_api_doc_examples(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1187,6 +1235,112 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertEqual(state["last_challenges_snapshot"]["total"], 2)
         self.assertIn("xben-005-24", state["completed_challenges"])
+
+    def test_benchmark_deterministic_step1_starts_next_easy(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd)
+            if "/openapi/v1/challenges/start?unique_code=xben-009-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=(
+                        '{"unique_code":"xben-009-24",'
+                        '"container_addr":["10.0.1.2:80"]}'
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "["
+                    '{"unique_code":"xben-006-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":true,'
+                    '"container_status":"stopped","container_addr":[]},'
+                    '{"unique_code":"xben-009-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":false,'
+                    '"container_status":"stopped","container_addr":[]}'
+                    "]"
+                ),
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 1：只做调度。"
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("启动下一道 easy xben-009-24", result)
+        self.assertEqual(state["current_challenge"], "xben-009-24")
+        self.assertEqual(
+            state["active_containers"],
+            {"xben-009-24": ["10.0.1.2:80"]},
+        )
+
+    def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["current_challenge"] = "xben-009-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-009-24": ["10.0.1.2:80"],
+            }
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd)
+            if "/openapi/v1/challenges/submit" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='{"correct":true,"awarded":200,"cumulative_score":200}',
+                    stderr="",
+                )
+            if "/openapi/v1/challenges/close?unique_code=xben-009-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='{"closed":true}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="HTTP/1.1 200 OK\n\nflag{deterministic-win}",
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="Connection error.",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("已提交成功并关闭", result)
+        self.assertIn("xben-009-24", state["completed_challenges"])
+        self.assertIn("xben-009-24", state["closed_challenges"])
+        self.assertEqual(state["active_containers"], {})
 
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1852,6 +2006,40 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("已确认通关", decision.reason)
+
+    def test_benchmark_guard_blocks_closing_inactive_stopped_easy(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "xben-013-24",
+                    "difficulty": "easy",
+                    "is_completed": False,
+                    "container_status": "stopped",
+                    "container_addr": [],
+                }
+            ]
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": (
+                        "curl --interface enp0s20f0u3u4 -X POST "
+                        "https://tsecbench.zc.tencent.com/openapi/v1/"
+                        "challenges/close?unique_code=xben-013-24 "
+                        "-H 'BENCHMARK_TOKEN: token'"
+                    ),
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("未启动、未完成", decision.reason)
 
     def test_boundary_approval_blocks_secret_probe(self):
         handler = self.pipeline._make_subtask_approval_handler(
