@@ -396,6 +396,38 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertFalse(should_fast)
         self.assertIn("medium", reason)
 
+    def test_benchmark_select_next_candidate_falls_through_to_medium(self):
+        snapshot = [
+            {
+                "unique_code": "xben-006-24",
+                "difficulty": "easy",
+                "level": 1,
+                "total_score": 100,
+                "is_completed": True,
+                "container_status": "stopped",
+            },
+            {
+                "unique_code": "e1-01",
+                "difficulty": "medium",
+                "level": 1,
+                "total_score": 250,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+            {
+                "unique_code": "e1-03",
+                "difficulty": "hard",
+                "level": 1,
+                "total_score": 250,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+        ]
+
+        selected = self.pipeline._benchmark_select_next_candidate(snapshot)
+
+        self.assertEqual(selected["unique_code"], "e1-01")
+
     def test_benchmark_fast_path_hands_off_reasoning_easy(self):
         with self.pipeline._benchmark_state_lock:
             self.pipeline._benchmark_state["current_challenge"] = "xben-038-24"
@@ -1883,6 +1915,57 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             {"xben-009-24": ["10.0.1.2:80"]},
         )
 
+    def test_benchmark_deterministic_step1_starts_medium_when_easy_exhausted(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd)
+            if "/openapi/v1/challenges/start?unique_code=e1-01" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='{"unique_code":"e1-01","container_addr":["10.0.1.9:8080"]}',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "["
+                    '{"unique_code":"xben-006-24","difficulty":"easy",'
+                    '"level":1,"total_score":100,"is_completed":true,'
+                    '"container_status":"stopped","container_addr":[]},'
+                    '{"unique_code":"e1-01","difficulty":"medium",'
+                    '"level":1,"total_score":250,"is_completed":false,'
+                    '"container_status":"stopped","container_addr":[]}'
+                    "]"
+                ),
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 1：只做调度。"
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("启动下一道 medium e1-01", result)
+        self.assertEqual(state["current_challenge"], "e1-01")
+        self.assertEqual(
+            state["active_containers"],
+            {"e1-01": ["10.0.1.9:8080"]},
+        )
+
     def test_benchmark_deterministic_step1_closes_completed_active_before_start(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2676,6 +2759,48 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn(("employee", "employee123"), creds)
         self.assertIn(("admin", "admin123"), creds)
 
+    def test_benchmark_common_webapp_flow_tries_default_credentials(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        probe = (
+            "HTTP/1.1 200 OK\n"
+            "<html><title>登录 - 企业合同审批系统</title>"
+            "<form action=\"/login.php\"><input name=\"username\">"
+            "<input name=\"password\"></form></html>"
+        )
+
+        login_response = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="HTTP/1.1 302 Found\nLocation: /dashboard.php\n",
+            stderr="",
+        )
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_curl_local",
+                return_value=login_response,
+            ) as curl_mock,
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_authenticated_webapp",
+                return_value="auth-ok",
+            ) as auth_mock,
+        ):
+            result = self.pipeline._benchmark_probe_common_webapp_flows(
+                "a-05",
+                "http://10.0.180.232/",
+                probe,
+            )
+
+        self.assertIn("login admin:admin123", result)
+        self.assertIn("auth-ok", result)
+        curl_mock.assert_called()
+        first_login = curl_mock.call_args_list[0]
+        self.assertEqual(first_login.kwargs["data"]["username"], "admin")
+        self.assertEqual(first_login.kwargs["data"]["password"], "admin123")
+        auth_mock.assert_called()
+
     def test_benchmark_lfi_urls_follow_download_parameter_and_source_names(self):
         body = (
             "错误：缺少文件ID\n"
@@ -2698,6 +2823,10 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         )
         self.assertIn(
             "http://10.0.180.232/download.php?id=..%2F..%2F..%2F..%2Fvar%2Fwww%2Fhtml%2Fincludes%2Fconfig.php",
+            joined,
+        )
+        self.assertIn(
+            "http://10.0.180.232/download.php?id=..%2F..%2F..%2F..%2Fchallenge%2Fflag.txt",
             joined,
         )
         self.assertIn("init_config.txt", joined)
@@ -3016,6 +3145,18 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(
             self.pipeline._benchmark_classify_standard_task(
                 "POST start easy candidate and parse container"
+            ),
+            "schedule",
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "解析list API返回的JSON，按easy→stopped→level低优先排序，排除已完成题"
+            ),
+            "schedule",
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "对选中的第一道未完成easy题调用start API，获取容器地址和端口"
             ),
             "schedule",
         )

@@ -933,7 +933,7 @@ class FourPillarPipeline:
                     )
                     if target_difficulty in {"medium", "hard"} and has_easy_candidate:
                         return (
-                            f"仍存在未完成 easy 候选，禁止在 fast path 中 start {code} "
+                            f"仍存在未完成 easy 候选，禁止抢跑 start {code} "
                             f"({target_difficulty})；请先选择未完成 easy/stopped 题。"
                         )
             if "/challenges/close" in lowered:
@@ -1019,7 +1019,7 @@ class FourPillarPipeline:
                         if code in abandoned:
                             return (
                                 f"{code} 已被 Benchmark stale detector 判定为低收益题，"
-                                "禁止继续探测该容器；下一步必须 close 当前题并切换下一道 easy/低 level 题。"
+                                "禁止继续探测该容器；下一步必须 close 当前题并切换下一道未完成题。"
                             )
                         return (
                             f"{code} 的容器地址 {addr} 已不应继续探测；"
@@ -1193,10 +1193,76 @@ class FourPillarPipeline:
             raise RuntimeError(f"题目列表响应不是数组: {stdout[:200]}")
         return [dict(item) for item in data if isinstance(item, dict)]
 
+    @staticmethod
+    def _benchmark_candidate_rank(item: dict[str, Any]) -> tuple[int, int, int, str]:
+        difficulty = str(item.get("difficulty") or "").lower()
+        difficulty_rank = {"easy": 0, "medium": 1, "hard": 2}.get(difficulty, 3)
+        return (
+            difficulty_rank,
+            int(item.get("level") or 999),
+            -int(item.get("total_score") or 0),
+            str(item.get("unique_code") or ""),
+        )
+
+    def _benchmark_select_next_candidate(
+        self,
+        challenges: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Select the next Benchmark challenge without locking formal eval to easy only."""
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            recovered = set(
+                self._benchmark_state.get("recovery_attempted_challenges", set())
+            )
+        excluded = completed | closed | abandoned
+        candidates: list[dict[str, Any]] = []
+        recovery_candidates: list[dict[str, Any]] = []
+        for item in challenges:
+            code = item.get("unique_code")
+            if not isinstance(code, str) or code in completed:
+                continue
+            if item.get("is_completed") is True:
+                continue
+            difficulty = str(item.get("difficulty") or "").lower()
+            if difficulty not in {"easy", "medium", "hard"}:
+                continue
+            if item.get("container_status") != "stopped":
+                continue
+            if code in (closed | abandoned) and code not in recovered:
+                recovery_candidates.append(item)
+            elif code in excluded:
+                continue
+            else:
+                candidates.append(item)
+        candidates.sort(key=self._benchmark_candidate_rank)
+        if candidates:
+            return candidates[0]
+        recovery_candidates.sort(key=self._benchmark_candidate_rank)
+        if recovery_candidates:
+            code = recovery_candidates[0].get("unique_code")
+            if isinstance(code, str):
+                with self._benchmark_state_lock:
+                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                    closed = set(self._benchmark_state.get("closed_challenges", set()))
+                    recovered = set(
+                        self._benchmark_state.get("recovery_attempted_challenges", set())
+                    )
+                    abandoned.discard(code)
+                    closed.discard(code)
+                    recovered.add(code)
+                    self._benchmark_state["abandoned_challenges"] = abandoned
+                    self._benchmark_state["closed_challenges"] = closed
+                    self._benchmark_state["recovery_attempted_challenges"] = recovered
+            return recovery_candidates[0]
+        return None
+
     def _benchmark_select_next_easy(
         self,
         challenges: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        """Backward-compatible easy-only selector used by legacy tests and recovery."""
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
@@ -1223,13 +1289,7 @@ class FourPillarPipeline:
                 continue
             else:
                 candidates.append(item)
-        candidates.sort(
-            key=lambda item: (
-                int(item.get("level") or 999),
-                -int(item.get("total_score") or 0),
-                str(item.get("unique_code") or ""),
-            )
-        )
+        candidates.sort(key=self._benchmark_candidate_rank)
         if candidates:
             return candidates[0]
         has_untried_non_easy = any(
@@ -1243,13 +1303,7 @@ class FourPillarPipeline:
         )
         if has_untried_non_easy:
             return None
-        recovery_candidates.sort(
-            key=lambda item: (
-                int(item.get("level") or 999),
-                -int(item.get("total_score") or 0),
-                str(item.get("unique_code") or ""),
-            )
-        )
+        recovery_candidates.sort(key=self._benchmark_candidate_rank)
         if recovery_candidates:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
@@ -1267,6 +1321,7 @@ class FourPillarPipeline:
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
             return recovery_candidates[0]
         return None
+
 
     def _benchmark_mark_abandoned(self, code: str, reason: str) -> None:
         if not code:
@@ -2219,7 +2274,7 @@ class FourPillarPipeline:
             return ""
         credentials = self._benchmark_extract_demo_credentials(probe)
         if not credentials:
-            return ""
+            credentials = self._benchmark_default_web_credentials()
         tun_interface = self._benchmark_tun_interface()
         cookie_file = tempfile.NamedTemporaryFile(prefix="cyber-agent-bench-", suffix=".cookies", delete=False)
         cookie_path = cookie_file.name
@@ -2272,8 +2327,42 @@ class FourPillarPipeline:
         ]
         for pattern in patterns:
             for username, password in _re_mod.findall(pattern, text, flags=_re_mod.IGNORECASE | _re_mod.DOTALL):
-                credentials.append((username.strip(), password.strip()))
+                username = username.strip()
+                password = password.strip()
+                if FourPillarPipeline._benchmark_looks_like_html_field_name(username):
+                    continue
+                if FourPillarPipeline._benchmark_looks_like_html_field_name(password):
+                    continue
+                credentials.append((username, password))
         return list(dict.fromkeys(credentials))
+
+    @staticmethod
+    def _benchmark_looks_like_html_field_name(value: str) -> bool:
+        lowered = value.strip().lower()
+        return lowered in {
+            "input",
+            "form",
+            "label",
+            "button",
+            "submit",
+            "username",
+            "user",
+            "password",
+            "pass",
+            "text",
+            "hidden",
+        }
+
+    @staticmethod
+    def _benchmark_default_web_credentials() -> list[tuple[str, str]]:
+        return [
+            ("admin", "admin123"),
+            ("employee", "employee123"),
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("test", "test"),
+            ("user", "password"),
+        ]
 
     def _benchmark_login_url_from_probe(self, base: str, probe: str) -> str:
         for action in _re_mod.findall(
@@ -2421,6 +2510,8 @@ class FourPillarPipeline:
     def _benchmark_lfi_candidate_paths(text: str) -> list[str]:
         common = [
             "../../../../etc/passwd",
+            "../../../../challenge/flag.txt",
+            "../../../../challenge/flag",
             "../../../../flag",
             "../../../../flag.txt",
             "../../../../root/flag",
@@ -2660,12 +2751,7 @@ class FourPillarPipeline:
         cookie_file.close()
         try:
             # Known demo/admin credentials are common in these benchmark web apps.
-            for username, password in (
-                ("employee", "employee123"),
-                ("admin", "admin123"),
-                ("admin", "admin"),
-                ("admin", "password"),
-            ):
+            for username, password in self._benchmark_default_web_credentials()[:4]:
                 self._benchmark_curl_local(
                     _urljoin(base, "login.php"),
                     tun_interface=tun_interface,
@@ -2685,6 +2771,7 @@ class FourPillarPipeline:
                     "admin_approve.php",
                     "download.php?id=init_config.txt",
                     "download.php?id=system-init-config",
+                    "download.php?id=../../../../challenge/flag.txt",
                     "download.php?id=../../../../var/www/html/contracts/flag.txt",
                     "download.php?id=../../../../var/www/html/contracts/init_config.txt",
                     "download.php?id=../../../../var/www/html/logs/app.log",
@@ -3159,11 +3246,18 @@ class FourPillarPipeline:
                 addrs = active_items[0].get("container_addr") or []
                 active_msg = f"确定性调度：继续当前 active 题 {code} => {addrs}"
                 return f"{cleanup_note}\n{active_msg}" if cleanup_note else active_msg
-            next_item = self._benchmark_select_next_easy(challenges)
+            next_item = self._benchmark_select_next_candidate(challenges)
             if next_item is None:
-                no_easy_msg = "确定性调度：未发现未完成 stopped easy，后续应切回四柱处理。"
-                return f"{cleanup_note}\n{no_easy_msg}" if cleanup_note else no_easy_msg
+                no_candidate_msg = (
+                    "确定性调度：未发现未完成 stopped 候选，后续应刷新平台状态或等待资源。"
+                )
+                return (
+                    f"{cleanup_note}\n{no_candidate_msg}"
+                    if cleanup_note
+                    else no_candidate_msg
+                )
             code = str(next_item["unique_code"])
+            difficulty = str(next_item.get("difficulty") or "unknown").lower()
             started = self._benchmark_start_local(code)
             if "max active challenge instances reached" in started.lower():
                 refreshed = self._benchmark_list_challenges_local()
@@ -3184,15 +3278,17 @@ class FourPillarPipeline:
                         retry_started = self._benchmark_start_local(code)
                         retry_msg = (
                             f"确定性调度：start 遇到 active 名额满，已关闭完成题释放名额: "
-                            f"{' | '.join(retry_cleanup)}；重试启动 {code}: {retry_started[:300]}"
+                            f"{' | '.join(retry_cleanup)}；重试启动 {code} ({difficulty}): "
+                            f"{retry_started[:300]}"
                         )
                         return f"{cleanup_note}\n{retry_msg}" if cleanup_note else retry_msg
                 blocked_msg = (
-                    f"确定性调度：启动下一道 easy {code} 失败，active 名额已满且未发现可清理的已完成容器；"
+                    f"确定性调度：启动下一道 {difficulty} {code} 失败，"
+                    "active 名额已满且未发现可清理的已完成容器；"
                     "不要放弃该题，下一步应 close stale active 或刷新状态。"
                 )
                 return f"{cleanup_note}\n{blocked_msg}" if cleanup_note else blocked_msg
-            start_msg = f"确定性调度：启动下一道 easy {code}: {started[:300]}"
+            start_msg = f"确定性调度：启动下一道 {difficulty} {code}: {started[:300]}"
             return f"{cleanup_note}\n{start_msg}" if cleanup_note else start_msg
 
         if "Benchmark fast step 2" in desc:
@@ -3354,6 +3450,11 @@ class FourPillarPipeline:
             },
             {
                 "kind": "schedule",
+                "all": ("list api",),
+                "any_original": ("解析", "排序", "排除", "题目"),
+            },
+            {
+                "kind": "schedule",
                 "all": ("list接口",),
                 "any": ("easy",),
             },
@@ -3376,6 +3477,16 @@ class FourPillarPipeline:
                 "kind": "schedule",
                 "all": ("post start",),
                 "any": ("easy",),
+            },
+            {
+                "kind": "schedule",
+                "all": ("start api",),
+                "any_original": ("选中", "未完成", "第一道", "启动"),
+            },
+            {
+                "kind": "schedule",
+                "any_original": ("排序", "排除已完成", "解析"),
+                "any": ("stopped", "easy", "level"),
             },
             {
                 "kind": "schedule",
@@ -5258,7 +5369,7 @@ class FourPillarPipeline:
                 "Benchmark maximize gate：当前为正式测评/无固定目标分模式，"
                 f"已知得分 {known_score}。平台尚未返回 finished/invalid_state，"
                 "不能判定执行完成。下一轮必须继续刷新题目列表，优先处理"
-                "未完成 easy/低 level/stopped；easy 题用 deterministic/adaptive fast path，"
+                "未完成/stopped；easy 题用 deterministic/adaptive fast path，"
                 "medium/hard 交给四柱思考、决策者、思考者、审计者、反思者。"
                 "如果当前题无明确突破，先 close 当前题再 start 下一题。"
             )
@@ -5283,7 +5394,7 @@ class FourPillarPipeline:
             f"{known_score}/{target_score}，距离目标还差 {remaining}。"
             "平台尚未返回 finished/invalid_state，不能判定执行完成。"
             f"{mode_line}"
-            "下一轮必须继续刷新题目列表，选择未完成 easy/低 level/stopped 题；"
+            "下一轮必须继续刷新题目列表，选择下一道未完成/stopped 题；"
             "如果当前题无明确突破，先 close 当前题再 start 下一题。"
         )
 
@@ -5319,7 +5430,7 @@ class FourPillarPipeline:
             f"Benchmark timeout gate 已触发：当前题 {current} 的子任务超时。"
             f"原因：{reason}。"
             "下一轮必须先调用平台 close?unique_code="
-            f"{current} 释放容器，然后刷新题目列表，选择下一道未完成 easy/低 level/stopped 题。"
+            f"{current} 释放容器，然后刷新题目列表，选择下一道未完成/stopped 题。"
             "不要重规划继续深挖当前题，也不要继续对当前 10.x 容器发 payload。"
         )
         self._record_trace(
@@ -5550,7 +5661,8 @@ class FourPillarPipeline:
                     "role": "runner",
                     "task_description": (
                         "Benchmark fallback step 2：只刷新 /openapi/v1/challenges，"
-                        "按未完成、未关闭、未放弃、easy/低 level、stopped 选择下一题，"
+                        "按未完成、未关闭、未放弃、stopped 选择下一题；easy 优先，"
+                        "easy 清空后选择 medium/hard 交给四柱，"
                         "输出 unique_code；禁止调用 hint。"
                     ),
                     "context": state_context,
@@ -5625,8 +5737,9 @@ class FourPillarPipeline:
                 "task_description": (
                     "Benchmark fast step 1：只做调度。必要时先 close 当前 stale/已放弃题；"
                     "然后 GET /openapi/v1/challenges，筛选未完成、未关闭、未放弃、"
-                    "easy/低 level/stopped 的下一题并 POST start；只记录 unique_code "
-                    "和 container_addr，不探测、不 submit、不 hint。"
+                    "stopped 的下一题并 POST start；排序为 easy 优先，其次 medium/hard "
+                    "按 level/分值；只记录 unique_code 和 container_addr，不探测、不 submit、"
+                    "不 hint。"
                 ),
                 "context": state_context,
                 "parallel": False,
@@ -5671,9 +5784,14 @@ class FourPillarPipeline:
 
         if isinstance(current, str) and current and current not in excluded:
             if current in reasoning:
+                difficulty_label = "当前题"
+                for item in snapshot:
+                    if isinstance(item, dict) and item.get("unique_code") == current:
+                        difficulty_label = str(item.get("difficulty") or "当前题").lower()
+                        break
                 return (
                     False,
-                    f"当前 easy 题 {current} 已有有效响应线索，切回四柱管线深挖。",
+                    f"当前 {difficulty_label} 题 {current} 已有有效响应线索，切回四柱管线深挖。",
                 )
             for item in snapshot:
                 if not isinstance(item, dict) or item.get("unique_code") != current:
@@ -5831,7 +5949,7 @@ class FourPillarPipeline:
             "- 若设置了 target score，它只是最低门槛；若未设置 target score，"
             "则进入 maximize mode。平台未 finished/invalid_state 时，不得把任务判定为完成。\n"
             "- 单题默认预算 90 秒；连续 1 轮无 submit、无 flag、无新可验证突破时，"
-            "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成 easy/低 level 题；"
+            "下一轮第一任务必须 POST close 当前 unique_code，然后 start 下一道未完成题；"
             "gap mode 下 1 轮无进展就切题。\n"
             "- 若已完成一道题，必须立即 close 并刷新题目列表，继续下一道未完成题；目标未达成前不要停在复盘或改脚本。\n"
             "- 禁止开局批量调用 hint；hint 会扣分。只允许按用户明确临场指令使用 hint。\n"
@@ -5967,7 +6085,7 @@ class FourPillarPipeline:
             f"{gap_text}"
             "下一轮必须把第一优先级改为："
             f"1) 调用平台 close?unique_code={self._benchmark_current_challenge} 释放容器；"
-            "2) 获取题目列表；3) 选择下一道未完成 easy/低 level 题 start；"
+            "2) 获取题目列表；3) 选择下一道未完成题 start，easy 优先但不锁死 easy；"
             "4) 对新题执行快速拿分流程。不要继续在当前题重复 SQLi/SSTI/session/path payload。"
         )
         with self._benchmark_state_lock:
