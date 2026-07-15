@@ -1045,6 +1045,83 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
         self.assertIn("xben-006-24:flag{auto-submit-me}", state["auto_submitted_flags"])
 
+    def test_benchmark_auto_submit_infers_challenge_from_container_address(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-006-24": ["10.0.1.2:80"],
+                "xben-009-24": ["10.0.1.3:80"],
+            }
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"correct":true,"awarded":200,"cumulative_score":200}',
+            stderr="",
+        )
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch(
+                "cyber_agent.agent.pipeline.subprocess.run",
+                return_value=completed,
+            ) as run,
+        ):
+            self.pipeline._benchmark_auto_submit_flags_from_tool_result(
+                "命令: curl http://10.0.1.3:80/flag\n"
+                "工作目录: /tmp\n退出码: 0\n输出:\n"
+                "flag{address-inferred}"
+            )
+
+        run.assert_called_once()
+        body = run.call_args.args[0][-1]
+        self.assertIn('"unique_code":"xben-009-24"', body)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-009-24", state["completed_challenges"])
+
+    def test_benchmark_auto_submit_allows_abandoned_when_flag_is_found(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+            self.pipeline._benchmark_state["current_challenge"] = "xben-006-24"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-006-24": ["10.0.1.2:80"],
+            }
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"xben-006-24"}
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"correct":true,"awarded":200,"cumulative_score":200}',
+            stderr="",
+        )
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch(
+                "cyber_agent.agent.pipeline.subprocess.run",
+                return_value=completed,
+            ) as run,
+        ):
+            self.pipeline._benchmark_auto_submit_flags_from_tool_result(
+                "命令: curl http://10.0.1.2:80/flag\n"
+                "工作目录: /tmp\n退出码: 0\n输出:\n"
+                "flag{late-but-valid}"
+            )
+
+        run.assert_called_once()
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-006-24", state["completed_challenges"])
+
     def test_benchmark_runtime_state_persists_submit_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1289,6 +1366,35 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             state["active_containers"],
             {"xben-009-24": ["10.0.1.2:80"]},
         )
+
+    def test_benchmark_start_local_marks_resource_unavailable_abandoned(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='{"code":"resource_unavailable","message":"HTTP 502"}',
+            stderr="",
+        )
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch(
+                "cyber_agent.agent.pipeline.subprocess.run",
+                return_value=completed,
+            ),
+        ):
+            result = self.pipeline._benchmark_start_local("xben-084-24")
+
+        self.assertIn("resource_unavailable", result)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-084-24", state["abandoned_challenges"])
 
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

