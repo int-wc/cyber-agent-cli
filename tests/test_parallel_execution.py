@@ -1367,6 +1367,154 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             {"xben-009-24": ["10.0.1.2:80"]},
         )
 
+    def test_benchmark_deterministic_step1_closes_completed_active_before_start(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        calls: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd)
+            calls.append(joined)
+            if "/openapi/v1/challenges/close?unique_code=xben-005-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='{"unique_code":"xben-005-24","closed":true}',
+                    stderr="",
+                )
+            if "/openapi/v1/challenges/start?unique_code=xben-009-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=(
+                        '{"unique_code":"xben-009-24",'
+                        '"container_addr":["10.0.1.2:80"]}'
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "["
+                    '{"unique_code":"xben-005-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":true,'
+                    '"container_status":"available","container_addr":["10.0.1.1:80"]},'
+                    '{"unique_code":"xben-009-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":false,'
+                    '"container_status":"stopped","container_addr":[]}'
+                    "]"
+                ),
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 1：只做调度。"
+            )
+
+        self.assertIn("先关闭已完成 active 容器释放名额", result)
+        self.assertIn("启动下一道 easy xben-009-24", result)
+        self.assertTrue(
+            any("/openapi/v1/challenges/close?unique_code=xben-005-24" in call for call in calls)
+        )
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("xben-005-24", state["closed_challenges"])
+        self.assertEqual(
+            state["active_containers"],
+            {"xben-009-24": ["10.0.1.2:80"]},
+        )
+
+    def test_benchmark_deterministic_step1_retries_after_max_active_cleanup(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        start_attempts = 0
+        list_attempts = 0
+
+        def fake_run(cmd, **kwargs):
+            nonlocal list_attempts, start_attempts
+            joined = " ".join(cmd)
+            if "/openapi/v1/challenges/close?unique_code=xben-005-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='{"unique_code":"xben-005-24","closed":true}',
+                    stderr="",
+                )
+            if "/openapi/v1/challenges/start?unique_code=xben-009-24" in joined:
+                start_attempts += 1
+                if start_attempts == 1:
+                    return subprocess.CompletedProcess(
+                        cmd,
+                        0,
+                        stdout=(
+                            '{"code":"invalid_state","message":"max active challenge '
+                            'instances reached (3), please close an existing challenge '
+                            'before starting a new one","detail":{}}'
+                        ),
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=(
+                        '{"unique_code":"xben-009-24",'
+                        '"container_addr":["10.0.1.2:80"]}'
+                    ),
+                    stderr="",
+                )
+            list_attempts += 1
+            completed_status = "stopped" if list_attempts == 1 else "available"
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "["
+                    '{"unique_code":"xben-005-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":true,'
+                    f'"container_status":"{completed_status}","container_addr":["10.0.1.1:80"]}},'
+                    '{"unique_code":"xben-009-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":false,'
+                    '"container_status":"stopped","container_addr":[]}'
+                    "]"
+                ),
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 1：只做调度。"
+            )
+
+        self.assertIn("重试启动 xben-009-24", result)
+        self.assertEqual(start_attempts, 2)
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertNotIn("xben-009-24", state["abandoned_challenges"])
+        self.assertEqual(
+            state["active_containers"],
+            {"xben-009-24": ["10.0.1.2:80"]},
+        )
+
     def test_benchmark_start_local_marks_resource_unavailable_abandoned(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

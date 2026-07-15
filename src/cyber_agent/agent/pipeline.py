@@ -945,6 +945,30 @@ class FourPillarPipeline:
             self._benchmark_mark_abandoned(code, "start 返回资源不可用")
         return stdout
 
+    def _benchmark_close_completed_active_from_snapshot(
+        self,
+        challenges: list[dict[str, Any]],
+    ) -> list[str]:
+        """Close completed containers that still consume active slots."""
+        with self._benchmark_state_lock:
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+        results: list[str] = []
+        seen: set[str] = set()
+        for item in challenges:
+            code = item.get("unique_code")
+            if (
+                not isinstance(code, str)
+                or code in closed
+                or code in seen
+                or item.get("is_completed") is not True
+                or item.get("container_status") != "available"
+            ):
+                continue
+            seen.add(code)
+            closed_result = self._benchmark_close_local(code)
+            results.append(f"{code}: {closed_result[:160]}")
+        return results
+
     def _benchmark_probe_container_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
             return "无容器地址，无法探测。"
@@ -1023,6 +1047,11 @@ class FourPillarPipeline:
             challenges = self._benchmark_list_challenges_local()
             if not challenges:
                 return "确定性调度：平台已返回终止状态或无题目列表。"
+            cleanup_results = self._benchmark_close_completed_active_from_snapshot(challenges)
+            cleanup_note = ""
+            if cleanup_results:
+                cleanup_note = "确定性调度：先关闭已完成 active 容器释放名额: " + " | ".join(cleanup_results)
+                challenges = self._benchmark_list_challenges_local()
             active_items = [
                 item for item in challenges
                 if item.get("container_status") == "available"
@@ -1038,13 +1067,43 @@ class FourPillarPipeline:
             if active_items:
                 code = active_items[0].get("unique_code")
                 addrs = active_items[0].get("container_addr") or []
-                return f"确定性调度：继续当前 active 题 {code} => {addrs}"
+                active_msg = f"确定性调度：继续当前 active 题 {code} => {addrs}"
+                return f"{cleanup_note}\n{active_msg}" if cleanup_note else active_msg
             next_item = self._benchmark_select_next_easy(challenges)
             if next_item is None:
-                return "确定性调度：未发现未完成 stopped easy，后续应切回四柱处理。"
+                no_easy_msg = "确定性调度：未发现未完成 stopped easy，后续应切回四柱处理。"
+                return f"{cleanup_note}\n{no_easy_msg}" if cleanup_note else no_easy_msg
             code = str(next_item["unique_code"])
             started = self._benchmark_start_local(code)
-            return f"确定性调度：启动下一道 easy {code}: {started[:300]}"
+            if "max active challenge instances reached" in started.lower():
+                refreshed = self._benchmark_list_challenges_local()
+                retry_cleanup = self._benchmark_close_completed_active_from_snapshot(refreshed)
+                if retry_cleanup:
+                    challenges = self._benchmark_list_challenges_local()
+                    retry_item = next(
+                        (
+                            item
+                            for item in challenges
+                            if item.get("unique_code") == code
+                            and item.get("is_completed") is not True
+                            and item.get("container_status") == "stopped"
+                        ),
+                        None,
+                    )
+                    if retry_item is not None:
+                        retry_started = self._benchmark_start_local(code)
+                        retry_msg = (
+                            f"确定性调度：start 遇到 active 名额满，已关闭完成题释放名额: "
+                            f"{' | '.join(retry_cleanup)}；重试启动 {code}: {retry_started[:300]}"
+                        )
+                        return f"{cleanup_note}\n{retry_msg}" if cleanup_note else retry_msg
+                blocked_msg = (
+                    f"确定性调度：启动下一道 easy {code} 失败，active 名额已满且未发现可清理的已完成容器；"
+                    "不要放弃该题，下一步应 close stale active 或刷新状态。"
+                )
+                return f"{cleanup_note}\n{blocked_msg}" if cleanup_note else blocked_msg
+            start_msg = f"确定性调度：启动下一道 easy {code}: {started[:300]}"
+            return f"{cleanup_note}\n{start_msg}" if cleanup_note else start_msg
 
         if "Benchmark fast step 2" in desc:
             code, addrs = self._benchmark_active_challenge_from_state()
