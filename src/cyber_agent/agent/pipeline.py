@@ -1489,6 +1489,21 @@ class FourPillarPipeline:
                 "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖",
             )
             return "\n".join(outputs)
+        if self._benchmark_probe_suggests_dify(joined_outputs):
+            self._benchmark_set_service_fingerprint(code, "dify")
+            dify_output = self._benchmark_probe_dify_local(code, base, joined_outputs)
+            if dify_output:
+                outputs.append(dify_output)
+                joined_outputs = "\n".join(outputs)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+            self._benchmark_mark_reasoning_needed(
+                code,
+                "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖",
+            )
+            return "\n".join(outputs)
         webapp_output = self._benchmark_probe_common_webapp_flows(code, base, joined_outputs)
         if webapp_output:
             outputs.append(webapp_output)
@@ -1508,6 +1523,111 @@ class FourPillarPipeline:
             or "hugegraph.apache.org" in lowered
             or '"gremlin"' in lowered and '"arthas"' in lowered
         )
+
+    @staticmethod
+    def _benchmark_probe_suggests_dify(probe: str) -> bool:
+        lowered = probe.lower()
+        return (
+            "data-api-prefix" in lowered
+            and "127.0.0.1:5001" in lowered
+            and (
+                "dify" in lowered
+                or "self_hosted" in lowered
+                or "/_next/static/" in lowered
+                or "x-powered-by: next.js" in lowered
+            )
+        )
+
+    def _benchmark_probe_dify_local(self, code: str, base: str, probe: str) -> str:
+        """Run bounded Dify/Next.js checks and keep the active task for reasoning."""
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## dify-probe {base}"]
+        collected = probe
+
+        def append_result(label: str, result: subprocess.CompletedProcess[str]) -> None:
+            nonlocal collected
+            body = result.stdout or ""
+            collected += "\n" + body
+            interesting = "\n".join(
+                line[:500]
+                for line in body.splitlines()
+                if any(
+                    marker in line.lower()
+                    for marker in (
+                        "flag{",
+                        "tsec{",
+                        "ctf{",
+                        "data-api-prefix",
+                        "127.0.0.1:5001",
+                        "console/api",
+                        "/api/",
+                        "not_setup",
+                        "already_setup",
+                        "signin",
+                        "install",
+                        "secret",
+                        "token",
+                    )
+                )
+            )
+            status = (body.splitlines() or [""])[0][:160]
+            outputs.append(
+                f"## {label}\n{status}\n{interesting[:2500]}\n{(result.stderr or '')[:300]}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: dify_probe {label} {base}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body[:12000]}"
+            )
+
+        for path in (
+            "apps",
+            "signin",
+            "install",
+            "console/api/setup",
+            "console/api/system-features",
+            "console/api/version",
+            "api/site",
+            "api/parameters",
+            "flag",
+            "api/flag",
+            ".env",
+            ".env.local",
+        ):
+            result = self._benchmark_curl_local(
+                _urljoin(base, path),
+                tun_interface=tun_interface,
+                timeout=7,
+            )
+            append_result(f"GET /{path}", result)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+
+        chunk_paths = list(
+            dict.fromkeys(
+                _re_mod.findall(
+                    r"""/_next/static/chunks/[^"'\s<>]+?\.js""",
+                    collected,
+                )
+            )
+        )
+        for chunk_path in chunk_paths[:24]:
+            result = self._benchmark_curl_local(
+                _urljoin(base, chunk_path),
+                tun_interface=tun_interface,
+                timeout=8,
+            )
+            append_result(f"GET {chunk_path}", result)
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                return "\n".join(outputs)
+
+        return "\n".join(outputs)
 
     def _benchmark_probe_hugegraph_local(self, code: str, base: str, probe: str) -> str:
         """Run bounded HugeGraph-specific checks before falling back to reasoning."""
@@ -2303,6 +2423,71 @@ class FourPillarPipeline:
         """Run the easy fast path without an LLM when the step is mechanical."""
         if not self._is_benchmark_aggressive():
             return None
+        if "Benchmark dify handoff step 1" in desc:
+            code, addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                return "确定性 Dify handoff：当前没有 active 容器，跳过。"
+            if not addrs:
+                return "确定性 Dify handoff：当前 active 容器无地址，跳过。"
+            addr = addrs[0]
+            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
+                return f"确定性 Dify handoff：容器地址格式异常: {addr}"
+            base = f"http://{addr}/"
+            self._benchmark_set_service_fingerprint(code, "dify")
+            probe = self._benchmark_probe_dify_local(code, base, "")
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                closed = self._benchmark_close_local(code)
+                return (
+                    f"确定性 Dify handoff：{code} 已提交成功并关闭。\n"
+                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
+                )
+            self._benchmark_mark_reasoning_needed(
+                code,
+                "Dify/Next.js 专项静态/API 探测完成，需选择一个最高置信利用假设",
+            )
+            return (
+                f"确定性 Dify handoff：已对当前题 {code} 执行 bounded Dify/Next.js "
+                "静态 chunk、RSC、public/console API、install/signin 探测；"
+                "未直接发现 flag，保留 active 给 exploit step。\n"
+                f"探测摘要:\n{probe[:3500]}"
+            )
+        if "Benchmark dify exploit step 2" in desc:
+            code, addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                return "确定性 Dify exploit：当前没有 active 容器，跳过。"
+            if not addrs:
+                return "确定性 Dify exploit：当前 active 容器无地址，跳过。"
+            addr = addrs[0]
+            if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
+                return f"确定性 Dify exploit：容器地址格式异常: {addr}"
+            base = f"http://{addr}/"
+            probe = self._benchmark_probe_dify_local(code, base, "")
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                closed = self._benchmark_close_local(code)
+                return (
+                    f"确定性 Dify exploit：{code} 已提交成功并关闭。\n"
+                    f"close 返回: {closed[:200]}\n探测摘要:\n{probe[:3000]}"
+                )
+            self._benchmark_mark_abandoned(code, "Dify bounded exploit 未发现可提交 flag")
+            return (
+                f"确定性 Dify exploit：{code} 已完成 bounded Dify/Next.js 复核，"
+                "未发现 flag/可提交候选；为最大化总分，标记 abandoned，下一步 close 换题。\n"
+                f"探测摘要:\n{probe[:3500]}"
+            )
+        if "Benchmark dify close step 3" in desc:
+            code, _addrs = self._benchmark_active_challenge_from_state()
+            if not code:
+                return "确定性 Dify close：当前没有 active 容器，无需 close。"
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = self._benchmark_close_local(code)
+            if code in completed:
+                return f"确定性 Dify close：{code} 已完成，close 返回: {closed[:200]}"
+            return f"确定性 Dify close：{code} 已 close 释放资源: {closed[:300]}"
         if "Benchmark handoff step 1" in desc:
             code, addrs = self._benchmark_active_challenge_from_state()
             if not code:
@@ -2327,7 +2512,7 @@ class FourPillarPipeline:
                 return "确定性 handoff：当前没有 active 容器，跳过。"
             with self._benchmark_state_lock:
                 fingerprints = dict(self._benchmark_state.get("service_fingerprints", {}))
-            if fingerprints.get(code) == "hugegraph":
+            if fingerprints.get(code) in {"hugegraph", "dify"}:
                 return None
             probe = self._benchmark_probe_handoff_followup_local(code, addrs)
             with self._benchmark_state_lock:
@@ -2503,9 +2688,20 @@ class FourPillarPipeline:
                     f"close 返回: {closed[:200]}\n"
                     f"探测摘要:\n{probe[:2500]}"
                 )
+            service_reason = "fast path 已获取可达响应/协议线索但未直接发现 flag"
+            if self._benchmark_probe_suggests_hugegraph(probe):
+                self._benchmark_set_service_fingerprint(code, "hugegraph")
+                service_reason = (
+                    "HugeGraph/Gremlin/Arthas/JDWP 服务指纹已确认，需要服务专项深挖"
+                )
+            elif self._benchmark_probe_suggests_dify(probe):
+                self._benchmark_set_service_fingerprint(code, "dify")
+                service_reason = (
+                    "Dify/Next.js 前端可达但后端疑似绑定 localhost，需要 Dify 专项深挖"
+                )
             self._benchmark_mark_reasoning_needed(
                 code,
-                "fast path 已获取可达响应/协议线索但未直接发现 flag",
+                service_reason,
             )
             return (
                 f"确定性探测：{code} 已获取有效响应但未直接发现 flag，"
@@ -3233,6 +3429,55 @@ class FourPillarPipeline:
                     "parallel": False,
                 },
             ]
+        if isinstance(fingerprints, dict) and fingerprints.get(current) == "dify":
+            dify_context = (
+                f"{context}\n\n"
+                "## 当前题专项线索\n"
+                "fast path 已识别当前服务为 Dify/Next.js。前端 3000 可达，"
+                "`data-api-prefix`/`data-public-api-prefix` 指向 127.0.0.1:5001，"
+                "直连 5001 可能被拒绝。不要按普通 PHP/LFI/目录字典扫；优先基于 "
+                "Next.js 静态 chunk、RSC payload、Dify public/console API、安装/登录态、"
+                "SSR/proxy/rewrite 行为和暴露的 app/dataset/workspace 标识推进。"
+            )
+            return [
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark dify handoff step 1：只深挖当前 active 题 {current} "
+                        f"({addr_text}) 的 Dify/Next.js 指纹。禁止 setup/VPN/toolchain/"
+                        "list/start/PHP/LFI 字典扫描。只访问当前 host:port，必须使用 "
+                        "curl --interface tun0。复核 /apps、/signin、RSC payload、"
+                        "有限 Next.js chunk、/console/api/* 与 /api/* 的真实响应；"
+                        "发现 flag{...} 立即 submit。"
+                    ),
+                    "context": dify_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark dify exploit step 2：围绕 {current} 选择一个最高置信"
+                        " Dify/Next.js 利用路径。优先顺序：1) chunk/RSC 泄露 app_id、"
+                        "secret、token、flag 或可调用 public API；2) install/setup/signin "
+                        "状态错误暴露初始化或管理员路径；3) Next rewrite/proxy 到 "
+                        "127.0.0.1:5001 的可利用入口。禁止继续泛化目录枚举。最多一个"
+                        "主假设和一个备选假设；发现候选 flag 立即 submit。"
+                    ),
+                    "context": dify_context,
+                    "parallel": False,
+                },
+                {
+                    "role": "runner",
+                    "task_description": (
+                        f"Benchmark dify close step 3：只有当 {current} 的静态 chunk、"
+                        "RSC、public/console API、install/signin 状态均无新线索且无 flag "
+                        f"时，才 close?unique_code={current}；否则保留 active 并返回"
+                        "下一步具体利用点。"
+                    ),
+                    "context": dify_context,
+                    "parallel": False,
+                },
+            ]
         return [
             {
                 "role": "runner",
@@ -3291,6 +3536,21 @@ class FourPillarPipeline:
             "刷新题目列表",
         )
         return any(marker in text for marker in setup_markers)
+
+    @staticmethod
+    def _benchmark_plan_is_handoff_like(subtasks: list[dict[str, Any]]) -> bool:
+        if not subtasks:
+            return False
+        text = "\n".join(str(task.get("task_description", "")) for task in subtasks).lower()
+        return any(
+            marker in text
+            for marker in (
+                "benchmark handoff step",
+                "benchmark hugegraph",
+                "benchmark dify",
+                "只深挖当前 active",
+            )
+        )
 
     def _benchmark_final_summary(self) -> str:
         if not self._is_benchmark_aggressive():
@@ -5383,6 +5643,22 @@ class FourPillarPipeline:
                     if self._benchmark_stop_if_terminal("fast_deterministic_step_end"):
                         circuit_broken = True
                         break
+                    should_continue_fast, handoff_reason = self._benchmark_should_use_fast_path()
+                    self._record_trace(
+                        "benchmark_fast_path_post_step_decision",
+                        detail=handoff_reason,
+                        metadata={
+                            "use_fast_path": should_continue_fast,
+                            "step": deterministic_step,
+                        },
+                    )
+                    if not should_continue_fast:
+                        renderer.console.print(
+                            f"  [dim yellow]↻ {handoff_reason}[/]"
+                        )
+                        switch_to_standard = True
+                        circuit_broken = True
+                        break
                     continue
 
                 subtask_prompt = self._build_subtask_prompt(
@@ -5881,11 +6157,17 @@ class FourPillarPipeline:
             reasoning = plan.get("reasoning", "")
 
             handoff_subtasks = self._benchmark_reasoning_handoff_subtasks()
-            if handoff_subtasks and self._benchmark_plan_is_setup_like(subtasks):
+            if handoff_subtasks and not self._benchmark_plan_is_handoff_like(subtasks):
+                original_plan_setup_like = self._benchmark_plan_is_setup_like(subtasks)
                 subtasks = handoff_subtasks
+                setup_note = (
+                    "决策者计划偏向 setup，"
+                    if original_plan_setup_like
+                    else "决策者计划不是当前题专项 handoff，"
+                )
                 reasoning = (
                     "Benchmark fast path 已完成前置校验并锁定当前 active 题；"
-                    "决策者计划偏向 setup，已替换为当前题 handoff 深挖计划。"
+                    f"{setup_note}已替换为当前题 focused 深挖计划。"
                 )
                 self._record_trace(
                     "benchmark_reasoning_handoff_plan",
@@ -5897,7 +6179,7 @@ class FourPillarPipeline:
                 )
                 renderer.console.print(
                     "  [dim yellow]Benchmark handoff：当前题已有有效线索，"
-                    "已替换 setup 型计划为 focused 深挖计划。[/]"
+                    "已替换非专项计划为 focused 深挖计划。[/]"
                 )
 
             if not subtasks:
@@ -6134,7 +6416,12 @@ class FourPillarPipeline:
                     )
 
                     deterministic_result: str | None = None
-                    if "Benchmark handoff step" in desc:
+                    if (
+                        "Benchmark handoff step" in desc
+                        or "Benchmark dify handoff step" in desc
+                        or "Benchmark dify exploit step" in desc
+                        or "Benchmark dify close step" in desc
+                    ):
                         try:
                             deterministic_result = self._benchmark_deterministic_fast_step(
                                 desc,

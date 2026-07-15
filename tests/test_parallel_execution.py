@@ -2134,7 +2134,8 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                     "HTTP/1.1 307 Temporary Redirect\n"
                     "location: /apps\n"
                     "X-Powered-By: Next.js\n\n"
-                    "<html>Dify</html>"
+                    '<html><body data-api-prefix="http://127.0.0.1:5001/console/api" '
+                    'data-public-edition="SELF_HOSTED">Dify</body></html>'
                 ),
             ),
             patch.object(self.pipeline, "_benchmark_close_local") as close_local,
@@ -2147,6 +2148,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertIn("保留 active", result)
         self.assertIn("c-03", state["reasoning_challenges"])
+        self.assertEqual(state["service_fingerprints"]["c-03"], "dify")
         self.assertEqual(state["active_containers"], {"c-03": ["10.0.180.232:3000"]})
         close_local.assert_not_called()
 
@@ -2430,6 +2432,97 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("Benchmark hugegraph exploit step 2", handoff[1]["task_description"])
         self.assertIn("禁止继续普通 HTTP 目录枚举", handoff[1]["task_description"])
         self.assertIn("nmap jdwp-exec", handoff[1]["context"])
+
+    def test_benchmark_reasoning_handoff_specializes_dify(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["reasoning_challenges"] = {"c-03"}
+            self.pipeline._benchmark_state["service_fingerprints"] = {
+                "c-03": "dify",
+            }
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        handoff = self.pipeline._benchmark_reasoning_handoff_subtasks()
+
+        self.assertEqual(len(handoff), 3)
+        self.assertIn("Dify/Next.js 指纹", handoff[0]["task_description"])
+        self.assertIn("Benchmark dify exploit step 2", handoff[1]["task_description"])
+        self.assertIn("禁止继续泛化目录枚举", handoff[1]["task_description"])
+        self.assertIn("127.0.0.1:5001", handoff[1]["context"])
+
+    def test_benchmark_dify_handoff_step1_runs_deterministic_probe(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_dify_local",
+            return_value="Dify bounded probe no flag",
+        ) as probe:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark dify handoff step 1：只深挖当前 active 题 c-03",
+                reason="test",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("确定性 Dify handoff", result)
+        self.assertIn("c-03", state["reasoning_challenges"])
+        self.assertEqual(state["service_fingerprints"]["c-03"], "dify")
+        probe.assert_called_once_with("c-03", "http://10.0.180.232:3000/", "")
+
+    def test_benchmark_dify_exploit_step2_abandons_after_bounded_probe(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_probe_dify_local",
+            return_value="Dify bounded probe no flag",
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark dify exploit step 2：围绕 c-03 选择一个最高置信 Dify/Next.js 利用路径",
+                reason="test",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("标记 abandoned", result)
+        self.assertIn("c-03", state["abandoned_challenges"])
+
+    def test_benchmark_dify_close_step3_closes_active(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_close_local",
+            return_value='{"closed":true}',
+        ) as close_local:
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark dify close step 3：只有当 c-03 无 flag 时 close",
+                reason="test",
+            )
+
+        self.assertIn("已 close 释放资源", result)
+        close_local.assert_called_once_with("c-03")
 
     def test_benchmark_deterministic_handoff_probes_and_closes(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
