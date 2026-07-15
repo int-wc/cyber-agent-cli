@@ -49,6 +49,7 @@ CIRCUIT_BREAKER_CONSECUTIVE_FAILS = 2  # 连续失败 N 次触发熔断
 BENCHMARK_REDUNDANT_BLOCK_LIMIT = 1    # finished 后首次被 guard 拦截即硬停
 BENCHMARK_LOW_VALUE_SIGNAL_LIMIT = 6   # 单轮低价值探测过多时强制换题
 BENCHMARK_SETUP_TIMEOUT_STREAK_LIMIT = 3  # 未锁定题目前连续超时，判定平台/网络前置异常
+BENCHMARK_MAX_ITERATION_BATCHES = 20   # 每批达到轮数上限后，未达目标则自动再跑一批
 
 
 class PipelineCircuitBreakerError(RuntimeError):
@@ -571,6 +572,12 @@ class FourPillarPipeline:
             abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             active = dict(self._benchmark_state.get("active_containers", {}))
 
+        if "/home/study" in lowered:
+            return (
+                "Benchmark aggressive 当前工作目录固定为 "
+                "/home/my/cyber/benchmark_test，禁止切换或探测 /home/study。"
+            )
+
         if state.get("task_finished") and (
             "tsecbench.zc.tencent.com" in lowered
             or "/openapi/v1/challenges" in lowered
@@ -647,6 +654,34 @@ class FourPillarPipeline:
                 code = self._extract_unique_code(command)
                 if code in closed:
                     return f"{code} 已确认关闭，禁止重复 close；请刷新列表并切换下一道未完成题。"
+
+        active_host_ports: dict[str, set[str]] = {}
+        for addrs in active.values():
+            for addr in addrs or []:
+                if not isinstance(addr, str) or not addr:
+                    continue
+                match = _re_mod.fullmatch(
+                    r"(10\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})",
+                    addr,
+                )
+                if match:
+                    active_host_ports.setdefault(match.group(1), set()).add(match.group(2))
+        for host, raw_port in _re_mod.findall(
+            r"\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d{1,5}))?",
+            command,
+        ):
+            allowed_ports = active_host_ports.get(host)
+            if not allowed_ports:
+                continue
+            port = raw_port
+            if not port and _re_mod.search(rf"https?://{_re_mod.escape(host)}(?:[/?#\s]|$)", command):
+                port = "80"
+            if port and port not in allowed_ports:
+                allowed = ", ".join(f"{host}:{p}" for p in sorted(allowed_ports))
+                return (
+                    f"当前活跃容器已记录精确地址 {allowed}，禁止猜测探测 "
+                    f"{host}:{port}；请使用 state 中的完整 host:port。"
+                )
 
         for code, addrs in active.items():
             if code in completed or code in closed or code in abandoned:
@@ -745,11 +780,24 @@ class FourPillarPipeline:
         challenges_snapshot: list[dict[str, Any]] | None = None
 
         json_fragments = self._iter_json_fragments(output) if is_platform_challenges_command else []
+        if is_platform_list_command:
+            list_fragment = next(
+                (
+                    value
+                    for value in json_fragments
+                    if isinstance(value, list)
+                    and all(
+                        isinstance(item, dict) and "unique_code" in item
+                        for item in value
+                    )
+                ),
+                None,
+            )
+            json_fragments = [list_fragment] if isinstance(list_fragment, list) else []
         for value in json_fragments:
             if isinstance(value, dict):
                 code = value.get("unique_code")
                 if isinstance(code, str) and _re_mod.fullmatch(r"xben-\d+-\d+", code):
-                    current_challenge = code
                     addrs = value.get("container_addr")
                     status = value.get("container_status")
                     if isinstance(addrs, list) and addrs and (
@@ -760,6 +808,7 @@ class FourPillarPipeline:
                         )
                     ):
                         active_updates[code] = [str(addr) for addr in addrs]
+                        current_challenge = code
                     if value.get("closed") is True:
                         closed.add(code)
 
@@ -1602,6 +1651,8 @@ class FourPillarPipeline:
             prompt += (
                 "\n\nBenchmark aggressive 子任务要求："
                 "\n- 本子任务必须服务于跑分收益，避免长时间低置信度发散"
+                "\n- 当前工作目录固定为 /home/my/cyber/benchmark_test；禁止切换到 /home/study 或无关目录"
+                "\n- 探测当前容器时必须使用运行态里记录的完整 host:port；不要把 10.x 地址改成默认 :80"
                 "\n- 单题/单子任务硬预算约 120 秒；超过预算仍无 flag、无 submit、无高置信新线索时，立即 close 当前题并换下一题"
                 "\n- 对当前题快速验证一个主假设和一个备选假设；同类 SQLi/SSTI/header/path payload 不要连续堆叠"
                 "\n- 连续 6 个 payload 只有 Internal Server Error、404、[]、Only admins can see 等低价值响应时，停止当前方向并 close 换题"
@@ -2100,6 +2151,93 @@ class FourPillarPipeline:
             time_mod.sleep(seconds)
         return True
 
+    def _benchmark_should_continue_iteration_batches(
+        self,
+        *,
+        source: str,
+        completed_iterations: int,
+    ) -> bool:
+        """Decide whether Benchmark should automatically start another loop batch."""
+        if not self._is_benchmark_aggressive():
+            return False
+        if self._benchmark_stop_if_terminal(f"{source}_batch_boundary"):
+            return False
+        status = self._benchmark_score_status()
+        if status.get("target_reached"):
+            return False
+        target_score = int(status.get("target_score") or 0)
+        if target_score <= 0:
+            return False
+
+        batch_count = int(
+            self._runtime_context.get("_benchmark_iteration_batch_count", 1) or 1
+        )
+        if batch_count >= BENCHMARK_MAX_ITERATION_BATCHES:
+            self._record_trace(
+                "benchmark_iteration_batch_stop",
+                detail=(
+                    f"已自动续跑 {batch_count} 批、{completed_iterations} 轮，"
+                    "达到安全上限；停止以避免无限空转。"
+                ),
+                metadata=status,
+            )
+            return False
+
+        self._renderer.console.print(
+            "  [dim]⏳ 反思者 正在做 Benchmark 批次续跑判断...[/]"
+        )
+        review = self._call_role_with_timeout(
+            AgentRole.REFLECTOR,
+            "TSec Benchmark 批次边界续跑判断",
+            context=(
+                "## Benchmark 批次状态\n"
+                f"{json.dumps(status, ensure_ascii=False)}\n\n"
+                f"已完成轮次: {completed_iterations}\n"
+                f"来源: {source}"
+            ),
+            extra_instruction=(
+                "请只判断是否需要自动启动下一批轮次。"
+                "如果已达到目标分或平台 finished，第一行写「停止」。"
+                "如果目标未达成且平台未 finished，第一行写「继续」，"
+                "并用一句话说明下一批应优先 close/list/start 还是继续当前题。"
+            ),
+        )
+        self._record_trace(
+            "benchmark_iteration_batch_reflection",
+            detail=review[:500],
+            metadata={
+                **status,
+                "source": source,
+                "completed_iterations": completed_iterations,
+            },
+        )
+        if self._is_transient_llm_error(review):
+            self._benchmark_rate_limit_backoff("benchmark_batch_reflection", review)
+
+        directive = self._benchmark_target_continue_directive()
+        if directive:
+            self._benchmark_forced_directive = directive
+        self._runtime_context["_benchmark_iteration_batch_count"] = batch_count + 1
+        self._record_trace(
+            "benchmark_iteration_batch_continue",
+            detail=(
+                f"{source} 第 {batch_count} 批结束但目标未达成，"
+                f"已知得分 {status.get('known_score')}/{target_score}；"
+                "自动启动下一批轮次。"
+            ),
+            metadata={
+                **status,
+                "source": source,
+                "completed_iterations": completed_iterations,
+                "next_batch": batch_count + 1,
+            },
+        )
+        self._renderer.console.print(
+            "  [dim yellow]Benchmark 批次续跑判断：目标未达成，"
+            f"自动启动第 {batch_count + 1} 批轮次。[/]"
+        )
+        return True
+
     def _benchmark_fallback_subtasks(self) -> list[dict[str, Any]]:
         state_context = self._benchmark_state_context()
         state = self._benchmark_state_snapshot()
@@ -2143,6 +2281,7 @@ class FourPillarPipeline:
                     "role": "runner",
                     "task_description": (
                         "Benchmark fallback step 4：对当前 10.x 容器做 60 秒快速指纹："
+                        "必须使用状态中记录的精确 host:port，不要猜测 :80；"
                         "根路径、headers、robots、openapi/docs、静态资源、源码注释、"
                         "默认凭证；只汇报最高置信攻击路径。"
                     ),
@@ -2208,6 +2347,7 @@ class FourPillarPipeline:
                 "role": "runner",
                 "task_description": (
                     "Benchmark fast step 2：只解当前已启动的 10.x 容器。45 秒快速指纹"
+                    "时必须使用状态中记录的精确 host:port，不要猜测 :80；"
                     "根路径、headers、robots、docs、静态资源、源码注释、默认凭证、"
                     "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
                     "候选答案立即 submit；submit 后或无快速突破时立即 close 当前题。"
@@ -2658,6 +2798,7 @@ class FourPillarPipeline:
         self._benchmark_forced_directive = ""
         self._benchmark_redundant_block_count = 0
         self._benchmark_hard_stop_recorded = False
+        self._runtime_context["_benchmark_iteration_batch_count"] = 1
         with self._benchmark_state_lock:
             self._benchmark_state = self._new_benchmark_state()
         self._session_id = str(
@@ -2717,15 +2858,28 @@ class FourPillarPipeline:
             detail="Benchmark aggressive 跳过角色编排，使用固定刷题循环。",
         )
 
-        max_iterations = self._resolve_effective_max_iterations()
+        max_iterations_per_batch = self._resolve_effective_max_iterations()
+        max_iterations = max_iterations_per_batch * BENCHMARK_MAX_ITERATION_BATCHES
         all_results: list[list[str]] = []
         iteration = 0
         switch_to_standard = False
 
         for iteration in range(1, max_iterations + 1):
+            if iteration > 1 and (iteration - 1) % max_iterations_per_batch == 0:
+                if not self._benchmark_should_continue_iteration_batches(
+                    source="benchmark_fast",
+                    completed_iterations=iteration - 1,
+                ):
+                    iteration -= 1
+                    break
+            batch_iteration = ((iteration - 1) % max_iterations_per_batch) + 1
+            batch_count = int(
+                self._runtime_context.get("_benchmark_iteration_batch_count", 1) or 1
+            )
             renderer.console.print()
             renderer.console.print(
-                f"[dim bold]⚡ Benchmark fast loop 第 {iteration}/{max_iterations} 轮[/]"
+                f"[dim bold]⚡ Benchmark fast loop 第 {batch_iteration}/{max_iterations_per_batch} 轮"
+                f"（第 {batch_count} 批，总第 {iteration} 轮）[/]"
             )
             self._record_trace("iteration_start", detail=f"Benchmark fast 第 {iteration} 轮")
             if self._benchmark_stop_if_terminal("fast_iteration_start"):
@@ -3181,15 +3335,41 @@ class FourPillarPipeline:
         self._record_trace("role_reflector", detail=reflection[:1000])
 
         # ── Phase 2: 执行循环（反思闭环）──
-        max_iterations = self._resolve_effective_max_iterations()
+        max_iterations_per_batch = self._resolve_effective_max_iterations()
+        max_iterations = (
+            max_iterations_per_batch * BENCHMARK_MAX_ITERATION_BATCHES
+            if self._is_benchmark_aggressive()
+            else max_iterations_per_batch
+        )
         all_results: list[list[str]] = []
         iteration = 0  # 在循环外声明，供 Phase 3 引用
 
         for iteration in range(1, max_iterations + 1):
-            renderer.console.print()
-            renderer.console.print(
-                f"[dim bold]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
+            if (
+                self._is_benchmark_aggressive()
+                and iteration > 1
+                and (iteration - 1) % max_iterations_per_batch == 0
+            ):
+                if not self._benchmark_should_continue_iteration_batches(
+                    source="four_pillar",
+                    completed_iterations=iteration - 1,
+                ):
+                    iteration -= 1
+                    break
+            batch_iteration = ((iteration - 1) % max_iterations_per_batch) + 1
+            batch_count = int(
+                self._runtime_context.get("_benchmark_iteration_batch_count", 1) or 1
             )
+            renderer.console.print()
+            if self._is_benchmark_aggressive():
+                renderer.console.print(
+                    f"[dim bold]⚡ 执行循环 第 {batch_iteration}/{max_iterations_per_batch} 轮"
+                    f"（第 {batch_count} 批，总第 {iteration} 轮）[/]"
+                )
+            else:
+                renderer.console.print(
+                    f"[dim bold]⚡ 执行循环 第 {iteration}/{max_iterations} 轮[/]"
+                )
             self._record_trace("iteration_start", detail=f"第 {iteration} 轮")
             if self._benchmark_stop_if_terminal("iteration_start"):
                 self._record_trace("iteration_done", detail=f"第 {iteration} 轮：Benchmark 已终止")
@@ -3652,7 +3832,13 @@ class FourPillarPipeline:
             self._record_trace("role_checker", detail=check[:500])
 
             # 9. 反思者审视 → 决定是否继续迭代
-            if iteration < max_iterations:
+            if (
+                iteration < max_iterations
+                and (
+                    not self._is_benchmark_aggressive()
+                    or batch_iteration < max_iterations_per_batch
+                )
+            ):
                 renderer.console.print("  [dim]⏳ 反思者 正在审视是否需要迭代...[/]")
                 self._record_role_progress(
                     "reflector",
@@ -3716,10 +3902,19 @@ class FourPillarPipeline:
                 )
                 self._record_trace("iteration_continue", detail=f"第 {iteration} 轮：继续迭代")
             else:
-                renderer.console.print(
-                    "  [dim]已达最大迭代次数，结束循环。[/]"
-                )
-                self._record_trace("iteration_done", detail=f"已达最大迭代次数")
+                if self._is_benchmark_aggressive() and batch_iteration >= max_iterations_per_batch:
+                    renderer.console.print(
+                        "  [dim]已达当前批次最大迭代次数，进入 Benchmark 续跑判断。[/]"
+                    )
+                    self._record_trace(
+                        "iteration_batch_done",
+                        detail=f"第 {batch_count} 批已达最大迭代次数",
+                    )
+                else:
+                    renderer.console.print(
+                        "  [dim]已达最大迭代次数，结束循环。[/]"
+                    )
+                    self._record_trace("iteration_done", detail=f"已达最大迭代次数")
 
         # ── Phase 3: 聚合输出 ──
         renderer.console.print()

@@ -975,6 +975,45 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["completed_scores"]["xben-006-24"], 200)
         self.assertNotIn("xben-001-24", state["active_containers"])
 
+    def test_benchmark_runtime_state_pretty_list_keeps_current_on_available_item(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        pretty = json.dumps(
+            [
+                {
+                    "unique_code": "xben-009-24",
+                    "is_completed": False,
+                    "difficulty": "easy",
+                    "container_status": "available",
+                    "container_addr": ["10.0.170.160:8000"],
+                },
+                {
+                    "unique_code": "xben-012-24",
+                    "is_completed": False,
+                    "difficulty": "easy",
+                    "container_status": "stopped",
+                    "container_addr": [],
+                },
+            ],
+            indent=2,
+        )
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges | "
+            "python3 -m json.tool\n"
+            "工作目录: /home/my/cyber/benchmark_test\n退出码: 0\n输出:\n"
+            f"{pretty}"
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["current_challenge"], "xben-009-24")
+        self.assertEqual(
+            state["active_containers"],
+            {"xben-009-24": ["10.0.170.160:8000"]},
+        )
+
     def test_benchmark_runtime_state_does_not_replace_snapshot_from_filtered_pipe(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -1176,9 +1215,35 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("submit", joined)
         self.assertIn("close", joined)
         self.assertIn("禁止调用 hint", joined)
+        self.assertIn("精确 host:port", joined)
         self.assertTrue(
             all(len(task["task_description"]) < 260 for task in subtasks)
         )
+
+    def test_benchmark_batch_boundary_continues_before_target(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["benchmark_target_score"] = 4000
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["completed_scores"] = {
+                "xben-005-24": 200,
+            }
+        with patch.object(
+            self.pipeline,
+            "_call_role_with_timeout",
+            return_value="继续\n目标未达，继续下一批。",
+        ) as call:
+            should_continue = self.pipeline._benchmark_should_continue_iteration_batches(
+                source="test",
+                completed_iterations=25,
+            )
+
+        self.assertTrue(should_continue)
+        self.assertEqual(
+            self.pipeline._runtime_context["_benchmark_iteration_batch_count"],
+            2,
+        )
+        self.assertTrue(call.called)
 
     def test_benchmark_stale_detector_switches_after_one_gap_round(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -1543,6 +1608,44 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("auto_solve.sh", decision.reason)
+
+    def test_benchmark_guard_blocks_wrong_active_container_port(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["active_containers"] = {
+                "xben-009-24": ["10.0.170.160:8000"],
+            }
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {
+                    "command": "curl http://10.0.170.160:80/",
+                },
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("10.0.170.160:8000", decision.reason)
+
+    def test_benchmark_guard_blocks_home_study_probe(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+        decision = handler(
+            MagicMock(),
+            {
+                "name": "run_shell_command",
+                "args": {"command": "ls /home/study/pwn2own"},
+            },
+        )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("/home/my/cyber/benchmark_test", decision.reason)
 
     def test_benchmark_guard_blocks_completed_challenge_restart(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
