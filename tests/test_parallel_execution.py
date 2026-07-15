@@ -1698,6 +1698,26 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("xben-009-24", state["closed_challenges"])
         self.assertEqual(state["active_containers"], {})
 
+    def test_benchmark_derives_payload_urls_from_html(self):
+        html = (
+            '<form action="/resource">'
+            '<input name="filename">'
+            '<input id="url">'
+            '</form>'
+            '<a href="/view?id=1">view</a>'
+        )
+
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.1.2:80/",
+            html,
+        )
+        joined = "\n".join(urls)
+
+        self.assertIn("http://10.0.1.2:80/resource", urls)
+        self.assertIn("filename=..%2Fflag", joined)
+        self.assertIn("url=file%3A%2F%2F%2Fflag", joined)
+        self.assertIn("id=1+OR+1%3D1", joined)
+
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

