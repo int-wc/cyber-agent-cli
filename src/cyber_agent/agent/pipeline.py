@@ -20,6 +20,7 @@ from __future__ import annotations
 import concurrent.futures
 from collections.abc import Callable
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re as _re_mod
@@ -501,6 +502,16 @@ class FourPillarPipeline:
             base_dir = Path.home() / ".cyber-agent-cli-benchmark"
         return base_dir / ".benchmark-state" / "shared.json"
 
+    def _benchmark_task_identity(self) -> str | None:
+        api_config = self._benchmark_api_config_from_workspace()
+        if api_config is None:
+            return None
+        base_url, token = api_config
+        workdir = Path("/home/my/cyber/benchmark_test")
+        vpn_names = ",".join(sorted(path.name for path in workdir.glob("*.ovpn")))
+        identity_input = f"{base_url}\n{token}\n{vpn_names}"
+        return hashlib.sha256(identity_input.encode("utf-8")).hexdigest()
+
     def _merge_benchmark_persisted_state(self, persisted: dict[str, Any]) -> None:
         """Merge safe-to-reuse Benchmark state into the current run.
 
@@ -548,6 +559,7 @@ class FourPillarPipeline:
         if not self._is_benchmark_aggressive():
             return
         candidates: list[Path] = []
+        current_identity = self._benchmark_task_identity()
         shared = self._benchmark_shared_state_path()
         if shared.exists():
             candidates.append(shared)
@@ -570,6 +582,22 @@ class FourPillarPipeline:
         for path in candidates:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                persisted_identity = (
+                    data.get("task_identity") if isinstance(data, dict) else None
+                )
+                if not current_identity or persisted_identity != current_identity:
+                    self._record_trace(
+                        "benchmark_state_skipped",
+                        detail=(
+                            f"跳过 Benchmark 状态 {path}：任务身份不匹配或为旧格式。"
+                        ),
+                        metadata={
+                            "path": str(path),
+                            "has_current_identity": bool(current_identity),
+                            "has_persisted_identity": bool(persisted_identity),
+                        },
+                    )
+                    continue
                 state = data.get("state") if isinstance(data, dict) else None
                 if isinstance(state, dict):
                     self._merge_benchmark_persisted_state(state)
@@ -595,6 +623,7 @@ class FourPillarPipeline:
                 "session_id": self._session_id
                 or str(self._runtime_context.get("session_id") or ""),
                 "updated_at": datetime.now().isoformat(),
+                "task_identity": self._benchmark_task_identity(),
                 "state": self._benchmark_state_snapshot(),
             }
             tmp_path = path.with_suffix(path.suffix + ".tmp")

@@ -2568,6 +2568,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 json.dumps(
                     {
                         "session_id": "shared",
+                        "task_identity": "task-a",
                         "state": {
                             "closed_challenges": ["a-05", "c-03"],
                             "completed_challenges": ["d-01"],
@@ -2589,7 +2590,12 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 renderer=self.pipeline._renderer,
             )
             pipeline._benchmark_profile_active = True
-            pipeline._load_benchmark_state()
+            with patch.object(
+                pipeline,
+                "_benchmark_task_identity",
+                return_value="task-a",
+            ):
+                pipeline._load_benchmark_state()
 
             state = pipeline._benchmark_state_snapshot()
             self.assertIn("a-05", state["closed_challenges"])
@@ -2623,6 +2629,88 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
 
             self.assertEqual(chosen["unique_code"], "c-06")
+
+    def test_benchmark_skips_shared_state_from_different_task_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir) / ".benchmark-state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "shared.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "shared",
+                        "task_identity": "old-task",
+                        "state": {
+                            "closed_challenges": ["a-05", "c-03"],
+                            "completed_challenges": ["d-01"],
+                            "completed_scores": {"d-01": 200},
+                            "api_interface": "enp0s20f0u3u4",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            pipeline = FourPillarPipeline(
+                runner=self.pipeline._runner,
+                runtime_context={
+                    "benchmark_profile": "aggressive",
+                    "session_base_dir": tmpdir,
+                    "session_id": "new-session",
+                },
+                renderer=self.pipeline._renderer,
+            )
+            pipeline._benchmark_profile_active = True
+
+            with patch.object(
+                pipeline,
+                "_benchmark_task_identity",
+                return_value="new-task",
+            ):
+                pipeline._load_benchmark_state()
+
+            state = pipeline._benchmark_state_snapshot()
+            self.assertNotIn("a-05", state["closed_challenges"])
+            self.assertNotIn("d-01", state["completed_challenges"])
+            self.assertEqual(state["completed_scores"], {})
+
+    def test_benchmark_skips_legacy_shared_state_without_task_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir) / ".benchmark-state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "shared.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "shared",
+                        "state": {
+                            "closed_challenges": ["a-05"],
+                            "completed_challenges": ["d-01"],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            pipeline = FourPillarPipeline(
+                runner=self.pipeline._runner,
+                runtime_context={
+                    "benchmark_profile": "aggressive",
+                    "session_base_dir": tmpdir,
+                    "session_id": "new-session",
+                },
+                renderer=self.pipeline._renderer,
+            )
+            pipeline._benchmark_profile_active = True
+
+            with patch.object(
+                pipeline,
+                "_benchmark_task_identity",
+                return_value="new-task",
+            ):
+                pipeline._load_benchmark_state()
+
+            state = pipeline._benchmark_state_snapshot()
+            self.assertEqual(state["closed_challenges"], [])
+            self.assertEqual(state["completed_challenges"], [])
 
     def test_benchmark_runtime_state_clears_active_on_finished(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
