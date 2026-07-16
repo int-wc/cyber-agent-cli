@@ -2654,6 +2654,45 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
         )
 
+    def test_benchmark_external_service_profile_extends_matching(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "unresolved": "reasoning",
+                                "reason": "custom service needs generic handoff",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profile = self.pipeline._benchmark_matching_service_probe_profile(
+                "HTTP/1.1 200 OK\n\nCustomSvc banner"
+            )
+            outputs = self.pipeline._benchmark_run_service_probe_profile(
+                "custom-01",
+                "http://10.0.1.2:8080/",
+                "CustomSvc banner",
+                profile,
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["fingerprint"], "customsvc")
+        self.assertEqual(outputs, [])
+        self.assertEqual(state["service_fingerprints"]["custom-01"], "customsvc")
+        self.assertIn("custom-01", state["reasoning_challenges"])
+
     def test_benchmark_handoff_followup_uses_custom_service_probe_profile(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2992,6 +3031,38 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIsNotNone(profile)
         self.assertEqual(profile["name"], "form-login-and-file-download")
 
+    def test_benchmark_external_webapp_profile_extends_matching(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "webapp_flow_profiles": [
+                            {
+                                "name": "custom-portal",
+                                "indicators": ["custom-login-widget"],
+                                "credentials": [
+                                    {"username": "operator", "password": "operator123"}
+                                ],
+                                "authenticated_paths": ["portal"],
+                                "handoff_paths": ["api/secret"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profile = self.pipeline._benchmark_matching_webapp_flow_profile(
+                "custom-login-widget".lower()
+            )
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["name"], "custom-portal")
+        self.assertIn(("operator", "operator123"), profile["credentials"])
+        self.assertIn("api/secret", profile["handoff_paths"])
+
     def test_benchmark_lfi_urls_follow_download_parameter_and_source_names(self):
         body = (
             "错误：缺少文件ID\n"
@@ -3022,6 +3093,37 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         )
         self.assertIn("init_config.txt", joined)
         self.assertIn("CONTRACT-2024-001.pdf", joined)
+
+    def test_benchmark_external_lfi_paths_extend_builtin_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps({"lfi_base_paths": ["../../../../opt/app/secret.txt"]}),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            paths = self.pipeline._benchmark_lfi_candidate_paths("")
+
+        self.assertIn("../../../../etc/passwd", paths)
+        self.assertIn("../../../../opt/app/secret.txt", paths)
+
+    def test_benchmark_invalid_external_profile_json_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text("{not-json", encoding="utf-8")
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profiles = self.pipeline._benchmark_service_probe_profiles()
+            web_profile = self.pipeline._benchmark_matching_webapp_flow_profile(
+                '<form><input name="password"></form>'.lower()
+            )
+
+        self.assertEqual(
+            [profile["fingerprint"] for profile in profiles],
+            ["hugegraph", "dify", "langflow"],
+        )
+        self.assertIsNotNone(web_profile)
 
     def test_benchmark_reasoning_handoff_replaces_setup_like_plan(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

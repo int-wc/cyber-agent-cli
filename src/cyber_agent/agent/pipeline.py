@@ -1068,6 +1068,97 @@ class FourPillarPipeline:
             interface = self._benchmark_state.get("tun_interface")
         return str(interface or "tun0")
 
+    @staticmethod
+    def _benchmark_workspace_path() -> Path:
+        return Path("/home/my/cyber/benchmark_test")
+
+    def _benchmark_external_profiles_path(self) -> Path:
+        raw_path = self._runtime_context.get("benchmark_profiles_path")
+        if raw_path:
+            return Path(str(raw_path)).expanduser()
+        return self._benchmark_workspace_path() / "benchmark-profiles.json"
+
+    def _benchmark_external_profiles(self) -> dict[str, Any]:
+        path = self._benchmark_external_profiles_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _benchmark_string_tuple(value: Any, *, limit: int = 80) -> tuple[str, ...]:
+        if isinstance(value, str):
+            items: list[Any] = [value]
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            return ()
+        result: list[str] = []
+        for item in items[:limit]:
+            if not isinstance(item, str):
+                continue
+            cleaned = item.strip()
+            if cleaned:
+                result.append(cleaned)
+        return tuple(dict.fromkeys(result))
+
+    @staticmethod
+    def _benchmark_string_pair_tuple(
+        value: Any,
+        *,
+        limit: int = 20,
+    ) -> tuple[tuple[str, str], ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        pairs: list[tuple[str, str]] = []
+        for item in list(value)[:limit]:
+            username = password = ""
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                username, password = str(item[0]).strip(), str(item[1]).strip()
+            elif isinstance(item, dict):
+                username = str(item.get("username") or item.get("user") or "").strip()
+                password = str(item.get("password") or item.get("pass") or "").strip()
+            if username and password:
+                pairs.append((username, password))
+        return tuple(dict.fromkeys(pairs))
+
+    @staticmethod
+    def _benchmark_match_any_all_tuple(value: Any) -> tuple[tuple[str, ...], ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        groups: list[tuple[str, ...]] = []
+        for group in list(value)[:40]:
+            normalized = FourPillarPipeline._benchmark_string_tuple(group, limit=20)
+            if normalized:
+                groups.append(normalized)
+        return tuple(groups)
+
+    @staticmethod
+    def _benchmark_merge_profiles_by_key(
+        builtin: list[dict[str, Any]],
+        external: list[dict[str, Any]],
+        key: str,
+    ) -> list[dict[str, Any]]:
+        result = [dict(profile) for profile in builtin]
+        index = {
+            str(profile.get(key)): offset
+            for offset, profile in enumerate(result)
+            if profile.get(key)
+        }
+        for profile in external:
+            profile_key = str(profile.get(key) or "")
+            if not profile_key:
+                continue
+            if profile_key in index:
+                merged = dict(result[index[profile_key]])
+                merged.update(profile)
+                result[index[profile_key]] = merged
+            else:
+                index[profile_key] = len(result)
+                result.append(dict(profile))
+        return result
+
     def _benchmark_platform_request(
         self,
         *,
@@ -1695,7 +1786,7 @@ class FourPillarPipeline:
                 outputs.append(raw_output)
         return "\n".join(outputs)
 
-    def _benchmark_service_probe_profiles(self) -> list[dict[str, Any]]:
+    def _benchmark_builtin_service_probe_profiles(self) -> list[dict[str, Any]]:
         return [
             {
                 "fingerprint": "hugegraph",
@@ -1748,6 +1839,65 @@ class FourPillarPipeline:
                 "reason": "Langflow bounded validate/code 探测未发现可提交 flag",
             },
         ]
+
+    def _benchmark_service_probe_registry(self) -> dict[str, Any]:
+        return {
+            "dify": self._benchmark_probe_dify_local,
+            "hugegraph": self._benchmark_probe_hugegraph_local,
+            "langflow": lambda code, base, _evidence: self._benchmark_probe_langflow_local(
+                code,
+                base,
+            ),
+        }
+
+    def _benchmark_normalize_service_probe_profile(
+        self,
+        raw: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        fingerprint = str(raw.get("fingerprint") or "").strip().lower()
+        if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", fingerprint):
+            return None
+        profile: dict[str, Any] = {"fingerprint": fingerprint}
+        for key in ("match_all", "match_any"):
+            values = self._benchmark_string_tuple(raw.get(key))
+            if values:
+                profile[key] = values
+        any_all = self._benchmark_match_any_all_tuple(raw.get("match_any_all"))
+        if any_all:
+            profile["match_any_all"] = any_all
+        unresolved = str(raw.get("unresolved") or "reasoning").strip().lower()
+        profile["unresolved"] = unresolved if unresolved in {"reasoning", "abandoned"} else "reasoning"
+        reason = str(raw.get("reason") or "").strip()
+        if reason:
+            profile["reason"] = reason[:500]
+        probe_key = str(raw.get("probe_key") or "").strip().lower()
+        probe = self._benchmark_service_probe_registry().get(probe_key)
+        if callable(probe):
+            profile["probe"] = probe
+        if not any(key in profile for key in ("match_all", "match_any", "match_any_all")):
+            return None
+        return profile
+
+    def _benchmark_external_service_probe_profiles(self) -> list[dict[str, Any]]:
+        data = self._benchmark_external_profiles()
+        raw_profiles = data.get("service_probe_profiles", data.get("service_profiles", []))
+        if not isinstance(raw_profiles, list):
+            return []
+        profiles: list[dict[str, Any]] = []
+        for raw in raw_profiles[:40]:
+            profile = self._benchmark_normalize_service_probe_profile(raw)
+            if profile is not None:
+                profiles.append(profile)
+        return profiles
+
+    def _benchmark_service_probe_profiles(self) -> list[dict[str, Any]]:
+        return self._benchmark_merge_profiles_by_key(
+            self._benchmark_builtin_service_probe_profiles(),
+            self._benchmark_external_service_probe_profiles(),
+            "fingerprint",
+        )
 
     @staticmethod
     def _benchmark_text_matches_profile(
@@ -2420,19 +2570,29 @@ class FourPillarPipeline:
                 pass
         return "\n".join(outputs)
 
-    @classmethod
     def _benchmark_matching_webapp_flow_profile(
-        cls,
+        self,
         lowered_probe: str,
     ) -> dict[str, Any] | None:
-        for profile in cls._benchmark_webapp_flow_profiles():
+        best_profile: dict[str, Any] | None = None
+        best_score = -1
+        for profile in self._benchmark_webapp_flow_profiles():
             indicators = profile.get("indicators") or ()
-            if any(str(marker).lower() in lowered_probe for marker in indicators):
-                return profile
-        return None
+            matched_lengths = [
+                len(marker)
+                for marker in (str(marker).lower() for marker in indicators)
+                if marker and marker in lowered_probe
+            ]
+            if not matched_lengths:
+                continue
+            score = max(matched_lengths)
+            if score > best_score:
+                best_score = score
+                best_profile = profile
+        return best_profile
 
     @staticmethod
-    def _benchmark_webapp_flow_profiles() -> list[dict[str, Any]]:
+    def _benchmark_builtin_webapp_flow_profiles() -> list[dict[str, Any]]:
         return [
             {
                 "name": "form-login-and-file-download",
@@ -2479,6 +2639,52 @@ class FourPillarPipeline:
             }
         ]
 
+    def _benchmark_normalize_webapp_flow_profile(
+        self,
+        raw: Any,
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        name = str(raw.get("name") or "").strip().lower()
+        if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", name):
+            return None
+        profile: dict[str, Any] = {"name": name}
+        indicators = self._benchmark_string_tuple(raw.get("indicators"))
+        if indicators:
+            profile["indicators"] = indicators
+        credentials = self._benchmark_string_pair_tuple(raw.get("credentials"))
+        if credentials:
+            profile["credentials"] = credentials
+        for key in ("authenticated_paths", "handoff_paths"):
+            values = self._benchmark_string_tuple(raw.get(key), limit=120)
+            if values:
+                profile[key] = values
+        if not any(
+            key in profile
+            for key in ("indicators", "credentials", "authenticated_paths", "handoff_paths")
+        ):
+            return None
+        return profile
+
+    def _benchmark_external_webapp_flow_profiles(self) -> list[dict[str, Any]]:
+        data = self._benchmark_external_profiles()
+        raw_profiles = data.get("webapp_flow_profiles", data.get("webapp_profiles", []))
+        if not isinstance(raw_profiles, list):
+            return []
+        profiles: list[dict[str, Any]] = []
+        for raw in raw_profiles[:40]:
+            profile = self._benchmark_normalize_webapp_flow_profile(raw)
+            if profile is not None:
+                profiles.append(profile)
+        return profiles
+
+    def _benchmark_webapp_flow_profiles(self) -> list[dict[str, Any]]:
+        return self._benchmark_merge_profiles_by_key(
+            self._benchmark_builtin_webapp_flow_profiles(),
+            self._benchmark_external_webapp_flow_profiles(),
+            "name",
+        )
+
     @staticmethod
     def _benchmark_extract_demo_credentials(text: str) -> list[tuple[str, str]]:
         credentials: list[tuple[str, str]] = []
@@ -2515,9 +2721,8 @@ class FourPillarPipeline:
             "hidden",
         }
 
-    @staticmethod
-    def _benchmark_default_web_credentials() -> list[tuple[str, str]]:
-        profile = FourPillarPipeline._benchmark_webapp_flow_profiles()[0]
+    def _benchmark_default_web_credentials(self) -> list[tuple[str, str]]:
+        profile = self._benchmark_webapp_flow_profiles()[0]
         return list(profile["credentials"])
 
     def _benchmark_login_url_from_probe(self, base: str, probe: str) -> str:
@@ -2662,7 +2867,7 @@ class FourPillarPipeline:
         return urls[:80]
 
     @staticmethod
-    def _benchmark_lfi_base_paths() -> list[str]:
+    def _benchmark_builtin_lfi_base_paths() -> list[str]:
         return [
             "../../../../etc/passwd",
             "../../../../challenge/flag.txt",
@@ -2688,6 +2893,19 @@ class FourPillarPipeline:
             "../../../../proc/self/environ",
         ]
 
+    def _benchmark_lfi_base_paths(self) -> list[str]:
+        data = self._benchmark_external_profiles()
+        external_paths = self._benchmark_string_tuple(
+            data.get("lfi_base_paths", data.get("lfi_paths", ())),
+            limit=120,
+        )
+        return list(
+            dict.fromkeys(
+                self._benchmark_builtin_lfi_base_paths()
+                + list(external_paths)
+            )
+        )
+
     @staticmethod
     def _benchmark_lfi_discovered_paths(text: str) -> list[str]:
         discovered: list[str] = []
@@ -2699,12 +2917,11 @@ class FourPillarPipeline:
                 discovered.append(f"../../../../var/www/html/contracts/{raw}{suffix}")
         return discovered
 
-    @classmethod
-    def _benchmark_lfi_candidate_paths(cls, text: str) -> list[str]:
+    def _benchmark_lfi_candidate_paths(self, text: str) -> list[str]:
         return list(
             dict.fromkeys(
-                cls._benchmark_lfi_base_paths()
-                + cls._benchmark_lfi_discovered_paths(text)
+                self._benchmark_lfi_base_paths()
+                + self._benchmark_lfi_discovered_paths(text)
             )
         )[:80]
 
