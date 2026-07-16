@@ -3660,6 +3660,46 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(profiles["customsvc"]["label"], "CustomSvc")
         self.assertEqual(detected, ("customsvc", "exploit"))
 
+    def test_benchmark_external_service_action_without_probe_uses_generic_followup(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "custom-01"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "custom-01": ["10.0.1.2:9000"],
+            }
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_service_action_profiles",
+            return_value={
+                "customsvc": {
+                    "label": "CustomSvc",
+                    "actions": {
+                        "exploit": {
+                            "abandon_reason": "custom exploit bounded no flag",
+                            "summary": "{code} custom exploit complete",
+                        }
+                    },
+                }
+            },
+        ), patch.object(
+            self.pipeline,
+            "_benchmark_probe_handoff_followup_local",
+            return_value="## handoff-followup http://10.0.1.2:9000/\nHTTP/1.1 200 OK",
+        ) as followup:
+            result = self.pipeline._benchmark_run_service_action_step(
+                "customsvc",
+                "exploit",
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        followup.assert_called_once_with("custom-01", ["10.0.1.2:9000"])
+        self.assertIn("custom-01 custom exploit complete", result)
+        self.assertIn("handoff-followup", result)
+        self.assertIn("custom-01", state["abandoned_challenges"])
+        self.assertEqual(state["service_fingerprints"]["custom-01"], "customsvc")
+
     def test_benchmark_service_action_detection_accepts_custom_profile_key(self):
         with patch.object(
             self.pipeline,

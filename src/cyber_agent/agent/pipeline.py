@@ -3778,7 +3778,10 @@ class FourPillarPipeline:
         base = f"http://{addr}/"
         self._benchmark_set_service_fingerprint(code, fingerprint)
         probe_func = profile.get("probe")
-        probe = str(probe_func(code, base, "")) if callable(probe_func) else ""
+        if callable(probe_func):
+            probe = str(probe_func(code, base, ""))
+        else:
+            probe = self._benchmark_probe_handoff_followup_local(code, addrs)
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
         if code in completed:
