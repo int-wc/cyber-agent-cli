@@ -485,12 +485,12 @@ class FourPillarPipeline(
                 "pipeline.trace_saved",
                 {"trace_file": str(trace_file), "event_count": len(self._trace)},
             )
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             from ..logging import log_error
             log_error("trace", f"保存执行轨迹失败：{exc}")
 
     def _benchmark_state_path(self) -> Path:
-        """Return the checkpoint path for the current Benchmark run."""
+        """返回当前 Benchmark 运行的检查点路径。"""
         raw_base_dir = self._runtime_context.get("session_base_dir")
         if raw_base_dir:
             base_dir = Path(str(raw_base_dir)).expanduser()
@@ -503,7 +503,7 @@ class FourPillarPipeline(
         return base_dir / ".benchmark-state" / f"{safe_session_id}.json"
 
     def _benchmark_shared_state_path(self) -> Path:
-        """Return the cross-session Benchmark checkpoint path."""
+        """返回跨会话复用的 Benchmark 检查点路径。"""
         raw_base_dir = self._runtime_context.get("session_base_dir")
         if raw_base_dir:
             base_dir = Path(str(raw_base_dir)).expanduser()
@@ -522,10 +522,9 @@ class FourPillarPipeline(
         return hashlib.sha256(identity_input.encode("utf-8")).hexdigest()
 
     def _merge_benchmark_persisted_state(self, persisted: dict[str, Any]) -> None:
-        """Merge safe-to-reuse Benchmark state into the current run.
+        """把可安全复用的 Benchmark 状态合并到当前运行中。
 
-        Active containers and current challenge are intentionally not restored:
-        they must be refreshed from the platform API for the current process.
+        活跃容器和当前题目不从磁盘恢复，必须由当前进程从平台 API 重新刷新。
         """
         if not persisted:
             return
@@ -566,7 +565,7 @@ class FourPillarPipeline(
                 self._benchmark_state["vpn_connected"] = True
 
     def _load_benchmark_state(self) -> None:
-        """Load shared Benchmark checkpoint so new sessions do not retread closed tasks."""
+        """加载共享 Benchmark 检查点，避免新会话重复处理已关闭题目。"""
         if not self._is_benchmark_aggressive():
             return
         candidates: list[Path] = []
@@ -612,7 +611,7 @@ class FourPillarPipeline(
                 state = data.get("state") if isinstance(data, dict) else None
                 if isinstance(state, dict):
                     self._merge_benchmark_persisted_state(state)
-            except Exception as exc:
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
                 from ..logging import log_error
                 log_error("benchmark", f"加载 Benchmark 状态失败 {path}: {exc}")
         if candidates:
@@ -624,7 +623,7 @@ class FourPillarPipeline(
             )
 
     def _persist_benchmark_state(self) -> None:
-        """Persist a sanitized Benchmark checkpoint for summaries and recovery."""
+        """持久化清洗后的 Benchmark 检查点，供总结与恢复使用。"""
         if not self._is_benchmark_aggressive():
             return
         try:
@@ -654,7 +653,7 @@ class FourPillarPipeline(
             )
             shared_tmp.replace(shared_path)
             self._runtime_context["benchmark_state_file"] = str(path)
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             from ..logging import log_error
             log_error("benchmark", f"保存 Benchmark 状态失败：{exc}")
 
@@ -665,7 +664,7 @@ class FourPillarPipeline(
             if not trace_file.exists():
                 return None
             return json.loads(trace_file.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return None
 
     # ── 超时与熔断 ──
@@ -781,7 +780,7 @@ class FourPillarPipeline(
         return codes[0] if codes else None
 
     def _benchmark_tool_guard(self, tool_call: dict) -> str | None:
-        """Block Benchmark actions that are known to waste time or corrupt state."""
+        """阻止已知会浪费时间或破坏状态的 Benchmark 动作。"""
         if not self._is_benchmark_aggressive():
             return None
 
@@ -1058,7 +1057,7 @@ class FourPillarPipeline(
         return None
 
     def _benchmark_api_config_from_workspace(self) -> tuple[str, str] | None:
-        """Read Benchmark API base URL and token from the current benchmark workspace."""
+        """从当前 Benchmark 工作区读取 API 基址与令牌。"""
         workdir = Path("/home/my/cyber/benchmark_test")
         doc = workdir / "CHALLENGES_API.md"
         try:
@@ -1118,11 +1117,10 @@ class FourPillarPipeline(
         return benchmark_profile_utils.selection_policy(self._benchmark_external_profiles())
 
     def _benchmark_execution_control_policy(self) -> dict[str, Any]:
-        """Runtime breadth controls for benchmark scheduling and probing.
+        """返回 Benchmark 调度与探测的运行期宽度控制。
 
-        Profiles may provide reusable numeric budgets, while runtime context can
-        override them for a specific run. This keeps profiles as policy/data
-        rather than fixed solve plans.
+        配置档提供可复用的数值预算，运行上下文可针对单次运行覆盖，
+        以便让配置档保持为策略数据而不是固定解题计划。
         """
         return benchmark_profile_utils.execution_control_policy(
             self._benchmark_external_profiles(),
@@ -1451,7 +1449,7 @@ class FourPillarPipeline(
         self,
         challenges: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        """Select the next Benchmark challenge without locking formal eval to easy only."""
+        """选择下一道 Benchmark 题目，正式评测不再锁定为 easy。"""
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
@@ -1536,7 +1534,7 @@ class FourPillarPipeline(
         self,
         challenges: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        """Backward-compatible easy-only selector used by legacy tests and recovery."""
+        """供旧测试与恢复流程使用的 easy-only 兼容选择器。"""
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
             closed = set(self._benchmark_state.get("closed_challenges", set()))
@@ -1843,7 +1841,7 @@ class FourPillarPipeline(
         self,
         challenges: list[dict[str, Any]],
     ) -> list[str]:
-        """Close completed containers that still consume active slots."""
+        """关闭已完成但仍占用活跃槽位的容器。"""
         with self._benchmark_state_lock:
             closed = set(self._benchmark_state.get("closed_challenges", set()))
         results: list[str] = []
@@ -3020,7 +3018,7 @@ class FourPillarPipeline(
         return directive
 
     def _update_benchmark_stale_state(self, round_results: list[str]) -> str:
-        """Return a forced directive when a Benchmark challenge should be abandoned."""
+        """当 Benchmark 题目需要放弃时返回强制指令。"""
         if not self._is_benchmark_aggressive():
             return ""
 
@@ -3371,7 +3369,7 @@ class FourPillarPipeline(
             self._save_trace()
 
     def _run_benchmark_fast_phases(self, user_input: str) -> bool:
-        """Run Benchmark aggressive as a policy-driven score-first loop."""
+        """以策略驱动的优先得分循环运行 Benchmark aggressive。"""
         renderer = self._renderer
         renderer.console.print()
         renderer.console.print("[dim bold]🏁 Benchmark aggressive fast path[/]")

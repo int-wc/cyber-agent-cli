@@ -656,9 +656,9 @@ if TEXTUAL_IMPORT_ERROR is None:
             if len(recent) > 50:
                 recent.pop(0)
 
-            from .app import (
+            from .app import capture_builtin_command_renderables
+            from .session_runtime import (
                 append_runtime_session_event,
-                capture_builtin_command_renderables,
                 persist_runtime_session,
             )
 
@@ -693,8 +693,8 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         @work(thread=True)
         def _run_agent(self, user_input: str) -> None:
-            from .app import (
-                create_approval_handler,
+            from .app import create_approval_handler
+            from .session_runtime import (
                 create_persisting_event_handler,
                 persist_runtime_session,
             )
@@ -1255,7 +1255,7 @@ if TEXTUAL_IMPORT_ERROR is None:
 
         def action_quit_app(self) -> None:
             """退出整个程序（Ctrl+Q），保存当前会话。"""
-            from .app import persist_runtime_session
+            from .session_runtime import persist_runtime_session
             try:
                 persist_runtime_session(self.runner, self.runtime_context)
             except Exception:
@@ -1292,7 +1292,7 @@ def launch_textual_chat(
         app.run()
     finally:
         # 异常退出（终端关闭、SIGINT 等）时兜底保存当前会话
-        from .app import persist_runtime_session
+        from .session_runtime import persist_runtime_session
         try:
             persist_runtime_session(runner, runtime_context)
         except Exception:

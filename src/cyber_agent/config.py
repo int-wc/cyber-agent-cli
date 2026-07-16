@@ -398,7 +398,7 @@ class Settings(BaseSettings):
     def resolve_proxy_url(self, service_name: str | None = None) -> str | None:
         """解析模型客户端代理地址。
 
-        优先级：服务商专属代理 > MODEL_PROXY_URL。默认不设置代理，避免仓库内固化私有网络地址。
+        优先级：服务商专属代理 > MODEL_PROXY_URL。仓库模板不固化私有网络地址。
         """
         normalized_service = self.normalize_service_name(service_name)
         service_proxies: dict[str, str | None] = {
@@ -408,6 +408,17 @@ class Settings(BaseSettings):
         if specific_proxy:
             return specific_proxy
         return self.normalize_proxy_url(self.model_proxy_url)
+
+    def require_proxy_url(self, service_name: str | None = None) -> str:
+        """返回服务商代理地址；强制代理服务缺失配置时直接失败。"""
+        normalized_service = self.normalize_service_name(service_name)
+        resolved_proxy_url = self.resolve_proxy_url(normalized_service)
+        if resolved_proxy_url:
+            return resolved_proxy_url
+        raise ValueError(
+            f"服务商 {normalized_service} 必须配置代理。"
+            f" 请设置 {normalized_service.upper()}_PROXY_URL 或 MODEL_PROXY_URL。"
+        )
 
     def get_default_headers(
         self,
@@ -459,7 +470,11 @@ class Settings(BaseSettings):
             "temperature": 0.7,
             "extra_body": extra_body,
         }
-        resolved_proxy_url = self.resolve_proxy_url(resolved_service_name)
+        resolved_proxy_url = (
+            self.require_proxy_url(resolved_service_name)
+            if resolved_service_name == "opencode"
+            else self.resolve_proxy_url(resolved_service_name)
+        )
         if resolved_proxy_url:
             kwargs["openai_proxy"] = resolved_proxy_url
         default_headers = self.get_default_headers(
@@ -536,9 +551,7 @@ class Settings(BaseSettings):
                     "temperature": 0.7,
                     "extra_body": {"provider": "opencode"},
                 }
-                resolved_proxy_url = self.resolve_proxy_url("opencode")
-                if resolved_proxy_url:
-                    candidate["openai_proxy"] = resolved_proxy_url
+                candidate["openai_proxy"] = self.require_proxy_url("opencode")
                 fallback_kwargs.append(
                     {item_key: value for item_key, value in candidate.items() if value is not None}
                 )
@@ -575,9 +588,7 @@ class Settings(BaseSettings):
                     "temperature": 0.7,
                     "extra_body": {"provider": "opencode"},
                 }
-                resolved_proxy_url = self.resolve_proxy_url("opencode")
-                if resolved_proxy_url:
-                    candidate["openai_proxy"] = resolved_proxy_url
+                candidate["openai_proxy"] = self.require_proxy_url("opencode")
                 fallback_kwargs.append(
                     {item_key: value for item_key, value in candidate.items() if value is not None}
                 )

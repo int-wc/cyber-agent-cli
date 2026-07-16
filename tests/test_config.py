@@ -223,6 +223,20 @@ class SettingsTestCase(unittest.TestCase):
 
         self.assertEqual(kwargs["openai_proxy"], "socks5://proxy.example:7892")
 
+    def test_opencode_requires_proxy(self) -> None:
+        """
+        测试：OpenCode 必须显式配置代理，避免运行时静默直连。
+        """
+        with temporary_config_env(
+            GATEWAY_DEFAULT_SERVICE="opencode",
+            OPENCODE_API_KEY="opencode-key",
+        ):
+            config_module = import_config_module()
+            settings = config_module.Settings(_env_file=None)
+
+        with self.assertRaisesRegex(ValueError, "必须配置代理"):
+            settings.get_chat_openai_kwargs(settings.get_service())
+
     def test_opencode_proxy_does_not_leak_to_other_services(self) -> None:
         """
         测试：OpenCode 专属代理不会影响其他服务商。
@@ -248,6 +262,7 @@ class SettingsTestCase(unittest.TestCase):
             GATEWAY_DEFAULT_MODEL_OPENCODE="custom-opencode-model",
             OPENCODE_API_KEY="opencode-key",
             OPENCODE_MODEL="deepseek-v4-flash-free",
+            OPENCODE_PROXY_URL="http://proxy.example:7892",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
@@ -339,6 +354,7 @@ class SettingsTestCase(unittest.TestCase):
             OPENCODE_API_KEY="opencode-key",
             OPENCODE_BASE_URL="https://opencode.ai/zen/v1",
             OPENCODE_MODEL="deepseek-v4-flash-free",
+            OPENCODE_PROXY_URL="http://proxy.example:7892",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)

@@ -1,27 +1,39 @@
-import editorWorker from "monaco-editor/esm/vs/editor/editor.worker.js?worker";
-import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker.js?worker";
-import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker.js?worker";
-import cssWorker from "monaco-editor/esm/vs/language/css/css.worker.js?worker";
-import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker.js?worker";
+type MonacoWorkerModule = {
+  default: new () => Worker;
+};
+
+function loadWorker(loader: () => Promise<MonacoWorkerModule>): Promise<Worker> {
+  return loader().then(({ default: WorkerCtor }) => new WorkerCtor());
+}
 
 self.MonacoEnvironment = {
-  getWorker(_workerId: string, label: string): Worker {
+  getWorker(_workerId: string, label: string): Promise<Worker> {
     switch (label) {
       case "typescript":
       case "javascript":
-        return new tsWorker();
+        return loadWorker(() =>
+          import("monaco-editor/esm/vs/language/typescript/ts.worker.js?worker")
+        );
       case "json":
-        return new jsonWorker();
+        return loadWorker(() =>
+          import("monaco-editor/esm/vs/language/json/json.worker.js?worker")
+        );
       case "css":
       case "scss":
       case "less":
-        return new cssWorker();
+        return loadWorker(() =>
+          import("monaco-editor/esm/vs/language/css/css.worker.js?worker")
+        );
       case "html":
       case "handlebars":
       case "razor":
-        return new htmlWorker();
+        return loadWorker(() =>
+          import("monaco-editor/esm/vs/language/html/html.worker.js?worker")
+        );
       default:
-        return new editorWorker();
+        return loadWorker(() =>
+          import("monaco-editor/esm/vs/editor/editor.worker.js?worker")
+        );
     }
   },
 };

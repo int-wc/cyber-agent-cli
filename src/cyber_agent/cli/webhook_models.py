@@ -1,8 +1,6 @@
 """Webhook 数据模型、常量和异常类。从 webhook.py 拆分以便维护。"""
 from __future__ import annotations
 
-from __future__ import annotations
-
 import base64
 import hashlib
 import hmac
@@ -234,5 +232,4 @@ class WebhookDeliveryError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.response_text = response_text
-
 

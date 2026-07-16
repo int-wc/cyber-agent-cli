@@ -69,9 +69,10 @@ function ensureMonacoLoaded(): Promise<void> {
   if (monacoReady) return Promise.resolve();
   if (!monacoPromise) {
     monacoPromise = Promise.all([
+      import("../../editor/monacoSetup"),
       import("@monaco-editor/react"),
-      import("monaco-editor"),
-    ]).then(([reactMonaco, monaco]) => {
+      import("monaco-editor/esm/vs/editor/editor.api"),
+    ]).then(([, reactMonaco, monaco]) => {
       reactMonaco.loader.config({ monaco });
       monacoReady = true;
     });

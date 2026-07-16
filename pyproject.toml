@@ -39,6 +39,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# 仅过滤 Python 3.14 下第三方兼容层的已知告警，项目自身告警仍需暴露。
+filterwarnings = [
+    "ignore:.*pydantic.v1.*:UserWarning:langchain.*",
+    "ignore:.*allowed_objects.*:langchain_core._api.deprecation.LangChainPendingDeprecationWarning",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]

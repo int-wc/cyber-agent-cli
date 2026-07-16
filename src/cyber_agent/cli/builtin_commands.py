@@ -119,7 +119,7 @@ def _handle_context(
     raw_input: str,
 ) -> bool | None:
     if len(tokens) >= 2 and tokens[1] == "clear":
-        from .app import start_fresh_visible_runtime_session
+        from .session_runtime import start_fresh_visible_runtime_session
         runner.reset()
         start_fresh_visible_runtime_session(runtime_context)
         cli_renderer.clear_screen()
@@ -417,7 +417,7 @@ def _handle_clear(
     tokens: list[str],
     raw_input: str,
 ) -> bool | None:
-    from .app import start_fresh_visible_runtime_session
+    from .session_runtime import start_fresh_visible_runtime_session
     runner.reset()
     start_fresh_visible_runtime_session(runtime_context)
     cli_renderer.clear_screen()
@@ -432,7 +432,8 @@ def _handle_mode(
     tokens: list[str],
     raw_input: str,
 ) -> bool | None:
-    from .app import start_new_runtime_session, sync_runtime_context_from_runner
+    from .app import sync_runtime_context_from_runner
+    from .session_runtime import start_new_runtime_session
 
     if len(tokens) < 2:
         cli_renderer.print_mode_notice(runner.mode, switched=False)
@@ -630,12 +631,14 @@ def _handle_session(
     """查看/管理多会话：list、load、new、show。"""
     from .app import (
         load_history_session_into_runner,
-        persist_runtime_session,
         print_history_list,
         show_history_session,
-        start_fresh_visible_runtime_session,
         sync_runtime_context_from_runner,
+    )
+    from .session_runtime import (
         _load_session_store_support,
+        persist_runtime_session,
+        start_fresh_visible_runtime_session,
     )
 
     sub = tokens[1] if len(tokens) >= 2 else ""

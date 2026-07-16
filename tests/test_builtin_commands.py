@@ -60,7 +60,7 @@ class BuiltinCommandRegistryTestCase(unittest.TestCase):
         clear_checkpoint = MagicMock()
 
         with patch(
-            "cyber_agent.cli.app._load_session_store_support",
+            "cyber_agent.cli.session_runtime._load_session_store_support",
             return_value={"clear_interrupt_checkpoint": clear_checkpoint},
         ):
             result = dispatch_builtin_command(
@@ -86,7 +86,7 @@ class BuiltinCommandRegistryTestCase(unittest.TestCase):
         clear_checkpoint = MagicMock()
 
         with patch(
-            "cyber_agent.cli.app._load_session_store_support",
+            "cyber_agent.cli.session_runtime._load_session_store_support",
             return_value={"clear_interrupt_checkpoint": clear_checkpoint},
         ):
             result = dispatch_builtin_command(
@@ -112,7 +112,7 @@ class BuiltinCommandRegistryTestCase(unittest.TestCase):
         clear_checkpoint = MagicMock()
 
         with patch(
-            "cyber_agent.cli.app._load_session_store_support",
+            "cyber_agent.cli.session_runtime._load_session_store_support",
             return_value={"clear_interrupt_checkpoint": clear_checkpoint},
         ):
             result = dispatch_builtin_command(
