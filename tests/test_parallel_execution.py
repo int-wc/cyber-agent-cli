@@ -2791,6 +2791,54 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.1.2/debug/status?token=1", urls)
         self.assertIn("token=..%2F..%2F..%2F..%2Frun%2Fsecrets%2Ftoken", joined)
 
+    def test_benchmark_derivation_learns_runtime_paths_and_params(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        html = """
+        <form action="/exports/download?file=report.csv">
+          <input name="artifact_id" value="42">
+        </form>
+        {"debug_url":"/internal/status","schema":{"properties":{"token":{"example":"demo"}}}}
+        """
+
+        with patch.object(self.pipeline, "_persist_benchmark_state") as persist:
+            urls = self.pipeline._benchmark_derive_probe_urls(
+                "http://10.0.180.232:8000/",
+                html,
+            )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("exports/download?file=report.csv", state["observed_probe_paths"])
+        self.assertIn("internal/status", state["observed_probe_paths"])
+        self.assertIn("artifact_id", state["observed_param_names"])
+        self.assertIn("token", state["observed_param_names"])
+        self.assertIn(
+            "http://10.0.180.232:8000/internal/status",
+            urls,
+        )
+        persist.assert_called()
+
+    def test_benchmark_probe_paths_reuse_runtime_observations(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["observed_probe_paths"] = {
+                "internal/status",
+                "exports/download?file=report.csv",
+            }
+            self.pipeline._benchmark_state["observed_param_names"] = {"token"}
+
+        paths = self.pipeline._benchmark_probe_paths()
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.180.232:8000/",
+            "<html><title>next page</title></html>",
+        )
+        joined = "\n".join(urls)
+
+        self.assertLess(paths.index("internal/status"), len(paths))
+        self.assertIn("exports/download?file=report.csv", paths)
+        self.assertIn("token=", joined)
+
     def test_benchmark_profile_can_disable_builtin_candidate_sections(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profile_path = Path(tmpdir) / "benchmark-profiles.json"

@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import concurrent.futures
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 import hashlib
 import json
@@ -186,6 +186,8 @@ class FourPillarPipeline:
             "recovery_attempted_challenges": set(),
             "reasoning_challenges": set(),
             "service_fingerprints": {},
+            "observed_probe_paths": set(),
+            "observed_param_names": set(),
             "probe_unreachable_streaks": {},
             "auto_submitted_flags": set(),
             "last_score": None,
@@ -527,6 +529,8 @@ class FourPillarPipeline:
                 "abandoned_challenges",
                 "recovery_attempted_challenges",
                 "auto_submitted_flags",
+                "observed_probe_paths",
+                "observed_param_names",
             ):
                 merged = set(self._benchmark_state.get(key, set()))
                 raw_value = persisted.get(key)
@@ -2259,13 +2263,81 @@ class FourPillarPipeline:
     def _benchmark_probe_paths(self) -> list[str]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("probe_paths"), limit=160)
+        with self._benchmark_state_lock:
+            observed = sorted(
+                str(item)
+                for item in self._benchmark_state.get("observed_probe_paths", set())
+                if item
+            )
         builtin = (
             self._benchmark_builtin_probe_paths()
             if self._benchmark_builtin_section_enabled("probe_paths")
             else []
         )
-        paths = list(dict.fromkeys(builtin + list(external)))
+        paths = list(dict.fromkeys(builtin + observed + list(external)))
         return paths[: self._benchmark_control_int("max_probe_paths")]
+
+    @staticmethod
+    def _benchmark_safe_observed_probe_path(base: str, url: str) -> str | None:
+        parsed = _urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            parsed = _urlparse(_urljoin(base, url))
+        normalized_url = _urlunparse(parsed)
+        if not FourPillarPipeline._benchmark_url_is_same_container(base, normalized_url):
+            return None
+        path = parsed.path.lstrip("/")
+        if parsed.query:
+            path = f"{path}?{parsed.query}" if path else f"?{parsed.query}"
+        if not path or len(path) > 220:
+            return None
+        if path.startswith(("../", "./")):
+            return None
+        if not _re_mod.fullmatch(r"[A-Za-z0-9_./?=&:%+\-,]+", path):
+            return None
+        return path
+
+    def _benchmark_observed_param_names(self) -> set[str]:
+        with self._benchmark_state_lock:
+            return {
+                str(name)
+                for name in self._benchmark_state.get("observed_param_names", set())
+                if _re_mod.fullmatch(r"[A-Za-z0-9_-]{1,40}", str(name))
+            }
+
+    def _benchmark_note_observed_candidates(
+        self,
+        *,
+        base: str,
+        urls: Iterable[str] = (),
+        param_names: Iterable[str] = (),
+    ) -> None:
+        if not self._is_benchmark_aggressive():
+            return
+        safe_paths = {
+            path
+            for url in urls
+            if (path := self._benchmark_safe_observed_probe_path(base, str(url)))
+        }
+        safe_params = {
+            str(name)
+            for name in param_names
+            if _re_mod.fullmatch(r"[A-Za-z0-9_-]{1,40}", str(name))
+        }
+        if not safe_paths and not safe_params:
+            return
+        changed = False
+        with self._benchmark_state_lock:
+            paths = set(self._benchmark_state.get("observed_probe_paths", set()))
+            params = set(self._benchmark_state.get("observed_param_names", set()))
+            old_paths_len = len(paths)
+            old_params_len = len(params)
+            paths.update(safe_paths)
+            params.update(safe_params)
+            self._benchmark_state["observed_probe_paths"] = set(sorted(paths)[:240])
+            self._benchmark_state["observed_param_names"] = set(sorted(params)[:120])
+            changed = old_paths_len != len(paths) or old_params_len != len(params)
+        if changed:
+            self._persist_benchmark_state()
 
     @staticmethod
     def _benchmark_builtin_flag_paths() -> tuple[str, ...]:
@@ -4276,6 +4348,12 @@ class FourPillarPipeline:
             if parsed.query:
                 urls.extend(self._benchmark_payload_urls_for_query_url(url))
 
+        self._benchmark_note_observed_candidates(
+            base=base,
+            urls=urls,
+            param_names=discovered_names,
+        )
+        discovered_names.update(self._benchmark_observed_param_names())
         for name, values in self._benchmark_schema_parameter_values(html).items():
             for value in values:
                 urls.append(f"{base}?{_urlencode({name: value})}")
@@ -4293,6 +4371,17 @@ class FourPillarPipeline:
             parsed = json.loads(sample)
         except Exception:
             parsed = None
+            for raw_name in _re_mod.findall(
+                r'''"([A-Za-z0-9_-]{1,40})"\s*:\s*\{[^{}]{0,400}'''
+                r'''(?:"example"|"default"|"const"|"enum"|"type")''',
+                sample,
+            ):
+                names.add(raw_name)
+            for raw_name in _re_mod.findall(
+                r'''"name"\s*:\s*"([A-Za-z0-9_-]{1,40})"''',
+                sample,
+            ):
+                names.add(raw_name)
         if isinstance(parsed, (dict, list)):
             def visit(value: Any) -> None:
                 if isinstance(value, dict):
@@ -5853,6 +5942,12 @@ class FourPillarPipeline:
             "service_fingerprints": dict(
                 self._benchmark_state.get("service_fingerprints", {})
             ),
+            "observed_probe_paths": sorted(
+                self._benchmark_state.get("observed_probe_paths", set())
+            ),
+            "observed_param_names": sorted(
+                self._benchmark_state.get("observed_param_names", set())
+            ),
             "probe_unreachable_streaks": dict(
                 self._benchmark_state.get("probe_unreachable_streaks", {})
             ),
@@ -5950,6 +6045,14 @@ class FourPillarPipeline:
                     for code, fingerprint in sorted(fingerprints.items())
                 )
                 + "；后续攻击路径必须围绕该真实服务类型，不要套用无关 Web/PHP 模板。"
+            )
+        observed_paths = state.get("observed_probe_paths") or []
+        observed_params = state.get("observed_param_names") or []
+        if observed_paths or observed_params:
+            parts.append(
+                "运行时自增长候选："
+                f"{len(observed_paths)} 个路径、{len(observed_params)} 个参数名；"
+                "后续探测会在 execution_control_policy 预算内复用这些真实响应来源的候选。"
             )
         if state.get("last_score") is not None:
             parts.append(f"最近题目累计得分：{state['last_score']}。")

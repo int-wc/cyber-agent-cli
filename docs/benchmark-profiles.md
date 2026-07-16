@@ -54,6 +54,7 @@ examples/benchmark-profiles.example.json
 - 用协议、响应头、页面、API 形态和服务标识匹配。
 - 探测必须有界，并且由证据驱动。
 - 用 `execution_control_policy` 调节工具调用和调度宽度，不要把固定单题步骤写进提示词。
+- 运行时会把真实响应中观察到的同容器路径和参数名写入状态，并在后续轮次按预算复用；这些自增长候选不需要写成固定 prompt。
 - 用 `evidence_focus` 和 `avoid_focus` 描述证据焦点和止损方向；固定 `steps` 或 `handoff_steps` 会被忽略，不应新增。
 - 避免固定题号、已知验证集 flag、一次性路径，或只对历史某一道题成立的假设。
 - 优先新增 `service_probe_profiles`，再考虑改 Python 代码。
