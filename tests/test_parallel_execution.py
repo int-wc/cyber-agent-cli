@@ -255,6 +255,81 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertIn("CHALLENGES_API.md", subtasks[0]["task_description"])
         self.assertIn("不要 start", subtasks[0]["task_description"])
 
+    def test_benchmark_execution_control_policy_adjusts_fast_loop_breadth(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "execution_control_policy": {
+                            "max_probe_paths": 2,
+                            "max_probe_urls": 12,
+                            "max_authenticated_urls": 8,
+                            "max_payloads_per_param": 1,
+                            "max_flag_paths": 3,
+                            "fast_probe_seconds": 30,
+                            "max_subagents": 5,
+                            "subtask_concurrency": "force",
+                        },
+                        "probe_paths": ["healthz", "metrics", "debug"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            self.pipeline._runtime_context.pop("max_subagents", None)
+            self.pipeline._runtime_context.pop("subtask_concurrency", None)
+            with self.pipeline._benchmark_state_lock:
+                self.pipeline._benchmark_state["vpn_connected"] = True
+                self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+            subtasks = self.pipeline._benchmark_fast_cycle_subtasks()
+            joined = "\n".join(task["task_description"] for task in subtasks)
+
+            self.assertEqual(self.pipeline._benchmark_probe_paths(), ["", "robots.txt"])
+            self.assertEqual(len(self.pipeline._benchmark_flag_paths()), 3)
+            self.assertEqual(
+                self.pipeline._benchmark_payloads_for_param("file"),
+                ["../flag"],
+            )
+            self.assertEqual(self.pipeline._resolve_max_subagents(), 5)
+            self.assertEqual(self.pipeline._resolve_subtask_concurrency(), "force")
+            self.assertIn("30 秒快速指纹", joined)
+            self.assertIn("最多 12 个容器 URL", joined)
+            self.assertIn("认证后最多 8 个 URL", joined)
+
+    def test_benchmark_runtime_execution_control_overrides_profile_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "execution_control_policy": {
+                            "max_probe_urls": 12,
+                            "fast_probe_seconds": 30,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            self.pipeline._runtime_context["execution_control_policy"] = {
+                "max_probe_urls": 25,
+                "fast_probe_seconds": 60,
+            }
+            with self.pipeline._benchmark_state_lock:
+                self.pipeline._benchmark_state["vpn_connected"] = True
+                self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+            policy = self.pipeline._benchmark_execution_control_policy()
+            subtasks = self.pipeline._benchmark_fast_cycle_subtasks()
+            joined = "\n".join(task["task_description"] for task in subtasks)
+
+            self.assertEqual(policy["max_probe_urls"], 25)
+            self.assertEqual(policy["fast_probe_seconds"], 60)
+            self.assertIn("60 秒快速指纹", joined)
+            self.assertIn("最多 25 个容器 URL", joined)
+
     def test_benchmark_timeout_and_low_value_thresholds_are_fast(self):
         self.assertEqual(BENCHMARK_SUBTASK_TIMEOUT, 90)
         self.assertEqual(BENCHMARK_LOW_VALUE_SIGNAL_LIMIT, 4)

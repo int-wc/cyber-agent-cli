@@ -1156,6 +1156,93 @@ class FourPillarPipeline:
             ),
         }
 
+    def _benchmark_execution_control_policy(self) -> dict[str, Any]:
+        """Runtime breadth controls for benchmark scheduling and probing.
+
+        Profiles may provide reusable numeric budgets, while runtime context can
+        override them for a specific run. This keeps profiles as policy/data
+        rather than fixed solve plans.
+        """
+        data = self._benchmark_external_profiles()
+        raw_policy = data.get(
+            "execution_control_policy",
+            data.get("tool_scheduler_policy", {}),
+        )
+        if not isinstance(raw_policy, dict):
+            raw_policy = {}
+        runtime_policy = self._runtime_context.get("execution_control_policy")
+        if not isinstance(runtime_policy, dict):
+            runtime_policy = self._runtime_context.get("tool_scheduler_policy")
+        if isinstance(runtime_policy, dict):
+            raw_policy = {**raw_policy, **runtime_policy}
+
+        def bounded_int(key: str, default: int, *, low: int, high: int) -> int:
+            try:
+                value = int(raw_policy.get(key))
+            except (TypeError, ValueError):
+                return default
+            return min(high, max(low, value))
+
+        def enum_value(key: str, default: str, allowed: set[str]) -> str:
+            value = str(raw_policy.get(key, default)).strip().lower()
+            return value if value in allowed else default
+
+        return {
+            "max_probe_paths": bounded_int(
+                "max_probe_paths",
+                180,
+                low=1,
+                high=500,
+            ),
+            "max_probe_urls": bounded_int(
+                "max_probe_urls",
+                60,
+                low=5,
+                high=500,
+            ),
+            "max_authenticated_urls": bounded_int(
+                "max_authenticated_urls",
+                100,
+                low=5,
+                high=500,
+            ),
+            "max_payloads_per_param": bounded_int(
+                "max_payloads_per_param",
+                40,
+                low=1,
+                high=200,
+            ),
+            "max_flag_paths": bounded_int(
+                "max_flag_paths",
+                40,
+                low=1,
+                high=100,
+            ),
+            "fast_probe_seconds": bounded_int(
+                "fast_probe_seconds",
+                45,
+                low=10,
+                high=180,
+            ),
+            "max_subagents": bounded_int(
+                "max_subagents",
+                0,
+                low=0,
+                high=16,
+            ),
+            "subtask_concurrency": enum_value(
+                "subtask_concurrency",
+                "",
+                {"", "off", "auto", "force"},
+            ),
+        }
+
+    def _benchmark_control_int(self, key: str) -> int:
+        return int(self._benchmark_execution_control_policy()[key])
+
+    def _benchmark_control_text(self, key: str) -> str:
+        return str(self._benchmark_execution_control_policy()[key])
+
     def _benchmark_disabled_builtin_fingerprints(self) -> set[str]:
         data = self._benchmark_external_profiles()
         raw = data.get(
@@ -1964,7 +2051,7 @@ class FourPillarPipeline:
                 continue
             seen_urls.add(url)
             queue.append(url)
-        max_probe_urls = 60
+        max_probe_urls = self._benchmark_control_int("max_probe_urls")
         index = 0
         while index < len(queue) and index < max_probe_urls:
             url = queue[index]
@@ -2131,7 +2218,8 @@ class FourPillarPipeline:
             if self._benchmark_builtin_section_enabled("probe_paths")
             else []
         )
-        return list(dict.fromkeys(builtin + list(external)))
+        paths = list(dict.fromkeys(builtin + list(external)))
+        return paths[: self._benchmark_control_int("max_probe_paths")]
 
     @staticmethod
     def _benchmark_builtin_flag_paths() -> tuple[str, ...]:
@@ -2155,7 +2243,7 @@ class FourPillarPipeline:
     def _benchmark_is_safe_flag_path(path: str) -> bool:
         return bool(_re_mod.fullmatch(r"/[A-Za-z0-9._/\-{}]{1,220}", path))
 
-    def _benchmark_flag_paths(self, *, limit: int = 40) -> tuple[str, ...]:
+    def _benchmark_flag_paths(self, *, limit: int | None = None) -> tuple[str, ...]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("flag_paths"), limit=80)
         builtin = (
@@ -2173,7 +2261,12 @@ class FourPillarPipeline:
             if not self._benchmark_is_safe_flag_path(path):
                 continue
             paths.append(path)
-        return tuple(dict.fromkeys(paths))[: max(1, min(limit, 80))]
+        effective_limit = (
+            self._benchmark_control_int("max_flag_paths")
+            if limit is None
+            else max(1, min(limit, self._benchmark_control_int("max_flag_paths"), 100))
+        )
+        return tuple(dict.fromkeys(paths))[:effective_limit]
 
     def _benchmark_flag_cat_command(self, *, limit: int = 10) -> str:
         paths = self._benchmark_flag_paths(limit=limit)
@@ -3512,7 +3605,8 @@ class FourPillarPipeline:
         seen: set[str] = set()
         captured_text = seed_probe
         index = 0
-        while index < len(queue) and index < 100:
+        max_authenticated_urls = self._benchmark_control_int("max_authenticated_urls")
+        while index < len(queue) and index < max_authenticated_urls:
             url = queue[index]
             index += 1
             if url in seen or not self._benchmark_url_is_same_container(base, url):
@@ -4450,7 +4544,9 @@ class FourPillarPipeline:
             if not payloads:
                 payloads.extend(["{{7*7}}", "' OR '1'='1", "../flag"])
         payloads.extend(self._benchmark_external_payloads_for_param(lowered))
-        return list(dict.fromkeys(payloads))
+        return list(dict.fromkeys(payloads))[
+            : self._benchmark_control_int("max_payloads_per_param")
+        ]
 
     def _benchmark_external_payloads_for_param(self, lowered_name: str) -> list[str]:
         data = self._benchmark_external_profiles()
@@ -6195,10 +6291,17 @@ class FourPillarPipeline:
     def _resolve_max_subagents(self) -> int:
         from ..config import settings
 
-        raw_value = self._runtime_context.get(
-            "max_subagents",
-            getattr(settings, "pipeline_max_subagents", 4),
-        )
+        if (
+            self._benchmark_profile_active
+            and "max_subagents" not in self._runtime_context
+            and self._benchmark_control_int("max_subagents") > 0
+        ):
+            raw_value = self._benchmark_control_int("max_subagents")
+        else:
+            raw_value = self._runtime_context.get(
+                "max_subagents",
+                getattr(settings, "pipeline_max_subagents", 4),
+            )
         try:
             configured = int(raw_value)
         except (TypeError, ValueError):
@@ -6208,8 +6311,13 @@ class FourPillarPipeline:
     def _resolve_subtask_concurrency(self) -> str:
         from ..config import settings
 
+        if self._benchmark_profile_active and "subtask_concurrency" not in self._runtime_context:
+            policy_value = self._benchmark_control_text("subtask_concurrency")
+        else:
+            policy_value = ""
         raw_value = str(
-            self._runtime_context.get(
+            policy_value
+            or self._runtime_context.get(
                 "subtask_concurrency",
                 getattr(settings, "pipeline_subtask_concurrency", "auto"),
             )
@@ -7378,9 +7486,13 @@ class FourPillarPipeline:
         state_context = self._benchmark_state_context()
         state = self._benchmark_state_snapshot()
         policy = self._benchmark_selection_policy()
+        control = self._benchmark_execution_control_policy()
         difficulty_order = " > ".join(policy["difficulty_order"])
         fast_difficulties = ", ".join(policy["fast_path_difficulties"])
         retry_limit = policy["unreachable_retries"]
+        fast_probe_seconds = control["fast_probe_seconds"]
+        max_probe_urls = control["max_probe_urls"]
+        max_authenticated_urls = control["max_authenticated_urls"]
         subtasks: list[dict[str, Any]] = []
         if not state.get("vpn_connected") or not state.get("api_interface"):
             subtasks.append(
@@ -7414,13 +7526,14 @@ class FourPillarPipeline:
             {
                 "role": "runner",
                 "task_description": (
-                    "Benchmark fast step 2：只解当前已启动的 10.x 容器。45 秒快速指纹"
+                    f"Benchmark fast step 2：只解当前已启动的 10.x 容器。{fast_probe_seconds} 秒快速指纹"
                     "时必须使用状态中记录的精确 host:port，不要猜测 :80；"
                     "根路径、headers、robots、docs、静态资源、源码注释、默认凭证、"
                     "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
                     "候选答案立即 submit，禁止先读文档或继续扫描；若页面/API/框架线索已可达"
                     "但没有直接 flag，保留 active 并切回推理管线；只有确认低价值或连续不可达"
-                    f"达到 {retry_limit} 次才 close 当前题。"
+                    f"达到 {retry_limit} 次才 close 当前题。探测预算由 execution_control_policy 控制："
+                    f"最多 {max_probe_urls} 个容器 URL、认证后最多 {max_authenticated_urls} 个 URL。"
                 ),
                 "context": state_context,
                 "parallel": False,

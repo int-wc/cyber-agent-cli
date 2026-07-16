@@ -42,6 +42,13 @@ If a whole default candidate family is too broad for a run, add it to
 - `selection_policy`: difficulty order, fast-path difficulties, handoff
   difficulties, recovery difficulties, unreachable retry count, and estimated
   fast score.
+- `execution_control_policy` (alias: `tool_scheduler_policy`): numeric runtime
+  breadth controls for the architecture itself. Supported keys include
+  `max_probe_paths`, `max_probe_urls`, `max_authenticated_urls`,
+  `max_payloads_per_param`, `max_flag_paths`, `fast_probe_seconds`,
+  `max_subagents`, and `subtask_concurrency` (`off`, `auto`, or `force`).
+  These values tune how widely the agent may schedule and probe; they are not
+  challenge-specific solve prompts.
 - `disabled_builtin_fingerprints`: built-in service fingerprints to remove from
   the default probe/action/handoff profile set before external profiles are
   merged.
@@ -95,6 +102,8 @@ Profiles should describe reusable behavior:
 
 - Match on protocol, headers, pages, API shape, and service banners.
 - Keep probes bounded and evidence-driven.
+- Use `execution_control_policy` for tool-call and scheduling breadth instead of
+  embedding fixed per-challenge instructions in prompts.
 - Avoid fixed challenge IDs, known validation-set flags, one-off paths, or
   assumptions that only make sense for a single historical task.
 - Prefer adding a new `service_probe_profiles` entry before editing Python.

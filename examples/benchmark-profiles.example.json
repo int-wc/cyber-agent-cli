@@ -7,6 +7,16 @@
     "unreachable_retries": 3,
     "estimated_fast_score": 150
   },
+  "execution_control_policy": {
+    "max_probe_paths": 180,
+    "max_probe_urls": 80,
+    "max_authenticated_urls": 120,
+    "max_payloads_per_param": 40,
+    "max_flag_paths": 40,
+    "fast_probe_seconds": 45,
+    "max_subagents": 0,
+    "subtask_concurrency": ""
+  },
   "disabled_builtin_fingerprints": [],
   "disabled_builtin_sections": [],
   "probe_paths": [
