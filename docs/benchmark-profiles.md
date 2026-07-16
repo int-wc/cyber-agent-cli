@@ -49,6 +49,8 @@ without copying the whole built-in profile.
   `token`, `file`, or `_url`.
   Parameter names are collected from HTML fields, query strings, OpenAPI
   `parameters[].name`, and JSON schema `properties`.
+  Schema `example`, `default`, `const`, and bounded `enum` values are also used
+  as same-container query candidates before generic attack payloads.
 - `lfi_base_paths`: extra bounded LFI candidate paths.
 - `object_storage_buckets` and `object_storage_keys`: bucket/key candidates for
   S3-like or artifact-index services.

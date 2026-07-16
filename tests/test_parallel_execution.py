@@ -3549,6 +3549,44 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["active_containers"], {"d-01": ["10.0.180.232:8000"]})
         close_local.assert_not_called()
 
+    def test_benchmark_refresh_active_from_platform_persists_state(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_list_challenges_local",
+                return_value=[
+                    {
+                        "unique_code": "d-01",
+                        "difficulty": "easy",
+                        "is_completed": False,
+                        "container_status": "available",
+                        "container_addr": ["10.0.180.232:8000"],
+                    }
+                ],
+            ),
+            patch.object(self.pipeline, "_persist_benchmark_state"),
+        ):
+            code, addrs = self.pipeline._benchmark_refresh_active_challenge_from_platform()
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(code, "d-01")
+        self.assertEqual(addrs, ["10.0.180.232:8000"])
+        self.assertEqual(state["current_challenge"], "d-01")
+        self.assertEqual(state["active_containers"], {"d-01": ["10.0.180.232:8000"]})
+
+    def test_benchmark_tcp_connect_marker_prevents_unreachable_close(self):
+        probe = (
+            "## http://10.0.180.232:8000/\n"
+            "curl: (7) Failed to connect to 10.0.180.232 port 8000\n"
+            "## connectivity-diagnostics 10.0.180.232:8000\n"
+            "tcp_connect_ok\n"
+        )
+
+        self.assertFalse(FourPillarPipeline._benchmark_probe_looks_unreachable(probe))
+
     def test_benchmark_deterministic_step2_closes_after_unreachable_retry_limit(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3648,7 +3686,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                     "/download": {
                         "get": {
                             "parameters": [
-                                {"name": "filename", "in": "query"},
+                                {"name": "filename", "in": "query", "example": "report.pdf"},
                                 {"name": "redirect_url", "in": "query"},
                             ]
                         }
@@ -3661,6 +3699,11 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                             "properties": {
                                 "template": {"type": "string"},
                                 "api_token": {"type": "string"},
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["public", "private"],
+                                    "default": "public",
+                                },
                             },
                         }
                     }
@@ -3675,9 +3718,12 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         joined = "\n".join(urls)
 
         self.assertIn("filename=..%2Fflag", joined)
+        self.assertIn("filename=report.pdf", joined)
         self.assertIn("redirect_url=file%3A%2F%2F%2Fflag", joined)
         self.assertIn("template=..%2Fflag", joined)
         self.assertIn("api_token=%7B%7B7%2A7%7D%7D", joined)
+        self.assertIn("mode=public", joined)
+        self.assertIn("mode=private", joined)
 
     def test_benchmark_object_storage_derives_quoted_bucket_and_xml_keys(self):
         body = (

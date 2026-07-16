@@ -1712,6 +1712,7 @@ class FourPillarPipeline:
     def _benchmark_probe_has_reachable_signal(probe: str) -> bool:
         lowered = probe.lower()
         reachable_markers = (
+            "tcp_connect_ok",
             "http/1.0 ",
             "http/1.1 ",
             "http/2 ",
@@ -1784,7 +1785,30 @@ class FourPillarPipeline:
         addrs = item.get("container_addr") or []
         if not isinstance(code, str) or not code:
             return None, []
-        return code, [str(addr) for addr in addrs or []]
+        normalized_addrs = [str(addr) for addr in addrs or []]
+        if normalized_addrs:
+            self._benchmark_store_active_challenge(code, normalized_addrs)
+        return code, normalized_addrs
+
+    def _benchmark_store_active_challenge(self, code: str, addrs: list[str]) -> None:
+        if not code or not addrs:
+            return
+        with self._benchmark_state_lock:
+            active = dict(self._benchmark_state.get("active_containers", {}))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            recovered = set(self._benchmark_state.get("recovery_attempted_challenges", set()))
+            active[code] = [str(addr) for addr in addrs]
+            closed.discard(code)
+            abandoned.discard(code)
+            recovered.discard(code)
+            self._benchmark_state["active_containers"] = active
+            self._benchmark_state["current_challenge"] = code
+            self._benchmark_state["closed_challenges"] = closed
+            self._benchmark_state["abandoned_challenges"] = abandoned
+            self._benchmark_state["recovery_attempted_challenges"] = recovered
+            self._benchmark_current_challenge = code
+        self._persist_benchmark_state()
 
     def _benchmark_close_local(self, code: str) -> str:
         _, stdout, _ = self._benchmark_platform_request(
@@ -1826,19 +1850,7 @@ class FourPillarPipeline:
         if isinstance(value, dict):
             addrs = value.get("container_addr")
             if isinstance(addrs, list) and addrs:
-                with self._benchmark_state_lock:
-                    active = dict(self._benchmark_state.get("active_containers", {}))
-                    closed = set(self._benchmark_state.get("closed_challenges", set()))
-                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
-                    active[code] = [str(addr) for addr in addrs]
-                    closed.discard(code)
-                    abandoned.discard(code)
-                    self._benchmark_state["active_containers"] = active
-                    self._benchmark_state["current_challenge"] = code
-                    self._benchmark_state["closed_challenges"] = closed
-                    self._benchmark_state["abandoned_challenges"] = abandoned
-                    self._benchmark_current_challenge = code
-                self._persist_benchmark_state()
+                self._benchmark_store_active_challenge(code, [str(addr) for addr in addrs])
         lowered = stdout.lower()
         if (
             "resource_unavailable" in lowered
@@ -1978,6 +1990,62 @@ class FourPillarPipeline:
             raw_output = self._benchmark_probe_raw_text_protocol(code, addr)
             if raw_output:
                 outputs.append(raw_output)
+        joined_outputs = "\n".join(outputs)
+        if self._benchmark_probe_looks_unreachable(joined_outputs):
+            outputs.append(self._benchmark_connectivity_diagnostics(addr))
+        return "\n".join(outputs)
+
+    def _benchmark_connectivity_diagnostics(self, addr: str) -> str:
+        host, port_text = addr.rsplit(":", 1)
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## connectivity-diagnostics {addr}"]
+        try:
+            with socket_mod.create_connection((host, int(port_text)), timeout=3):
+                outputs.append("python_socket_tcp_probe: tcp_connect_ok")
+        except Exception as exc:
+            outputs.append(f"python_socket_tcp_probe: failed ({exc})")
+        commands = [
+            ["ip", "route", "get", host],
+            ["ip", "addr", "show", tun_interface],
+            [
+                "curl",
+                "-sS",
+                "--interface",
+                tun_interface,
+                "--connect-timeout",
+                "3",
+                "--max-time",
+                "5",
+                "-v",
+                f"telnet://{host}:{port_text}",
+            ],
+        ]
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=6,
+                )
+            except Exception as exc:
+                outputs.append(f"$ {' '.join(cmd)}\nERROR: {exc}")
+                continue
+            body = (result.stdout or "")[:1500]
+            err = (result.stderr or "")[:1500]
+            marker = ""
+            if cmd[0] == "curl" and (
+                result.returncode == 0
+                or "connected to " in err.lower()
+            ):
+                marker = "\ntcp_connect_ok"
+            outputs.append(
+                f"$ {' '.join(cmd)}\n"
+                f"exit={result.returncode}{marker}\n"
+                f"{body}\n{err}"
+            )
         return "\n".join(outputs)
 
     @staticmethod
@@ -3888,6 +3956,9 @@ class FourPillarPipeline:
             if parsed.query:
                 urls.extend(self._benchmark_payload_urls_for_query_url(url))
 
+        for name, values in self._benchmark_schema_parameter_values(html).items():
+            for value in values:
+                urls.append(f"{base}?{_urlencode({name: value})}")
         for name in sorted(discovered_names):
             urls.extend(self._benchmark_payload_urls_for_param(base, name))
         return urls
@@ -3948,6 +4019,72 @@ class FourPillarPipeline:
         return {
             name for name in names
             if name.lower() not in ignored and len(name) <= 40
+        }
+
+    @staticmethod
+    def _benchmark_safe_schema_value(value: Any) -> str | None:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) > 180:
+            return None
+        if _re_mod.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f<>`{}|]", cleaned):
+            return None
+        return cleaned
+
+    def _benchmark_schema_parameter_values(self, text: str) -> dict[str, tuple[str, ...]]:
+        if not text:
+            return {}
+        sample = text[:40000]
+        try:
+            parsed = json.loads(sample)
+        except Exception:
+            return {}
+        values: dict[str, list[str]] = {}
+
+        def add_value(name: Any, value: Any) -> None:
+            if not isinstance(name, str) or not _re_mod.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,39}", name):
+                return
+            safe = self._benchmark_safe_schema_value(value)
+            if safe is None:
+                return
+            bucket = values.setdefault(name, [])
+            if safe not in bucket:
+                bucket.append(safe)
+
+        def visit(value: Any, current_name: str | None = None) -> None:
+            if isinstance(value, dict):
+                raw_name = value.get("name")
+                local_name = raw_name if isinstance(raw_name, str) else current_name
+                for key in ("example", "default", "const"):
+                    if key in value:
+                        add_value(local_name, value.get(key))
+                enum_values = value.get("enum")
+                if isinstance(enum_values, list):
+                    for enum_value in enum_values[:8]:
+                        add_value(local_name, enum_value)
+                properties = value.get("properties")
+                if isinstance(properties, dict):
+                    for property_name, property_schema in list(properties.items())[:80]:
+                        visit(property_schema, str(property_name))
+                for child_key, child in value.items():
+                    if child_key == "properties":
+                        continue
+                    visit(child, local_name)
+            elif isinstance(value, list):
+                for child in value[:200]:
+                    visit(child, current_name)
+
+        if isinstance(parsed, (dict, list)):
+            visit(parsed)
+        return {
+            name: tuple(items[:8])
+            for name, items in values.items()
+            if items
         }
 
     def _benchmark_text_path_probe_urls(self, base: str, text: str) -> list[str]:
