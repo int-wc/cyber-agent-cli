@@ -3900,6 +3900,7 @@ class FourPillarPipeline:
                 url = _urljoin(base, raw)
                 if self._benchmark_url_is_same_container(base, url):
                     urls.append(url)
+        urls.extend(self._benchmark_response_key_path_urls(base, text))
         lowered = text.lower()
         if "/api/functions" in lowered:
             urls.append(_urljoin(base, "api/functions"))
@@ -3917,6 +3918,69 @@ class FourPillarPipeline:
                 + external
             )
         )
+
+    def _benchmark_response_path_keys(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("response_path_keys"), limit=80)
+        builtin = (
+            "path",
+            "url",
+            "uri",
+            "endpoint",
+            "route",
+            "debug_path",
+            "debug_url",
+            "config_path",
+            "config_url",
+            "export_path",
+            "export_url",
+            "download_path",
+            "download_url",
+        )
+        keys: list[str] = []
+        for raw_key in builtin + external:
+            key = str(raw_key or "").strip().lower()
+            if _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", key):
+                keys.append(key)
+        return tuple(dict.fromkeys(keys))
+
+    @staticmethod
+    def _benchmark_safe_response_path_value(raw: str) -> str | None:
+        value = str(raw or "").strip()
+        if not value or len(value) > 220:
+            return None
+        if value.startswith(("javascript:", "mailto:", "data:", "#", "//")):
+            return None
+        if not _re_mod.fullmatch(r"(?:https?://[^\s\"'<>`{}|]+|/?[A-Za-z0-9_./?=&:%+\-]+)", value):
+            return None
+        return value
+
+    def _benchmark_response_key_path_urls(self, base: str, text: str) -> list[str]:
+        if not text:
+            return []
+        keys = self._benchmark_response_path_keys()
+        if not keys:
+            return []
+        key_pattern = "|".join(_re_mod.escape(key) for key in keys)
+        candidates: list[str] = []
+        search_text = text[:30000]
+        quoted_pattern = (
+            rf"""["'](?:{key_pattern})["']\s*[:=]\s*["']([^"']{{1,220}})["']"""
+        )
+        bare_pattern = (
+            rf"""(?:^|[\s,{{])(?:{key_pattern})\s*[:=]\s*([^,\s<>"'{{}}]{{1,220}})"""
+        )
+        for pattern in (quoted_pattern, bare_pattern):
+            for raw_value in _re_mod.findall(pattern, search_text, flags=_re_mod.IGNORECASE):
+                value = self._benchmark_safe_response_path_value(raw_value)
+                if value is not None:
+                    candidates.append(value)
+        urls: list[str] = []
+        for value in candidates:
+            url = _urljoin(base, value)
+            if self._benchmark_url_is_same_container(base, url):
+                urls.append(url)
+        return list(dict.fromkeys(urls))[:40]
 
     def _benchmark_object_storage_probe_urls(
         self,

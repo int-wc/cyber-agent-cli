@@ -24,6 +24,11 @@
     "download",
     "assets"
   ],
+  "response_path_keys": [
+    "artifact_endpoint",
+    "export_path",
+    "debug_url"
+  ],
   "param_payload_profiles": [
     {
       "name_contains": ["token", "secret", "key"],

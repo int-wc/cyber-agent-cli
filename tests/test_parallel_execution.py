@@ -3604,6 +3604,42 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("url=file%3A%2F%2F%2Fflag", joined)
         self.assertIn("id=1+OR+1%3D1", joined)
 
+    def test_benchmark_derives_paths_from_response_path_keys(self):
+        body = json.dumps(
+            {
+                "debug_url": "/debug/export",
+                "config_path": "api/config",
+                "download_url": "http://10.0.1.2:80/files/report",
+                "external_url": "http://example.com/secret",
+            }
+        )
+
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.1.2:80/",
+            body,
+        )
+
+        self.assertIn("http://10.0.1.2:80/debug/export", urls)
+        self.assertIn("http://10.0.1.2:80/api/config", urls)
+        self.assertIn("http://10.0.1.2:80/files/report", urls)
+        self.assertNotIn("http://example.com/secret", urls)
+
+    def test_benchmark_external_response_path_keys_extend_derivation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps({"response_path_keys": ["artifact_endpoint"]}),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            urls = self.pipeline._benchmark_derive_probe_urls(
+                "http://10.0.1.2:80/",
+                '{"artifact_endpoint":"artifacts/latest/flag.txt"}',
+            )
+
+        self.assertIn("http://10.0.1.2:80/artifacts/latest/flag.txt", urls)
+
     def test_benchmark_object_storage_derives_quoted_bucket_and_xml_keys(self):
         body = (
             'Internal note: migrated to the "secret-data" bucket. '
@@ -3954,6 +3990,10 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         service_profile = self.pipeline._benchmark_matching_service_probe_profile(
             "HTTP/1.1 200 OK\nX-CustomSvc-Version: 1\n\nrpc-methods export"
         )
+        derived_urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.1.2:8080/",
+            '{"artifact_endpoint":"artifacts/latest"}',
+        )
         rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
             current="generic-01",
             addr_text="10.0.1.2:8080",
@@ -3981,6 +4021,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("api/config", service_profile["probe_paths"])
         self.assertEqual(service_profile["probe_requests"][0]["path"], "rpc/export")
         self.assertEqual(service_profile["tcp_ports"][0]["port"], 5005)
+        self.assertIn("http://10.0.1.2:8080/artifacts/latest", derived_urls)
         self.assertEqual(len(rendered), 3)
         self.assertIn("generic-01", rendered[0]["task_description"])
         self.assertIn("CustomSvc generic handoff", rendered[0]["context"])

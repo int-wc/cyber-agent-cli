@@ -42,6 +42,9 @@ without copying the whole built-in profile.
   shell retrieval.
 - `text_path_prefixes`: path prefixes that should be expanded when response text
   exposes names such as `debug`, `download`, or `internal`.
+- `response_path_keys`: JSON/YAML-like response field names whose string values
+  should be treated as bounded same-container follow-up paths or URLs, such as
+  `artifact_endpoint`, `export_path`, or `debug_url`.
 - `param_payload_profiles`: payloads selected by parameter name, such as
   `token`, `file`, or `_url`.
 - `lfi_base_paths`: extra bounded LFI candidate paths.
