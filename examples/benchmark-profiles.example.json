@@ -8,6 +8,7 @@
     "estimated_fast_score": 150
   },
   "disabled_builtin_fingerprints": [],
+  "disabled_builtin_sections": [],
   "probe_paths": [
     "healthz",
     "status",

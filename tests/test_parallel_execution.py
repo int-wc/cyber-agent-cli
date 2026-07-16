@@ -2606,6 +2606,60 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.1.2/debug/status?token=1", urls)
         self.assertIn("token=..%2F..%2F..%2F..%2Frun%2Fsecrets%2Ftoken", joined)
 
+    def test_benchmark_profile_can_disable_builtin_candidate_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "disabled_builtin_sections": [
+                            "probe_paths",
+                            "payloads",
+                            "flag_paths",
+                            "lfi_base_paths",
+                            "object_storage",
+                            "raw_protocol_commands",
+                            "telnet_credentials",
+                        ],
+                        "probe_paths": ["healthz"],
+                        "flag_paths": ["/opt/app/flag.txt"],
+                        "lfi_base_paths": ["../../../../opt/app/secret.txt"],
+                        "object_storage_buckets": ["audit-bucket"],
+                        "object_storage_keys": ["private/flag.json"],
+                        "raw_protocol_commands": ["DUMP"],
+                        "telnet_credentials": [
+                            {"username": "operator", "password": "operator123"}
+                        ],
+                        "param_payload_profiles": [
+                            {
+                                "name_contains": ["token"],
+                                "payloads": ["../../../../run/secrets/token"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            paths = self.pipeline._benchmark_probe_paths()
+            payloads = self.pipeline._benchmark_payloads_for_param("api_token")
+            flag_paths = self.pipeline._benchmark_flag_paths()
+            lfi_paths = self.pipeline._benchmark_lfi_base_paths()
+            buckets = self.pipeline._benchmark_object_storage_buckets()
+            keys = self.pipeline._benchmark_object_storage_keys()
+            raw_commands = self.pipeline._benchmark_raw_protocol_commands()
+            telnet_credentials = self.pipeline._benchmark_telnet_credentials()
+
+        self.assertEqual(paths, ["healthz"])
+        self.assertEqual(payloads, ["../../../../run/secrets/token"])
+        self.assertEqual(flag_paths, ("/opt/app/flag.txt",))
+        self.assertEqual(lfi_paths, ["../../../../opt/app/secret.txt"])
+        self.assertEqual(buckets, ["audit-bucket"])
+        self.assertEqual(keys, ("private/flag.json",))
+        self.assertEqual(raw_commands, ("DUMP",))
+        self.assertEqual(telnet_credentials, (("operator", "operator123"),))
+
     def test_benchmark_external_object_storage_strategy_extends_candidates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profile_path = Path(tmpdir) / "benchmark-profiles.json"

@@ -34,6 +34,8 @@ If a built-in service fingerprint is misleading for a new benchmark run, add it
 to `disabled_builtin_fingerprints`; an external profile with the same
 fingerprint can still reintroduce only the generic evidence-driven checks you
 want.
+If a whole default candidate family is too broad for a run, add it to
+`disabled_builtin_sections`; the external values from this file are still used.
 
 ## Supported Sections
 
@@ -43,6 +45,10 @@ want.
 - `disabled_builtin_fingerprints`: built-in service fingerprints to remove from
   the default probe/action/handoff profile set before external profiles are
   merged.
+- `disabled_builtin_sections`: built-in candidate families to remove before
+  external values are merged. Supported values include `probe_paths`,
+  `payloads`, `flag_paths`, `lfi_base_paths`, `object_storage`,
+  `raw_protocol_commands`, `telnet_credentials`, and `all`.
 - `probe_paths`: extra paths for bounded HTTP fingerprinting.
 - `flag_paths`: extra absolute flag file candidates shared by service probes
   such as Langflow validate/code, JDWP exec/exfiltration, and default Telnet
