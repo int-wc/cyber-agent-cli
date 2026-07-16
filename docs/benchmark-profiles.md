@@ -47,8 +47,9 @@ If a whole default candidate family is too broad for a run, add it to
   merged.
 - `disabled_builtin_sections`: built-in candidate families to remove before
   external values are merged. Supported values include `probe_paths`,
-  `payloads`, `flag_paths`, `lfi_base_paths`, `object_storage`,
-  `raw_protocol_commands`, `telnet_credentials`, and `all`.
+  `payloads`, `flag_paths`, `lfi_base_paths`, `lfi_detection`,
+  `object_storage`, `raw_protocol_commands`, `telnet_credentials`,
+  `webapp_flow_profiles`, and `all`.
 - `probe_paths`: extra paths for bounded HTTP fingerprinting.
 - `flag_paths`: extra absolute flag file candidates shared by service probes
   such as Langflow validate/code, JDWP exec/exfiltration, and default Telnet
@@ -65,6 +66,9 @@ If a whole default candidate family is too broad for a run, add it to
   Schema `example`, `default`, `const`, and bounded `enum` values are also used
   as same-container query candidates before generic attack payloads.
 - `lfi_base_paths`: extra bounded LFI candidate paths.
+- `lfi_param_keys`, `lfi_trigger_markers`, and `lfi_default_endpoint`: tune
+  file-read/download probes from observed parameter names, page text, and
+  endpoint shape.
 - `object_storage_buckets` and `object_storage_keys`: bucket/key candidates for
   S3-like or artifact-index services.
 - `raw_protocol_commands`: bounded commands for unknown raw TCP services.

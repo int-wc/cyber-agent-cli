@@ -4007,6 +4007,21 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn(("operator", "operator123"), profile["credentials"])
         self.assertIn("api/secret", profile["handoff_paths"])
 
+    def test_benchmark_profile_can_disable_builtin_webapp_flow_profile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps({"disabled_builtin_sections": ["webapp_flow_profiles"]}),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profile = self.pipeline._benchmark_matching_webapp_flow_profile(
+                '<form action="/login"><input name="password"></form>'.lower()
+            )
+
+        self.assertIsNone(profile)
+
     def test_benchmark_lfi_urls_follow_download_parameter_and_source_names(self):
         body = (
             "错误：缺少文件ID\n"
@@ -4051,6 +4066,49 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("../../../../etc/passwd", paths)
         self.assertIn("../../../../opt/app/secret.txt", paths)
+
+    def test_benchmark_lfi_detection_is_profile_driven_when_builtin_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "disabled_builtin_sections": ["lfi_detection", "lfi_base_paths"],
+                        "lfi_param_keys": ["doc"],
+                        "lfi_trigger_markers": ["missing document"],
+                        "lfi_default_endpoint": "files/get",
+                        "lfi_base_paths": ["../../../../opt/app/secret.txt"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            direct_urls = self.pipeline._benchmark_lfi_probe_urls_from_response(
+                "http://10.0.180.232/",
+                "http://10.0.180.232/files/get?doc=report.pdf",
+                "missing document",
+                "",
+            )
+            fallback_urls = self.pipeline._benchmark_lfi_probe_urls_from_response(
+                "http://10.0.180.232/",
+                "http://10.0.180.232/",
+                "missing document",
+                "",
+            )
+
+        self.assertEqual(
+            direct_urls,
+            [
+                "http://10.0.180.232/files/get?doc=..%2F..%2F..%2F..%2Fopt%2Fapp%2Fsecret.txt"
+            ],
+        )
+        self.assertEqual(
+            fallback_urls,
+            [
+                "http://10.0.180.232/files/get?id=..%2F..%2F..%2F..%2Fopt%2Fapp%2Fsecret.txt"
+            ],
+        )
 
     def test_benchmark_invalid_external_profile_json_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmpdir:

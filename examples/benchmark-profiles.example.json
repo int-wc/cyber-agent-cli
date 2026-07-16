@@ -54,6 +54,17 @@
     "../../../../app/.env",
     "../../../../opt/service/config.yaml"
   ],
+  "lfi_param_keys": [
+    "file",
+    "path",
+    "doc"
+  ],
+  "lfi_trigger_markers": [
+    "missing file",
+    "missing document",
+    "file id"
+  ],
+  "lfi_default_endpoint": "download.php",
   "object_storage_buckets": [
     "public-artifacts",
     "private-artifacts",

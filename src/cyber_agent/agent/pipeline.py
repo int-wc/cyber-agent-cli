@@ -1187,9 +1187,13 @@ class FourPillarPipeline:
             "object_storage_buckets": "object_storage",
             "object_storage_keys": "object_storage",
             "lfi_paths": "lfi_base_paths",
+            "lfi_keys": "lfi_detection",
+            "lfi_param_keys": "lfi_detection",
+            "lfi_trigger_markers": "lfi_detection",
             "payload_profiles": "payloads",
             "param_payload_profiles": "payloads",
             "telnet": "telnet_credentials",
+            "webapp_profiles": "webapp_flow_profiles",
         }
         canonical = aliases.get(normalized, normalized)
         return "all" not in disabled and canonical not in disabled
@@ -3425,8 +3429,13 @@ class FourPillarPipeline:
         return profiles
 
     def _benchmark_webapp_flow_profiles(self) -> list[dict[str, Any]]:
+        builtin = (
+            self._benchmark_builtin_webapp_flow_profiles()
+            if self._benchmark_builtin_section_enabled("webapp_flow_profiles")
+            else []
+        )
         return self._benchmark_merge_profiles_by_key(
-            self._benchmark_builtin_webapp_flow_profiles(),
+            builtin,
             self._benchmark_external_webapp_flow_profiles(),
             "name",
         )
@@ -3594,23 +3603,66 @@ class FourPillarPipeline:
         urls: list[str] = []
         parsed_current = _urlparse(current_url)
         pairs = _parse_qsl(parsed_current.query, keep_blank_values=True)
+        lfi_param_keys = self._benchmark_lfi_param_keys()
         lfi_keys = [
             key for key, _ in pairs
-            if any(part in key.lower() for part in ("id", "file", "path", "name", "download"))
+            if any(part in key.lower() for part in lfi_param_keys)
         ]
-        if "download.php" in parsed_current.path.lower() and not lfi_keys:
+        default_endpoint = self._benchmark_lfi_default_endpoint()
+        if default_endpoint and default_endpoint in parsed_current.path.lower() and not lfi_keys:
             lfi_keys.append("id")
-        if not lfi_keys and not any(marker in body.lower() for marker in ("缺少文件", "file id", "download")):
+        trigger_markers = self._benchmark_lfi_trigger_markers()
+        if not lfi_keys and not any(marker in body.lower() for marker in trigger_markers):
             return []
         candidates = self._benchmark_lfi_candidate_paths(accumulated_text)
         base_without_query = _urlunparse(parsed_current._replace(query=""))
-        if not lfi_keys and "download" in body.lower():
-            base_without_query = _urljoin(base, "download.php")
+        if (
+            not lfi_keys
+            and default_endpoint
+            and any(marker in body.lower() for marker in trigger_markers)
+        ):
+            base_without_query = _urljoin(base, default_endpoint)
             lfi_keys = ["id"]
         for key in dict.fromkeys(lfi_keys):
             for candidate in candidates:
                 urls.append(f"{base_without_query}?{_urlencode({key: candidate})}")
         return urls[:80]
+
+    def _benchmark_lfi_param_keys(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(
+            data.get("lfi_param_keys", data.get("lfi_keys", ())),
+            limit=80,
+        )
+        builtin = (
+            ("id", "file", "path", "name", "download")
+            if self._benchmark_builtin_section_enabled("lfi_detection")
+            else ()
+        )
+        return tuple(
+            dict.fromkeys(
+                key.lower()
+                for key in builtin + external
+                if _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", key.lower())
+            )
+        )
+
+    def _benchmark_lfi_trigger_markers(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("lfi_trigger_markers"), limit=80)
+        builtin = (
+            ("缺少文件", "file id", "download")
+            if self._benchmark_builtin_section_enabled("lfi_detection")
+            else ()
+        )
+        return tuple(dict.fromkeys(marker.lower() for marker in builtin + external if marker))
+
+    def _benchmark_lfi_default_endpoint(self) -> str:
+        data = self._benchmark_external_profiles()
+        raw = str(data.get("lfi_default_endpoint") or "").strip().lstrip("/")
+        if raw and _re_mod.fullmatch(r"[A-Za-z0-9_./-]{1,120}", raw):
+            return raw.lower()
+        return "download.php" if self._benchmark_builtin_section_enabled("lfi_detection") else ""
 
     @staticmethod
     def _benchmark_builtin_lfi_base_paths() -> list[str]:
