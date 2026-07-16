@@ -529,6 +529,32 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertFalse(should_fast)
         self.assertIn("medium", reason)
 
+    def test_benchmark_planning_instruction_uses_policy_estimated_score(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "selection_policy": {
+                            "fast_path_difficulties": ["medium"],
+                            "handoff_difficulties": ["hard"],
+                            "estimated_fast_score": 500,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            self.pipeline._runtime_context["benchmark_target_score"] = 2000
+
+            instruction = self.pipeline._benchmark_planning_instruction()
+            max_iterations = self.pipeline._resolve_effective_max_iterations()
+
+        self.assertIn("约 500 分", instruction)
+        self.assertIn("约 4 道 medium/低 level", instruction)
+        self.assertIn("medium 题优先 deterministic/adaptive fast path", instruction)
+        self.assertGreaterEqual(max_iterations, 9)
+
     def test_benchmark_select_next_candidate_recovers_closed_easy_before_medium(self):
         snapshot = [
             {
@@ -4873,6 +4899,54 @@ class SubtaskBoundaryApprovalTestCase(unittest.TestCase):
 
         self.assertFalse(decision.approved)
         self.assertIn("未启动、未完成", decision.reason)
+
+    def test_benchmark_guard_blocks_closing_inactive_stopped_policy_candidate(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "selection_policy": {
+                            "difficulty_order": ["medium", "easy", "hard"],
+                            "fast_path_difficulties": ["medium"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            with self.pipeline._benchmark_state_lock:
+                self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                    {
+                        "unique_code": "medium-1",
+                        "difficulty": "medium",
+                        "is_completed": False,
+                        "container_status": "stopped",
+                        "container_addr": [],
+                    }
+                ]
+                self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+            handler = self.pipeline._make_subtask_approval_handler("TSec Benchmark")
+            decision = handler(
+                MagicMock(),
+                {
+                    "name": "run_shell_command",
+                    "args": {
+                        "command": (
+                            "curl --interface enp0s20f0u3u4 -X POST "
+                            "https://tsecbench.zc.tencent.com/openapi/v1/"
+                            "challenges/close?unique_code=medium-1 "
+                            "-H 'BENCHMARK_TOKEN: token'"
+                        ),
+                    },
+                },
+            )
+
+        self.assertFalse(decision.approved)
+        self.assertIn("stopped medium", decision.reason)
 
     def test_boundary_approval_blocks_secret_probe(self):
         handler = self.pipeline._make_subtask_approval_handler(

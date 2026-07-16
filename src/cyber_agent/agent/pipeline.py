@@ -989,11 +989,13 @@ class FourPillarPipeline:
                     if (
                         isinstance(target_item, dict)
                         and target_item.get("is_completed") is not True
-                        and str(target_item.get("difficulty") or "").lower() == "easy"
+                        and str(target_item.get("difficulty") or "").lower()
+                        in set(self._benchmark_selection_policy()["difficulty_order"])
                         and target_item.get("container_status") == "stopped"
                     ):
+                        difficulty = str(target_item.get("difficulty") or "unknown").lower()
                         return (
-                            f"{code} 是未启动、未完成的 stopped easy，禁止直接 close；"
+                            f"{code} 是未启动、未完成的 stopped {difficulty}，禁止直接 close；"
                             "只能 close 当前 active/stale 题，或先 start 后探测。"
                         )
 
@@ -1139,6 +1141,11 @@ class FourPillarPipeline:
                 ("easy",),
             ),
             "unreachable_retries": positive_int("unreachable_retries", 2, high=10),
+            "estimated_fast_score": positive_int(
+                "estimated_fast_score",
+                200,
+                high=1000,
+            ),
         }
 
     def _benchmark_difficulty_rank(self, difficulty: Any) -> int:
@@ -1160,6 +1167,18 @@ class FourPillarPipeline:
 
     def _benchmark_unreachable_retry_limit(self) -> int:
         return int(self._benchmark_selection_policy()["unreachable_retries"])
+
+    def _benchmark_estimated_fast_score(self) -> int:
+        return int(self._benchmark_selection_policy()["estimated_fast_score"])
+
+    def _benchmark_policy_difficulty_label(self, key: str) -> str:
+        values = self._benchmark_selection_policy().get(key)
+        if not isinstance(values, tuple):
+            return "未配置"
+        return "/".join(values) if values else "未配置"
+
+    def _benchmark_selection_order_label(self) -> str:
+        return " > ".join(self._benchmark_selection_policy()["difficulty_order"])
 
     @staticmethod
     def _benchmark_string_tuple(value: Any, *, limit: int = 80) -> tuple[str, ...]:
@@ -3750,7 +3769,7 @@ class FourPillarPipeline:
         )
 
     def _benchmark_deterministic_fast_step(self, desc: str, reason: str = "") -> str | None:
-        """Run the easy fast path without an LLM when the step is mechanical."""
+        """Run the policy fast path without an LLM when the step is mechanical."""
         if not self._is_benchmark_aggressive():
             return None
         service_action = self._benchmark_service_action_from_desc(desc)
@@ -6004,7 +6023,8 @@ class FourPillarPipeline:
         target_score = self._resolve_benchmark_target_score()
         if target_score <= 0:
             return configured
-        estimated_challenges = max(1, (target_score + 199) // 200)
+        estimate = max(1, self._benchmark_estimated_fast_score())
+        estimated_challenges = max(1, (target_score + estimate - 1) // estimate)
         return min(100, max(configured, estimated_challenges + 5))
 
     def _subtask_timeout_config(self) -> tuple[int, int, int]:
@@ -6050,12 +6070,15 @@ class FourPillarPipeline:
             return ""
         known_score = int(status.get("known_score") or 0)
         if target_score <= 0:
+            fast_label = self._benchmark_policy_difficulty_label("fast_path_difficulties")
+            handoff_label = self._benchmark_policy_difficulty_label("handoff_difficulties")
             return (
                 "Benchmark maximize gate：当前为正式测评/无固定目标分模式，"
                 f"已知得分 {known_score}。平台尚未返回 finished/invalid_state，"
                 "不能判定执行完成。下一轮必须继续刷新题目列表，优先处理"
-                "未完成/stopped；easy 题用 deterministic/adaptive fast path，"
-                "medium/hard 交给四柱思考、决策者、思考者、审计者、反思者。"
+                "未完成/stopped；"
+                f"{fast_label} 题用 deterministic/adaptive fast path，"
+                f"{handoff_label} 交给四柱思考、决策者、思考者、审计者、反思者。"
                 "如果当前题无明确突破，先 close 当前题再 start 下一题。"
             )
         remaining = int(status.get("remaining") or 0)
@@ -6606,6 +6629,10 @@ class FourPillarPipeline:
     def _benchmark_planning_instruction(self) -> str:
         target_score = self._resolve_benchmark_target_score()
         target_line = ""
+        estimate = max(1, self._benchmark_estimated_fast_score())
+        fast_label = self._benchmark_policy_difficulty_label("fast_path_difficulties")
+        handoff_label = self._benchmark_policy_difficulty_label("handoff_difficulties")
+        order_label = self._benchmark_selection_order_label()
         if target_score > 0:
             status = self._benchmark_score_status()
             progress_line = ""
@@ -6630,8 +6657,10 @@ class FourPillarPipeline:
                 )
             target_line = (
                 f"- 本轮目标分数为 {target_score}。优先冲刺到目标分："
-                "按 200 分 easy 题估算，优先快速完成约 "
-                f"{max(1, (target_score + 199) // 200)} 道 easy/低 level 题；"
+                f"按 selection_policy 估算每道 fast-path 题约 {estimate} 分，"
+                "优先快速完成约 "
+                f"{max(1, (target_score + estimate - 1) // estimate)} 道 "
+                f"{fast_label}/低 level 题；"
                 "不要因单题深挖影响整体得分上限。\n"
                 f"{progress_line}"
                 f"{gap_line}"
@@ -6657,8 +6686,9 @@ class FourPillarPipeline:
             "- 每题只保留一个主攻击假设和一个备选假设；同类 payload、路径扫描、字典爆破不可反复堆叠。\n"
             "- 发现 flag 形态字符串、疑似 secret、后台响应里的候选答案时，立即调用 submit 验证，"
             "不要等总结阶段，不要先读文档复核接口。\n"
-            "- 优先选择已知高产 Web easy 原型：简单 SQLi、SSTI、XSS 绕过、静态资源泄漏、IDOR；"
-            "若指纹不匹配，快速切题。\n"
+            f"- 选题顺序来自 selection_policy（当前 {order_label}）；"
+            f"{fast_label} 题优先 deterministic/adaptive fast path，"
+            f"{handoff_label} 题切回四柱深挖。若指纹不匹配，快速切题。\n"
             "- 平台接口（/openapi/v1/challenges、start、submit、close）走已验证可达的公网/物理网卡；"
             "容器地址 10.x 访问走 VPN/tun0。\n"
             "- 每道题完成、放弃或 stale 后必须 close 释放活跃名额。"
@@ -6785,7 +6815,9 @@ class FourPillarPipeline:
             f"{gap_text}"
             "下一轮必须把第一优先级改为："
             f"1) 调用平台 close?unique_code={self._benchmark_current_challenge} 释放容器；"
-            "2) 获取题目列表；3) 选择下一道未完成题 start，easy 优先但不锁死 easy；"
+            "2) 获取题目列表；"
+            f"3) 按 selection_policy（当前 {self._benchmark_selection_order_label()}）"
+            "选择下一道未完成题 start；"
             "4) 对新题执行快速拿分流程。不要继续在当前题重复 SQLi/SSTI/session/path payload。"
         )
         with self._benchmark_state_lock:
@@ -7443,7 +7475,7 @@ class FourPillarPipeline:
         if switch_to_standard:
             self._record_trace(
                 "benchmark_fast_path_handoff",
-                detail="easy fast path 已结束，切回四柱管线处理剩余题目。",
+                detail="policy fast path 已结束，切回四柱管线处理剩余题目。",
                 metadata=self._benchmark_score_status(),
             )
             return True
