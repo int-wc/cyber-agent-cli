@@ -1992,7 +1992,12 @@ class FourPillarPipeline:
                 outputs.append(raw_output)
         joined_outputs = "\n".join(outputs)
         if self._benchmark_probe_looks_unreachable(joined_outputs):
-            outputs.append(self._benchmark_connectivity_diagnostics(addr))
+            diagnostics = self._benchmark_connectivity_diagnostics(addr)
+            outputs.append(diagnostics)
+            if "tcp_connect_ok" in diagnostics.lower():
+                raw_output = self._benchmark_probe_raw_text_protocol(code, addr)
+                if raw_output:
+                    outputs.append(raw_output)
         return "\n".join(outputs)
 
     def _benchmark_connectivity_diagnostics(self, addr: str) -> str:
@@ -6790,11 +6795,11 @@ class FourPillarPipeline:
         markers = (
             "tsec benchmark",
             "tsecbench",
+            "challenges_api.md",
             "benchmark_token",
             "/openapi/v1/challenges",
             "correct_flag_count",
             "unique_code",
-            "xben-",
             "跑分",
         )
         return any(marker in lowered for marker in markers)

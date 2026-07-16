@@ -111,6 +111,14 @@ class BuildSubtaskPromptTestCase(unittest.TestCase):
         self.assertIn("Benchmark 已确认运行态", prompt)
         self.assertIn("不要重复启动 OpenVPN", prompt)
 
+    def test_benchmark_task_detection_avoids_validation_code_prefix(self):
+        self.assertFalse(FourPillarPipeline._looks_like_benchmark_task("解 xben-001-24"))
+        self.assertTrue(
+            FourPillarPipeline._looks_like_benchmark_task(
+                "读取 CHALLENGES_API.md 后用 unique_code start"
+            )
+        )
+
     def test_execution_summary_keeps_full_subtask_body(self):
         """四柱最终总结应保留完整子任务正文，不再只展示短摘要。"""
         long_body = "完整输出-" + ("细节" * 120)
@@ -3040,6 +3048,51 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("c-06", state["reasoning_challenges"])
         self.assertEqual(state["service_fingerprints"]["c-06"], "hugegraph")
         webapp.assert_not_called()
+
+    def test_benchmark_probe_runs_raw_protocol_when_http_fails_but_tcp_connects(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with (
+            patch.object(self.pipeline, "_benchmark_probe_paths", return_value=[""]),
+            patch.object(self.pipeline, "_benchmark_wait_for_container_ready", return_value=""),
+            patch.object(
+                self.pipeline,
+                "_benchmark_connectivity_diagnostics",
+                return_value=(
+                    "## connectivity-diagnostics 10.0.180.232:9000\n"
+                    "python_socket_tcp_probe: tcp_connect_ok"
+                ),
+            ) as diagnostics,
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_raw_text_protocol",
+                return_value=(
+                    "## raw-text-protocol 10.0.180.232:9000\n"
+                    "INFO\r\nservice ready"
+                ),
+            ) as raw_probe,
+            patch.object(self.pipeline, "_benchmark_probe_common_webapp_flows", return_value=""),
+            patch("cyber_agent.agent.pipeline.subprocess.run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess(
+                [],
+                7,
+                stdout="",
+                stderr=(
+                    "curl: (7) Failed to connect to 10.0.180.232 port 9000: "
+                    "Could not connect to server"
+                ),
+            )
+            result = self.pipeline._benchmark_probe_container_local(
+                "tcp-01",
+                ["10.0.180.232:9000"],
+            )
+
+        self.assertIn("connectivity-diagnostics", result)
+        self.assertIn("raw-text-protocol", result)
+        diagnostics.assert_called_once_with("10.0.180.232:9000")
+        raw_probe.assert_called_once_with("tcp-01", "10.0.180.232:9000")
 
     def test_benchmark_service_probe_profiles_drive_probe_dispatch(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
