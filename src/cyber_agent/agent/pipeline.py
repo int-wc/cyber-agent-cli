@@ -1243,6 +1243,16 @@ class FourPillarPipeline:
     def _benchmark_control_text(self, key: str) -> str:
         return str(self._benchmark_execution_control_policy()[key])
 
+    @staticmethod
+    def _benchmark_deadline_remaining(deadline: float | None) -> float:
+        if deadline is None:
+            return 999999.0
+        return max(0.0, deadline - time_mod.monotonic())
+
+    @staticmethod
+    def _benchmark_deadline_expired(deadline: float | None) -> bool:
+        return deadline is not None and time_mod.monotonic() >= deadline
+
     def _benchmark_disabled_builtin_fingerprints(self) -> set[str]:
         data = self._benchmark_external_profiles()
         raw = data.get(
@@ -1634,7 +1644,7 @@ class FourPillarPipeline:
                 continue
             if not self._benchmark_is_startable_status(item):
                 continue
-            if code in (closed | abandoned) and code not in recovered:
+            if code in closed and code not in abandoned and code not in recovered:
                 recovery_candidates.append(item)
             elif code in excluded:
                 continue
@@ -1655,15 +1665,12 @@ class FourPillarPipeline:
                     code = best_recovery.get("unique_code")
                     if isinstance(code, str):
                         with self._benchmark_state_lock:
-                            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
                             closed = set(self._benchmark_state.get("closed_challenges", set()))
                             recovered = set(
                                 self._benchmark_state.get("recovery_attempted_challenges", set())
                             )
-                            abandoned.discard(code)
                             closed.discard(code)
                             recovered.add(code)
-                            self._benchmark_state["abandoned_challenges"] = abandoned
                             self._benchmark_state["closed_challenges"] = closed
                             self._benchmark_state["recovery_attempted_challenges"] = recovered
                     return best_recovery
@@ -1672,15 +1679,12 @@ class FourPillarPipeline:
             code = priority_recovery[0].get("unique_code")
             if isinstance(code, str):
                 with self._benchmark_state_lock:
-                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
                     closed = set(self._benchmark_state.get("closed_challenges", set()))
                     recovered = set(
                         self._benchmark_state.get("recovery_attempted_challenges", set())
                     )
-                    abandoned.discard(code)
                     closed.discard(code)
                     recovered.add(code)
-                    self._benchmark_state["abandoned_challenges"] = abandoned
                     self._benchmark_state["closed_challenges"] = closed
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
             return priority_recovery[0]
@@ -1688,15 +1692,12 @@ class FourPillarPipeline:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
                 with self._benchmark_state_lock:
-                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
                     closed = set(self._benchmark_state.get("closed_challenges", set()))
                     recovered = set(
                         self._benchmark_state.get("recovery_attempted_challenges", set())
                     )
-                    abandoned.discard(code)
                     closed.discard(code)
                     recovered.add(code)
-                    self._benchmark_state["abandoned_challenges"] = abandoned
                     self._benchmark_state["closed_challenges"] = closed
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
             return recovery_candidates[0]
@@ -1727,7 +1728,7 @@ class FourPillarPipeline:
                 continue
             if not self._benchmark_is_startable_status(item):
                 continue
-            if code in (closed | abandoned) and code not in recovered:
+            if code in closed and code not in abandoned and code not in recovered:
                 recovery_candidates.append(item)
             elif code in excluded:
                 continue
@@ -1755,15 +1756,12 @@ class FourPillarPipeline:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
                 with self._benchmark_state_lock:
-                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
                     closed = set(self._benchmark_state.get("closed_challenges", set()))
                     recovered = set(
                         self._benchmark_state.get("recovery_attempted_challenges", set())
                     )
-                    abandoned.discard(code)
                     closed.discard(code)
                     recovered.add(code)
-                    self._benchmark_state["abandoned_challenges"] = abandoned
                     self._benchmark_state["closed_challenges"] = closed
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
             return recovery_candidates[0]
@@ -2016,6 +2014,7 @@ class FourPillarPipeline:
     def _benchmark_probe_container_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
             return "无容器地址，无法探测。"
+        deadline = time_mod.monotonic() + self._benchmark_control_int("fast_probe_seconds")
         addr = addrs[0]
         if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
             return f"容器地址格式异常: {addr}"
@@ -2041,7 +2040,11 @@ class FourPillarPipeline:
             for path in self._benchmark_probe_paths()
         ]
         outputs: list[str] = []
-        root_body = self._benchmark_wait_for_container_ready(base, outputs)
+        root_body = self._benchmark_wait_for_container_ready(
+            base,
+            outputs,
+            deadline=deadline,
+        )
         urls.extend(self._benchmark_derive_probe_urls(base, root_body))
         tun_interface = self._benchmark_tun_interface()
         seen_urls: set[str] = set()
@@ -2054,8 +2057,17 @@ class FourPillarPipeline:
         max_probe_urls = self._benchmark_control_int("max_probe_urls")
         index = 0
         while index < len(queue) and index < max_probe_urls:
+            remaining = self._benchmark_deadline_remaining(deadline)
+            if remaining <= 1.0:
+                outputs.append(
+                    f"## probe budget exhausted {addr}\n"
+                    f"fast_probe_seconds={self._benchmark_control_int('fast_probe_seconds')}"
+                )
+                break
             url = queue[index]
             index += 1
+            curl_max_time = max(1, min(4, int(remaining)))
+            run_timeout = max(2, min(6, int(remaining) + 1))
             cmd = [
                 "curl",
                 "-sS",
@@ -2065,7 +2077,7 @@ class FourPillarPipeline:
                 "--connect-timeout",
                 "2",
                 "--max-time",
-                "4",
+                str(curl_max_time),
                 "--globoff",
                 "-i",
                 url,
@@ -2077,7 +2089,7 @@ class FourPillarPipeline:
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=6,
+                    timeout=run_timeout,
                 )
             except Exception as exc:
                 outputs.append(f"## {url}\nERROR: {exc}")
@@ -2102,6 +2114,8 @@ class FourPillarPipeline:
                     continue
                 seen_urls.add(derived)
                 queue.append(derived)
+        if self._benchmark_deadline_expired(deadline):
+            return "\n".join(outputs)
         joined_outputs = "\n".join(outputs)
         service_matched, service_outputs = self._benchmark_probe_matching_service_local(
             code,
@@ -2111,10 +2125,19 @@ class FourPillarPipeline:
         if service_matched:
             outputs.extend(service_outputs)
             return "\n".join(outputs)
-        webapp_output = self._benchmark_probe_common_webapp_flows(code, base, joined_outputs)
+        if self._benchmark_deadline_expired(deadline):
+            return "\n".join(outputs)
+        webapp_output = self._benchmark_probe_common_webapp_flows(
+            code,
+            base,
+            joined_outputs,
+            deadline=deadline,
+        )
         if webapp_output:
             outputs.append(webapp_output)
             joined_outputs = "\n".join(outputs)
+        if self._benchmark_deadline_expired(deadline):
+            return "\n".join(outputs)
         if self._benchmark_probe_suggests_raw_text_protocol(joined_outputs):
             raw_output = self._benchmark_probe_raw_text_protocol(code, addr)
             if raw_output:
@@ -3369,7 +3392,14 @@ class FourPillarPipeline:
             f"jdb={jdb_output[:4000]}"
         )
 
-    def _benchmark_probe_common_webapp_flows(self, code: str, base: str, probe: str) -> str:
+    def _benchmark_probe_common_webapp_flows(
+        self,
+        code: str,
+        base: str,
+        probe: str,
+        *,
+        deadline: float | None = None,
+    ) -> str:
         """Follow common benchmark web-app clues that need cookies or state.
 
         The deterministic URL loop is intentionally stateless. Several easy
@@ -3391,6 +3421,10 @@ class FourPillarPipeline:
         outputs: list[str] = [f"## stateful-webapp-flow {base}"]
         try:
             for username, password in credentials[:4]:
+                remaining = self._benchmark_deadline_remaining(deadline)
+                if remaining <= 3.0:
+                    outputs.append(f"## webapp budget exhausted {base}")
+                    break
                 login_url = self._benchmark_login_url_from_probe(base, probe)
                 result = self._benchmark_curl_local(
                     login_url,
@@ -3398,7 +3432,7 @@ class FourPillarPipeline:
                     cookie_path=cookie_path,
                     method="POST",
                     data={"username": username, "password": password},
-                    timeout=8,
+                    timeout=max(3, min(8, int(remaining))),
                 )
                 outputs.append(
                     f"## login {username}:{password} {login_url}\n"
@@ -3413,6 +3447,7 @@ class FourPillarPipeline:
                     cookie_path,
                     probe,
                     profile,
+                    deadline=deadline,
                 )
                 if auth_output:
                     outputs.append(auth_output)
@@ -3607,6 +3642,7 @@ class FourPillarPipeline:
         cookie_path: str,
         seed_probe: str,
         profile: dict[str, Any] | None = None,
+        deadline: float | None = None,
     ) -> str:
         outputs: list[str] = []
         active_profile = profile or self._benchmark_webapp_flow_profiles()[0]
@@ -3621,6 +3657,10 @@ class FourPillarPipeline:
         index = 0
         max_authenticated_urls = self._benchmark_control_int("max_authenticated_urls")
         while index < len(queue) and index < max_authenticated_urls:
+            remaining = self._benchmark_deadline_remaining(deadline)
+            if remaining <= 3.0:
+                outputs.append(f"## authenticated budget exhausted {base}")
+                break
             url = queue[index]
             index += 1
             if url in seen or not self._benchmark_url_is_same_container(base, url):
@@ -3632,7 +3672,7 @@ class FourPillarPipeline:
                 url,
                 tun_interface=tun_interface,
                 cookie_path=cookie_path,
-                timeout=7,
+                timeout=max(3, min(7, int(remaining))),
             )
             body = (result.stdout or "")[:5000]
             outputs.append(f"## auth {url}\n{body}\n{(result.stderr or '')[:300]}")
@@ -4048,16 +4088,24 @@ class FourPillarPipeline:
     def _benchmark_probe_handoff_followup_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
             return "无容器地址，无法 handoff follow-up。"
+        deadline = time_mod.monotonic() + self._benchmark_control_int("fast_probe_seconds")
         addr = addrs[0]
         if not _re_mod.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}", addr):
             return f"容器地址格式异常: {addr}"
         base = f"http://{addr}/"
         tun_interface = self._benchmark_tun_interface()
         outputs: list[str] = [f"## handoff-followup {base}"]
-        root = self._benchmark_curl_local(base, tun_interface=tun_interface, timeout=7)
+        root = self._benchmark_curl_local(
+            base,
+            tun_interface=tun_interface,
+            timeout=max(3, min(7, int(self._benchmark_deadline_remaining(deadline)))),
+        )
         root_text = root.stdout or ""
         service_profile = self._benchmark_matching_service_probe_profile(root_text)
         if service_profile is not None:
+            if self._benchmark_deadline_remaining(deadline) <= 3.0:
+                outputs.append(f"## handoff budget exhausted {base}")
+                return "\n".join(outputs)
             outputs.extend(
                 self._benchmark_run_service_probe_profile(
                     code,
@@ -4074,21 +4122,29 @@ class FourPillarPipeline:
             # Known demo/admin credentials are common in these benchmark web apps.
             web_profile = self._benchmark_webapp_flow_profiles()[0]
             for username, password in list(web_profile.get("credentials") or [])[:4]:
+                remaining = self._benchmark_deadline_remaining(deadline)
+                if remaining <= 3.0:
+                    outputs.append(f"## handoff budget exhausted {base}")
+                    break
                 self._benchmark_curl_local(
                     _urljoin(base, "login.php"),
                     tun_interface=tun_interface,
                     cookie_path=cookie_path,
                     method="POST",
                     data={"username": username, "password": password},
-                    timeout=6,
+                    timeout=max(3, min(6, int(remaining))),
                 )
                 for path in web_profile.get("handoff_paths", ()):
+                    remaining = self._benchmark_deadline_remaining(deadline)
+                    if remaining <= 3.0:
+                        outputs.append(f"## handoff budget exhausted {base}")
+                        return "\n".join(outputs)
                     url = _urljoin(base, path)
                     result = self._benchmark_curl_local(
                         url,
                         tun_interface=tun_interface,
                         cookie_path=cookie_path,
-                        timeout=6,
+                        timeout=max(3, min(6, int(remaining))),
                     )
                     body = (result.stdout or "")[:2500]
                     outputs.append(f"## {username} {url}\n{body}\n{(result.stderr or '')[:200]}")
@@ -4107,12 +4163,28 @@ class FourPillarPipeline:
                 pass
         return "\n".join(outputs)
 
-    def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
+    def _benchmark_wait_for_container_ready(
+        self,
+        url: str,
+        outputs: list[str],
+        *,
+        deadline: float | None = None,
+    ) -> str:
         root_body = ""
         tun_interface = self._benchmark_tun_interface()
         for index, delay in enumerate((0.0, 1.0, 2.0, 3.0, 5.0, 8.0)):
+            remaining = self._benchmark_deadline_remaining(deadline)
+            if remaining <= 1.0:
+                outputs.append(f"## readiness budget exhausted {url}")
+                break
             if delay:
-                time_mod.sleep(delay)
+                time_mod.sleep(min(delay, max(0.0, remaining - 1.0)))
+            remaining = self._benchmark_deadline_remaining(deadline)
+            if remaining <= 1.0:
+                outputs.append(f"## readiness budget exhausted {url}")
+                break
+            curl_max_time = max(1, min(5, int(remaining)))
+            run_timeout = max(2, min(5, int(remaining) + 1))
             cmd = [
                 "curl",
                 "-sS",
@@ -4122,7 +4194,7 @@ class FourPillarPipeline:
                 "--connect-timeout",
                 "2",
                 "--max-time",
-                "5",
+                str(curl_max_time),
                 "-i",
                 url,
             ]
@@ -4133,7 +4205,7 @@ class FourPillarPipeline:
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=5,
+                    timeout=run_timeout,
                 )
             except Exception as exc:
                 outputs.append(f"## readiness {index + 1} {url}\nERROR: {exc}")
@@ -5843,7 +5915,8 @@ class FourPillarPipeline:
             "## Benchmark 已确认运行态（必须信任并复用）\n"
             f"{summary}\n"
             "除非上面的状态被平台 API 明确推翻，否则不要重复做 VPN 启动、"
-            "不要回头探测已完成题；本地已关闭但平台仍未完成的 stopped 题可恢复一次。"
+            "不要回头探测已完成题或已判定低收益题；本地已关闭但未 abandoned、"
+            "且平台仍未完成的 stopped 题可恢复一次。"
             "10.x 容器访问必须显式使用 "
             "`curl --interface tun0`；平台 API 才使用物理网卡。"
         )
@@ -7571,8 +7644,9 @@ class FourPillarPipeline:
                     "然后 GET /openapi/v1/challenges，以平台真实 is_completed/container_status "
                     "为准筛选未完成 stopped 的下一题并 POST start；"
                     f"排序策略来自 selection_policy（当前 {difficulty_order}），"
-                    f"fast path 难度为 {fast_difficulties}；本地 closed/abandoned "
-                    "只作为软跳过且可按策略恢复一次；只记录 unique_code 和 container_addr，不探测、不 submit、"
+                    f"fast path 难度为 {fast_difficulties}；本地 abandoned 硬跳过，"
+                    "仅本地 closed 且平台仍 stopped 的题可按策略恢复一次；"
+                    "只记录 unique_code 和 container_addr，不探测、不 submit、"
                     "不 hint。"
                 ),
                 "context": state_context,
@@ -7673,12 +7747,13 @@ class FourPillarPipeline:
                 continue
             if (
                 self._benchmark_is_startable_status(item)
-                and code in (closed | abandoned)
+                and code in closed
+                and code not in abandoned
                 and code not in recovered
             ):
                 return (
                     True,
-                    f"发现平台仍可启动的 {difficulty} {code} 被本地关闭/放弃状态误排除，"
+                    f"发现平台仍可启动的 {difficulty} {code} 被本地关闭状态误排除，"
                     "进入恢复 fast path。",
                 )
 

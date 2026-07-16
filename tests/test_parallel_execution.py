@@ -374,7 +374,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertTrue(should_fast)
         self.assertIn("easy", reason)
 
-    def test_benchmark_fast_path_recovers_locally_abandoned_easy(self):
+    def test_benchmark_fast_path_does_not_recover_abandoned_easy(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -395,12 +395,12 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
             self.pipeline._benchmark_state["last_challenges_snapshot"]
         )
 
-        self.assertTrue(should_fast)
-        self.assertIn("恢复 fast path", reason)
-        self.assertEqual(selected["unique_code"], "xben-020-24")
+        self.assertFalse(should_fast)
+        self.assertIn("切回四柱", reason)
+        self.assertIsNone(selected)
         state = self.pipeline._benchmark_state_snapshot()
-        self.assertNotIn("xben-020-24", state["abandoned_challenges"])
-        self.assertIn("xben-020-24", state["recovery_attempted_challenges"])
+        self.assertIn("xben-020-24", state["abandoned_challenges"])
+        self.assertNotIn("xben-020-24", state["recovery_attempted_challenges"])
 
     def test_benchmark_fast_path_recovers_closed_easy_once_when_platform_stopped(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -666,6 +666,35 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         state = self.pipeline._benchmark_state_snapshot()
         self.assertNotIn("c-06", state["closed_challenges"])
         self.assertIn("c-06", state["recovery_attempted_challenges"])
+
+    def test_benchmark_select_next_candidate_skips_abandoned_easy_before_medium(self):
+        snapshot = [
+            {
+                "unique_code": "d-01",
+                "difficulty": "easy",
+                "level": 1,
+                "total_score": 100,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+            {
+                "unique_code": "e1-01",
+                "difficulty": "medium",
+                "level": 1,
+                "total_score": 250,
+                "is_completed": False,
+                "container_status": "stopped",
+            },
+        ]
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"d-01"}
+
+        selected = self.pipeline._benchmark_select_next_candidate(snapshot)
+
+        self.assertEqual(selected["unique_code"], "e1-01")
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("d-01", state["abandoned_challenges"])
+        self.assertNotIn("d-01", state["recovery_attempted_challenges"])
 
     def test_benchmark_fast_path_hands_off_reasoning_easy(self):
         with self.pipeline._benchmark_state_lock:
@@ -2791,6 +2820,47 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.180.232:8000/first", requested_urls)
         self.assertIn("http://10.0.180.232:8000/second", requested_urls)
 
+    def test_benchmark_probe_container_stops_when_fast_probe_budget_expires(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["execution_control_policy"] = {
+            "fast_probe_seconds": 2,
+            "max_probe_urls": 50,
+        }
+        self.pipeline._benchmark_profile_active = True
+        requested_urls: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            requested_urls.append(cmd[-1])
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="HTTP/1.1 404 Not Found\n\n",
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_wait_for_container_ready",
+                return_value='<a href="/one">one</a><a href="/two">two</a>',
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_deadline_remaining",
+                side_effect=[3.0, 0.5],
+            ),
+            patch.object(self.pipeline, "_benchmark_deadline_expired", return_value=True),
+            patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_probe_container_local(
+                "d-01",
+                ["10.0.180.232:8000"],
+            )
+
+        self.assertEqual(len(requested_urls), 1)
+        self.assertIn("probe budget exhausted", result)
+
     def test_benchmark_probe_container_prefers_https_for_tls_ports(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2819,10 +2889,10 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 ["10.0.180.232:8443"],
             )
 
-        ready.assert_called_once_with(
-            "https://10.0.180.232:8443/",
-            ANY,
-        )
+        ready.assert_called_once()
+        self.assertEqual(ready.call_args.args[:2][0], "https://10.0.180.232:8443/")
+        self.assertIsInstance(ready.call_args.args[:2][1], list)
+        self.assertIn("deadline", ready.call_args.kwargs)
         requested_urls = [cmd[-1] for cmd in requested_commands]
         self.assertIn("https://10.0.180.232:8443/", requested_urls)
         self.assertIn("http://10.0.180.232:8443/", requested_urls)
@@ -4521,6 +4591,45 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("handoff-followup", result)
         self.assertIn("custom-01", state["abandoned_challenges"])
         self.assertEqual(state["service_fingerprints"]["custom-01"], "customsvc")
+
+    def test_benchmark_handoff_followup_stops_when_budget_expires(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._runtime_context["execution_control_policy"] = {
+            "fast_probe_seconds": 2,
+        }
+        self.pipeline._benchmark_profile_active = True
+        curl_calls: list[str] = []
+
+        def fake_curl(url, **kwargs):
+            curl_calls.append(url)
+            return subprocess.CompletedProcess(
+                ["curl", url],
+                0,
+                stdout="HTTP/1.1 200 OK\n\nlogin",
+                stderr="",
+            )
+
+        with (
+            patch.object(self.pipeline, "_benchmark_curl_local", side_effect=fake_curl),
+            patch.object(
+                self.pipeline,
+                "_benchmark_matching_service_probe_profile",
+                return_value=None,
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_deadline_remaining",
+                side_effect=[10.0, 10.0, 10.0, 0.5],
+            ),
+            patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+        ):
+            result = self.pipeline._benchmark_probe_handoff_followup_local(
+                "custom-01",
+                ["10.0.1.2:9000"],
+            )
+
+        self.assertEqual(len(curl_calls), 3)
+        self.assertIn("handoff budget exhausted", result)
 
     def test_benchmark_service_action_detection_accepts_custom_profile_key(self):
         with patch.object(
