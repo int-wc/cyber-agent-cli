@@ -3185,6 +3185,41 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
         self.assertIn("HugeGraph", rendered[0]["task_description"])
 
+    def test_benchmark_external_service_handoff_profile_renders_steps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_handoff_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "context": "## Custom service\nUse only documented custom endpoints.",
+                                "steps": [
+                                    "Benchmark customsvc handoff step 1：复核 {current} at {addr_text}",
+                                    "Benchmark customsvc exploit step 2：验证 {current} 的 token API",
+                                    "Benchmark customsvc close step 3：无 flag 时 close?unique_code={current}",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+                current="custom-01",
+                addr_text="10.0.1.2:8080",
+                context="state context",
+                fingerprint="customsvc",
+            )
+
+        self.assertEqual(len(rendered), 3)
+        self.assertIn("custom-01", rendered[0]["task_description"])
+        self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
+        self.assertIn("Custom service", rendered[0]["context"])
+
     def test_benchmark_service_action_profiles_drive_deterministic_steps(self):
         profiles = self.pipeline._benchmark_service_action_profiles()
 
@@ -3202,6 +3237,44 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             ),
             ("hugegraph", "close"),
         )
+
+    def test_benchmark_external_service_action_profile_drives_detection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_action_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "label": "CustomSvc",
+                                "actions": {
+                                    "handoff": {
+                                        "reasoning_reason": "custom needs deeper reasoning",
+                                        "summary": "{code} custom handoff complete",
+                                    },
+                                    "exploit": {
+                                        "abandon_reason": "custom exploit bounded no flag",
+                                        "summary": "{code} custom exploit complete",
+                                    },
+                                    "close": True,
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profiles = self.pipeline._benchmark_service_action_profiles()
+            detected = self.pipeline._benchmark_service_action_from_desc(
+                "Benchmark customsvc exploit step 2：验证当前服务最高置信路径"
+            )
+
+        self.assertIn("customsvc", profiles)
+        self.assertEqual(profiles["customsvc"]["label"], "CustomSvc")
+        self.assertEqual(detected, ("customsvc", "exploit"))
 
     def test_benchmark_service_action_detection_accepts_custom_profile_key(self):
         with patch.object(

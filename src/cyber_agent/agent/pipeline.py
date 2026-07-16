@@ -3387,7 +3387,7 @@ class FourPillarPipeline:
             return ["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")]
         return ["{{7*7}}", "' OR '1'='1", "../flag"]
 
-    def _benchmark_service_action_profiles(self) -> dict[str, dict[str, Any]]:
+    def _benchmark_builtin_service_action_profiles(self) -> dict[str, dict[str, Any]]:
         return {
             "dify": {
                 "label": "Dify",
@@ -3428,6 +3428,82 @@ class FourPillarPipeline:
                 },
             },
         }
+
+    def _benchmark_normalize_service_action_profile(
+        self,
+        raw: Any,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not isinstance(raw, dict):
+            return None
+        fingerprint = str(raw.get("fingerprint") or "").strip().lower()
+        if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", fingerprint):
+            return None
+        profile: dict[str, Any] = {}
+        label = str(raw.get("label") or fingerprint).strip()
+        if label:
+            profile["label"] = label[:80]
+        probe_key = str(raw.get("probe_key") or "").strip().lower()
+        probe = self._benchmark_service_probe_registry().get(probe_key)
+        if callable(probe):
+            profile["probe"] = probe
+        raw_actions = raw.get("actions")
+        if not isinstance(raw_actions, dict):
+            return None
+        actions: dict[str, dict[str, str]] = {}
+        for action in ("handoff", "exploit", "close"):
+            raw_action = raw_actions.get(action)
+            if raw_action is True:
+                actions[action] = {}
+                continue
+            if not isinstance(raw_action, dict):
+                continue
+            action_profile: dict[str, str] = {}
+            for key in ("reasoning_reason", "abandon_reason", "summary"):
+                value = str(raw_action.get(key) or "").strip()
+                if value:
+                    action_profile[key] = value[:800]
+            actions[action] = action_profile
+        if not actions:
+            return None
+        profile["actions"] = actions
+        return fingerprint, profile
+
+    def _benchmark_external_service_action_profiles(self) -> dict[str, dict[str, Any]]:
+        data = self._benchmark_external_profiles()
+        raw_profiles = data.get("service_action_profiles", data.get("action_profiles", []))
+        if not isinstance(raw_profiles, list):
+            return {}
+        profiles: dict[str, dict[str, Any]] = {}
+        for raw in raw_profiles[:40]:
+            normalized = self._benchmark_normalize_service_action_profile(raw)
+            if normalized is None:
+                continue
+            fingerprint, profile = normalized
+            profiles[fingerprint] = profile
+        return profiles
+
+    def _benchmark_service_action_profiles(self) -> dict[str, dict[str, Any]]:
+        profiles = {
+            key: dict(value)
+            for key, value in self._benchmark_builtin_service_action_profiles().items()
+        }
+        for fingerprint, external in self._benchmark_external_service_action_profiles().items():
+            merged = dict(profiles.get(fingerprint, {}))
+            if "actions" in merged and "actions" in external:
+                actions = dict(merged.get("actions") or {})
+                for action, action_profile in (external.get("actions") or {}).items():
+                    action_merged = dict(actions.get(action) or {})
+                    action_merged.update(action_profile)
+                    actions[action] = action_merged
+                merged["actions"] = actions
+            external_without_actions = {
+                key: value for key, value in external.items() if key != "actions"
+            }
+            merged.update(external_without_actions)
+            if "actions" in external and "actions" not in merged:
+                merged["actions"] = external["actions"]
+            profiles[fingerprint] = merged
+        return profiles
 
     def _benchmark_service_action_from_desc(self, desc: str) -> tuple[str, str] | None:
         lowered = desc.lower()
@@ -4550,7 +4626,7 @@ class FourPillarPipeline:
         )
 
     @staticmethod
-    def _benchmark_service_handoff_profiles() -> dict[str, dict[str, Any]]:
+    def _benchmark_builtin_service_handoff_profiles() -> dict[str, dict[str, Any]]:
         return {
             "hugegraph": {
                 "context": (
@@ -4620,6 +4696,46 @@ class FourPillarPipeline:
                 ],
             },
         }
+
+    def _benchmark_normalize_service_handoff_profile(
+        self,
+        raw: Any,
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not isinstance(raw, dict):
+            return None
+        fingerprint = str(raw.get("fingerprint") or "").strip().lower()
+        if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", fingerprint):
+            return None
+        context = str(raw.get("context") or "").strip()
+        steps = self._benchmark_string_tuple(raw.get("steps"), limit=10)
+        if not context or not steps:
+            return None
+        return fingerprint, {
+            "context": context[:3000],
+            "steps": list(steps),
+        }
+
+    def _benchmark_external_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
+        data = self._benchmark_external_profiles()
+        raw_profiles = data.get("service_handoff_profiles", data.get("handoff_profiles", []))
+        if not isinstance(raw_profiles, list):
+            return {}
+        profiles: dict[str, dict[str, Any]] = {}
+        for raw in raw_profiles[:40]:
+            normalized = self._benchmark_normalize_service_handoff_profile(raw)
+            if normalized is None:
+                continue
+            fingerprint, profile = normalized
+            profiles[fingerprint] = profile
+        return profiles
+
+    def _benchmark_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
+        profiles = {
+            key: dict(value)
+            for key, value in self._benchmark_builtin_service_handoff_profiles().items()
+        }
+        profiles.update(self._benchmark_external_service_handoff_profiles())
+        return profiles
 
     def _benchmark_render_service_handoff_subtasks(
         self,
