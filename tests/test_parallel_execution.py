@@ -3370,7 +3370,9 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(len(handoff), 3)
         self.assertIn("只深挖当前 active 题 a-05", handoff[0]["task_description"])
         self.assertIn("禁止 setup/VPN/toolchain/list/start", handoff[0]["task_description"])
-        self.assertIn("HugeGraph/Gremlin/Arthas/JDWP", handoff[0]["task_description"])
+        self.assertIn("真实证据", handoff[0]["task_description"])
+        self.assertIn("不要套用固定题号或固定技术栈", handoff[0]["task_description"])
+        self.assertNotIn("HugeGraph/Gremlin/Arthas/JDWP", handoff[0]["task_description"])
 
     def test_benchmark_reasoning_handoff_specializes_hugegraph(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -3444,6 +3446,41 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("custom-01", rendered[0]["task_description"])
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
         self.assertIn("Custom service", rendered[0]["context"])
+
+    def test_benchmark_service_probe_profile_can_define_handoff_steps(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "handoff_context": "## CustomSvc\nUse observed RPC methods only.",
+                                "handoff_steps": [
+                                    "Benchmark customsvc handoff step 1：复核 {current} at {addr_text}",
+                                    "Benchmark customsvc exploit step 2：验证 {current} 暴露的 RPC",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+                current="custom-02",
+                addr_text="10.0.1.2:9000",
+                context="state context",
+                fingerprint="customsvc",
+            )
+
+        self.assertEqual(len(rendered), 2)
+        self.assertIn("custom-02", rendered[0]["task_description"])
+        self.assertIn("10.0.1.2:9000", rendered[0]["task_description"])
+        self.assertIn("CustomSvc", rendered[0]["context"])
 
     def test_benchmark_service_action_profiles_drive_deterministic_steps(self):
         profiles = self.pipeline._benchmark_service_action_profiles()

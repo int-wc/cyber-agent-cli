@@ -1992,6 +1992,12 @@ class FourPillarPipeline:
         reason = str(raw.get("reason") or "").strip()
         if reason:
             profile["reason"] = reason[:500]
+        handoff_context = str(raw.get("handoff_context") or "").strip()
+        if handoff_context:
+            profile["handoff_context"] = handoff_context[:3000]
+        handoff_steps = self._benchmark_string_tuple(raw.get("handoff_steps"), limit=10)
+        if handoff_steps:
+            profile["handoff_steps"] = handoff_steps
         probe_key = str(raw.get("probe_key") or "").strip().lower()
         probe = self._benchmark_service_probe_registry().get(probe_key)
         if callable(probe):
@@ -4905,15 +4911,27 @@ class FourPillarPipeline:
     def _benchmark_external_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
         data = self._benchmark_external_profiles()
         raw_profiles = data.get("service_handoff_profiles", data.get("handoff_profiles", []))
-        if not isinstance(raw_profiles, list):
-            return {}
         profiles: dict[str, dict[str, Any]] = {}
-        for raw in raw_profiles[:40]:
-            normalized = self._benchmark_normalize_service_handoff_profile(raw)
-            if normalized is None:
+        if isinstance(raw_profiles, list):
+            for raw in raw_profiles[:40]:
+                normalized = self._benchmark_normalize_service_handoff_profile(raw)
+                if normalized is None:
+                    continue
+                fingerprint, profile = normalized
+                profiles[fingerprint] = profile
+        for profile in self._benchmark_external_service_probe_profiles():
+            fingerprint = str(profile.get("fingerprint") or "")
+            context = str(profile.get("handoff_context") or "").strip()
+            steps = self._benchmark_string_tuple(profile.get("handoff_steps"), limit=10)
+            if not fingerprint or not context or not steps:
                 continue
-            fingerprint, profile = normalized
-            profiles[fingerprint] = profile
+            profiles.setdefault(
+                fingerprint,
+                {
+                    "context": context[:3000],
+                    "steps": list(steps),
+                },
+            )
         return profiles
 
     def _benchmark_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
@@ -4974,28 +4992,36 @@ class FourPillarPipeline:
             )
             if profile_handoff:
                 return profile_handoff
+        fingerprint_note = (
+            f"已识别服务指纹为 {fingerprint}；"
+            if isinstance(fingerprint, str) and fingerprint
+            else "未识别到可套用的服务专项 profile；"
+        )
         return [
             {
                 "role": "runner",
                 "task_description": (
                     f"Benchmark handoff step 1：只深挖当前 active 题 {current} "
                     f"({addr_text})，禁止 setup/VPN/toolchain/list/start。所有 10.x 请求必须 "
-                    "curl --interface tun0。先复核 fast path 的服务指纹，再按真实响应选择路径："
-                    "若是 HugeGraph/Gremlin/Arthas/JDWP，优先查 /versions、/graphs、/gremlin "
-                    "System.getenv/System.getProperties、Arthas 8561/8562、JDWP 5005；"
-                    "若是网页登录/PHP/LFI，才带 cookie 登录并验证 download/file/path/source/config。"
+                    "curl --interface tun0。先复核 fast path 的真实证据：状态码、响应头、"
+                    "标题、表单、脚本/chunk、OpenAPI/Swagger、错误栈、参数名、cookie、"
+                    "重定向、暴露端点和服务 banner。不要套用固定题号或固定技术栈；"
+                    "只从已观察到的响应差异中选择下一步。"
                     "发现 flag{...} 立即 submit。"
                 ),
-                "context": context,
+                "context": f"{context}\n\n## 通用 handoff 约束\n{fingerprint_note}"
+                "没有专属 profile 时，围绕真实响应建立一个主假设和一个备选假设；"
+                "优先验证已暴露的 API、认证/权限边界、配置/源码/静态资源泄漏、"
+                "文件/路径/URL/模板/查询参数行为和默认凭据。无响应差异就停止该方向。",
                 "parallel": False,
             },
             {
                 "role": "runner",
                 "task_description": (
                     f"Benchmark handoff step 2：继续当前题 {current} 的一个最高置信后续假设，"
-                    "必须由真实响应驱动：HugeGraph 优先 JDWP/Arthas/Gremlin 沙箱绕过或配置泄露；"
-                    "Web 题才尝试管理员凭据、审批/contract/init/config 命名端点、敏感文件、"
-                    "上传后日志/路径泄露。最多验证一个主假设和一个备选假设；无新响应差异就停止。"
+                    "必须由真实响应驱动：只验证上一轮已经暴露的端点、参数、认证状态、"
+                    "静态资源、错误信息、服务 banner 或协议特征。最多验证一个主假设和一个"
+                    "备选假设；无新响应差异就停止。"
                     "发现 flag/secret/候选答案立即 submit。"
                 ),
                 "context": context,
