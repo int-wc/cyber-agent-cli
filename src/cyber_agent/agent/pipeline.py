@@ -1156,6 +1156,21 @@ class FourPillarPipeline:
             ),
         }
 
+    def _benchmark_disabled_builtin_fingerprints(self) -> set[str]:
+        data = self._benchmark_external_profiles()
+        raw = data.get(
+            "disabled_builtin_fingerprints",
+            data.get(
+                "disable_builtin_fingerprints",
+                data.get("disabled_service_fingerprints", ()),
+            ),
+        )
+        return {
+            value.lower()
+            for value in self._benchmark_string_tuple(raw, limit=80)
+            if _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", value.lower())
+        }
+
     def _benchmark_difficulty_rank(self, difficulty: Any) -> int:
         normalized = str(difficulty or "").lower()
         order = list(self._benchmark_selection_policy()["difficulty_order"])
@@ -2379,8 +2394,14 @@ class FourPillarPipeline:
         return profiles
 
     def _benchmark_service_probe_profiles(self) -> list[dict[str, Any]]:
+        disabled = self._benchmark_disabled_builtin_fingerprints()
+        builtin = [
+            profile
+            for profile in self._benchmark_builtin_service_probe_profiles()
+            if str(profile.get("fingerprint") or "").lower() not in disabled
+        ]
         return self._benchmark_merge_profiles_by_key(
-            self._benchmark_builtin_service_probe_profiles(),
+            builtin,
             self._benchmark_external_service_probe_profiles(),
             "fingerprint",
         )
@@ -4434,9 +4455,11 @@ class FourPillarPipeline:
         return profiles
 
     def _benchmark_service_action_profiles(self) -> dict[str, dict[str, Any]]:
+        disabled = self._benchmark_disabled_builtin_fingerprints()
         profiles = {
             key: dict(value)
             for key, value in self._benchmark_builtin_service_action_profiles().items()
+            if key not in disabled
         }
         for fingerprint, external in self._benchmark_external_service_action_profiles().items():
             merged = dict(profiles.get(fingerprint, {}))
@@ -5717,9 +5740,11 @@ class FourPillarPipeline:
         return profiles
 
     def _benchmark_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
+        disabled = self._benchmark_disabled_builtin_fingerprints()
         profiles = {
             key: dict(value)
             for key, value in self._benchmark_builtin_service_handoff_profiles().items()
+            if key not in disabled
         }
         profiles.update(self._benchmark_external_service_handoff_profiles())
         return profiles

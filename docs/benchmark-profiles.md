@@ -30,12 +30,19 @@ as incremental extensions: list-like fields such as `probe_paths`,
 `handoff_paths` are appended and deduplicated, while scalar fields such as
 `reason` override the default. This lets you add observed paths or credentials
 without copying the whole built-in profile.
+If a built-in service fingerprint is misleading for a new benchmark run, add it
+to `disabled_builtin_fingerprints`; an external profile with the same
+fingerprint can still reintroduce only the generic evidence-driven checks you
+want.
 
 ## Supported Sections
 
 - `selection_policy`: difficulty order, fast-path difficulties, handoff
   difficulties, recovery difficulties, unreachable retry count, and estimated
   fast score.
+- `disabled_builtin_fingerprints`: built-in service fingerprints to remove from
+  the default probe/action/handoff profile set before external profiles are
+  merged.
 - `probe_paths`: extra paths for bounded HTTP fingerprinting.
 - `flag_paths`: extra absolute flag file candidates shared by service probes
   such as Langflow validate/code, JDWP exec/exfiltration, and default Telnet

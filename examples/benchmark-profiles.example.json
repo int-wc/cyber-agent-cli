@@ -7,6 +7,7 @@
     "unreachable_retries": 3,
     "estimated_fast_score": 150
   },
+  "disabled_builtin_fingerprints": [],
   "probe_paths": [
     "healthz",
     "status",

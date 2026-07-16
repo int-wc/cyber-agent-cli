@@ -3392,6 +3392,44 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("probe", profile)
         self.assertIn("handoff_steps", profile)
 
+    def test_benchmark_profile_can_disable_builtin_service_fingerprints(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "disabled_builtin_fingerprints": ["dify", "langflow"],
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "langflow",
+                                "match_any": ["custom-flow"],
+                                "probe_paths": ["api/custom-health"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            probe_profiles = self.pipeline._benchmark_service_probe_profiles()
+            action_profiles = self.pipeline._benchmark_service_action_profiles()
+            handoff_profiles = self.pipeline._benchmark_service_handoff_profiles()
+            langflow = next(
+                profile
+                for profile in probe_profiles
+                if profile["fingerprint"] == "langflow"
+            )
+
+        self.assertNotIn("dify", [profile["fingerprint"] for profile in probe_profiles])
+        self.assertNotIn("dify", action_profiles)
+        self.assertNotIn("dify", handoff_profiles)
+        self.assertEqual(langflow["match_any"], ("custom-flow",))
+        self.assertEqual(langflow["probe_paths"], ("api/custom-health",))
+        self.assertNotIn("/api/v1/validate/code", langflow.get("match_any", ()))
+
     def test_benchmark_external_webapp_profile_extends_builtin_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profile_path = Path(tmpdir) / "benchmark-profiles.json"
