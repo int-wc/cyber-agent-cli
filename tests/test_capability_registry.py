@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from cyber_agent.agent.runner import AgentRunner
 from cyber_agent.capability_registry import CapabilityRegistry
+from cyber_agent.capability_models import CapabilityExecutionResult, GeneratedCapability
 from cyber_agent.execution_control import ExecutionController
 from cyber_agent.tools import get_default_tools
 
@@ -131,6 +132,42 @@ class CapabilityRegistryTestCase(unittest.TestCase):
             stored_data = json.loads(capability_file.read_text(encoding="utf-8"))
             self.assertEqual(stored_data["name"], "doc_helper")
             self.assertIn("handle_request", stored_data["source_code"])
+
+    def test_runtime_tool_formats_generated_execution_failure(self) -> None:
+        """
+        测试：动态工具执行失败时能返回截断后的错误信息，不因私有函数遗漏导入崩溃。
+        """
+        with TemporaryDirectory() as temp_dir:
+            registry = CapabilityRegistry(base_dir=Path(temp_dir))
+            entrypoint_path = Path(temp_dir) / "broken_tool.py"
+            entrypoint_path.write_text("print('占位')\n", encoding="utf-8")
+            capability = GeneratedCapability(
+                name="broken_tool",
+                kind="tool",
+                register_as_tool=True,
+                description="用于模拟执行失败的动态工具。",
+                system_prompt="",
+                tool_description="模拟执行失败。",
+                usage_hint="测试专用。",
+                entrypoint_path=str(entrypoint_path),
+            )
+            registry._capabilities[capability.name] = capability
+            runtime_tool = registry._build_runtime_tool(capability)
+
+            with patch.object(
+                registry,
+                "_execute_generated_capability",
+                return_value=CapabilityExecutionResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="模拟失败" * 2000,
+                ),
+            ):
+                tool_result = runtime_tool.invoke({"request": "触发失败"})
+
+        self.assertIn("生成工具执行失败", tool_result)
+        self.assertIn("模拟失败", tool_result)
+        self.assertIn("输出过长，已截断", tool_result)
 
     def test_registry_can_create_skill_file_and_inject_skill_prompt(self) -> None:
         """

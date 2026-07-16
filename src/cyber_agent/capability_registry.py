@@ -38,7 +38,10 @@ from .openai_compat import ensure_deepseek_reasoning_content_compat
 from .tools.metadata import attach_tool_risk
 from .tools.system import _run_process_with_controller
 from .capability_models import *  # noqa: F403  # 向后兼容：模型已拆分至独立模块
-from .capability_models import _extract_response_text  # 私有函数，需要显式导入
+from .capability_models import (  # 私有函数不会被 import * 导入，需要显式导入
+    _extract_response_text,
+    _truncate_output,
+)
 
 
 class CapabilityRegistry:
