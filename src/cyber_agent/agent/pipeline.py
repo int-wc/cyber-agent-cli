@@ -1077,10 +1077,15 @@ class FourPillarPipeline:
 
     @staticmethod
     def _benchmark_result_head(result: str, *, limit: int = 180) -> str:
+        heads: list[str] = []
         for line in str(result or "").splitlines():
             cleaned = " ".join(line.strip().split())
             if cleaned:
-                return cleaned[:limit]
+                heads.append(cleaned)
+            if len(heads) >= 2:
+                break
+        if heads:
+            return " | ".join(heads)[:limit]
         return ""
 
     @staticmethod
@@ -1708,6 +1713,27 @@ class FourPillarPipeline:
         return stdout
 
     def _benchmark_start_local(self, code: str) -> str:
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+            closed = set(self._benchmark_state.get("closed_challenges", set()))
+            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+            active = dict(self._benchmark_state.get("active_containers", {}))
+        active_open = {
+            active_code: addrs
+            for active_code, addrs in active.items()
+            if active_code not in completed
+            and active_code not in closed
+            and active_code not in abandoned
+        }
+        if active_open:
+            active_text = ", ".join(
+                f"{active_code}=>{','.join(str(addr) for addr in addrs or [])}"
+                for active_code, addrs in sorted(active_open.items())
+            )
+            return (
+                f"blocked_by_active: 当前已有 active 容器 {active_text}，"
+                f"拒绝 start {code}；必须先 probe/submit/close 当前题。"
+            )
         _, stdout, _ = self._benchmark_platform_request(
             method="POST",
             path=f"/openapi/v1/challenges/start?unique_code={code}",
@@ -3323,7 +3349,7 @@ class FourPillarPipeline:
     def _benchmark_wait_for_container_ready(self, url: str, outputs: list[str]) -> str:
         root_body = ""
         tun_interface = self._benchmark_tun_interface()
-        for index, delay in enumerate((0.0, 0.5, 1.0, 2.0)):
+        for index, delay in enumerate((0.0, 1.0, 2.0, 3.0, 5.0, 8.0)):
             if delay:
                 time_mod.sleep(delay)
             cmd = [
@@ -3333,9 +3359,9 @@ class FourPillarPipeline:
                 "--interface",
                 tun_interface,
                 "--connect-timeout",
-                "1",
+                "2",
                 "--max-time",
-                "3",
+                "5",
                 "-i",
                 url,
             ]
@@ -3357,6 +3383,11 @@ class FourPillarPipeline:
                 outputs.append(f"## readiness {index + 1} {url}\n{root_body[:2500]}\n{err[:500]}")
                 return root_body
             outputs.append(f"## readiness {index + 1} {url}\n{root_body[:1000]}\n{err[:500]}")
+        outputs.append(
+            f"## readiness exhausted {url}\n"
+            "容器在短重试窗口内未稳定返回；后续探测仍会尝试有限路径，"
+            "只有所有探测均无 HTTP/协议信号时才按不可达计数。"
+        )
         return root_body
 
     def _benchmark_derive_probe_urls(self, base: str, html: str) -> list[str]:
@@ -4514,6 +4545,29 @@ class FourPillarPipeline:
                         if isinstance(addrs, list) and addrs:
                             active_updates[code] = [str(addr) for addr in addrs]
                             current_challenge = code
+
+        if is_platform_challenges_command and not challenges_snapshot:
+            for match in _re_mod.finditer(
+                r"(?P<code>\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+\b)"
+                r"\s*:\s*completed=(?P<completed>true|false)"
+                r"\s*,\s*status=(?P<status>[A-Za-z_]+)"
+                r"\s*,\s*addr=(?P<addr>\[[^\]\n]{0,500}\])",
+                output,
+                flags=_re_mod.IGNORECASE,
+            ):
+                code = match.group("code")
+                completed_value = match.group("completed").lower() == "true"
+                status = match.group("status").lower()
+                addrs = _re_mod.findall(
+                    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}",
+                    match.group("addr"),
+                )
+                if completed_value:
+                    completed.add(code)
+                    continue
+                if status == "available" and addrs:
+                    active_updates[code] = [str(addr) for addr in addrs]
+                    current_challenge = code
 
         state_changed = bool(
             updates

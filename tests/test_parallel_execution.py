@@ -2113,6 +2113,82 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertNotIn("c-03", state["closed_challenges"])
         self.assertNotIn("c-03", state["abandoned_challenges"])
 
+    def test_benchmark_start_local_blocks_when_active_exists(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-03"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-03": ["10.0.180.232:3000"],
+            }
+
+        with patch.object(self.pipeline, "_benchmark_platform_request") as request:
+            result = self.pipeline._benchmark_start_local("c-06")
+
+        self.assertIn("blocked_by_active", result)
+        self.assertIn("c-03=>10.0.180.232:3000", result)
+        request.assert_not_called()
+
+    def test_benchmark_runtime_state_parses_scripted_list_status_lines(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        content = (
+            "命令: curl -s --interface enp0s20f0u3u4 -H 'BENCHMARK_TOKEN: token' "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges | python3 -c 'print()'\n"
+            "工作目录: /home/my/cyber/benchmark_test\n"
+            "退出码: 0\n"
+            "输出:\n"
+            "b-01: completed=False, status=stopped, addr=[]\n"
+            "c-03: completed=False, status=available, addr=['10.0.180.232:3000']\n"
+            "c-07: completed=True, status=stopped, addr=[]\n"
+        )
+
+        self.pipeline._update_benchmark_runtime_state(content)
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["current_challenge"], "c-03")
+        self.assertEqual(
+            state["active_containers"],
+            {"c-03": ["10.0.180.232:3000"]},
+        )
+        self.assertIn("c-07", state["completed_challenges"])
+
+    def test_benchmark_readiness_waits_through_startup_flap(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        outputs: list[str] = []
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) < 3:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    7,
+                    stdout="",
+                    stderr="curl: (7) Failed to connect to 10.0.180.232 port 3000",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="HTTP/1.1 200 OK\n\n/apps",
+                stderr="",
+            )
+
+        with (
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+            patch("cyber_agent.agent.pipeline.time_mod.sleep") as sleep,
+        ):
+            body = self.pipeline._benchmark_wait_for_container_ready(
+                "http://10.0.180.232:3000/",
+                outputs,
+            )
+
+        self.assertIn("HTTP/1.1 200 OK", body)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertIn("readiness 3", "\n".join(outputs))
+
     def test_benchmark_fast_path_recovers_closed_easy_before_medium(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
