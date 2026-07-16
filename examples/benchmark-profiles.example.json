@@ -13,6 +13,11 @@
     ".well-known/security.txt",
     "api/version"
   ],
+  "flag_paths": [
+    "/opt/app/flag.txt",
+    "/run/secrets/flag",
+    "/workspace/flag"
+  ],
   "text_path_prefixes": [
     "debug",
     "internal",

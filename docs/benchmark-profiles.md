@@ -30,6 +30,9 @@ is JSON, so it cannot contain comments and it does not execute code.
   difficulties, recovery difficulties, unreachable retry count, and estimated
   fast score.
 - `probe_paths`: extra paths for bounded HTTP fingerprinting.
+- `flag_paths`: extra absolute flag file candidates shared by service probes
+  such as Langflow validate/code, JDWP exec/exfiltration, and default Telnet
+  shell retrieval.
 - `text_path_prefixes`: path prefixes that should be expanded when response text
   exposes names such as `debug`, `download`, or `internal`.
 - `param_payload_profiles`: payloads selected by parameter name, such as

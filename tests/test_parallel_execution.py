@@ -2767,6 +2767,74 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn(("operator", "operator123"), telnet_credentials)
         self.assertEqual(flag_command, "cat /opt/flag.txt\n")
 
+    def test_benchmark_external_flag_paths_extend_shared_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "flag_paths": [
+                            "/opt/service/flag.txt",
+                            "workspace/flag",
+                            "/tmp/flag;rm -rf /",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            flag_paths = self.pipeline._benchmark_flag_paths()
+            flag_command = self.pipeline._benchmark_telnet_flag_command()
+
+        self.assertIn("/challenge/flag.txt", flag_paths)
+        self.assertIn("/opt/service/flag.txt", flag_paths)
+        self.assertIn("/workspace/flag", flag_paths)
+        self.assertNotIn("/tmp/flag;rm -rf /", flag_paths)
+        self.assertIn("/opt/service/flag.txt", flag_command)
+        self.assertNotIn("rm -rf", flag_command)
+
+    def test_benchmark_langflow_probe_uses_external_flag_paths(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps({"flag_paths": ["/opt/langflow/flag.txt"]}),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            payloads: list[dict[str, object]] = []
+
+            def fake_curl_json(*_args, **kwargs):
+                payload = kwargs.get("payload")
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+                return subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+
+            with (
+                patch.object(
+                    self.pipeline,
+                    "_benchmark_curl_local",
+                    return_value=subprocess.CompletedProcess([], 0, stdout="{}", stderr=""),
+                ),
+                patch.object(
+                    self.pipeline,
+                    "_benchmark_curl_json_local",
+                    side_effect=fake_curl_json,
+                ),
+                patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+            ):
+                output = self.pipeline._benchmark_probe_langflow_local(
+                    "c-08",
+                    "http://10.0.180.232:7860/",
+                )
+
+        serialized_payloads = json.dumps(payloads, ensure_ascii=False)
+        self.assertIn("/opt/langflow/flag.txt", serialized_payloads)
+        self.assertIn("/opt/langflow/flag.txt", output)
+
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3685,6 +3753,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         policy = self.pipeline._benchmark_selection_policy()
         paths = self.pipeline._benchmark_probe_paths()
+        flag_paths = self.pipeline._benchmark_flag_paths()
         payloads = self.pipeline._benchmark_payloads_for_param("api_token")
         raw_commands = self.pipeline._benchmark_raw_protocol_commands()
         telnet_credentials = self.pipeline._benchmark_telnet_credentials()
@@ -3703,6 +3772,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(policy["unreachable_retries"], 3)
         self.assertEqual(policy["estimated_fast_score"], 150)
         self.assertIn("healthz", paths)
+        self.assertIn("/opt/app/flag.txt", flag_paths)
         self.assertIn("../../../../../run/secrets/app_token", payloads)
         self.assertIn("INFO", raw_commands)
         self.assertIn(("operator", "operator"), telnet_credentials)

