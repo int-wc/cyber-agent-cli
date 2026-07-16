@@ -1242,6 +1242,16 @@ class FourPillarPipeline:
         external: list[dict[str, Any]],
         key: str,
     ) -> list[dict[str, Any]]:
+        def merge_value(existing: Any, incoming: Any) -> Any:
+            if (
+                isinstance(existing, (tuple, list))
+                and isinstance(incoming, (tuple, list))
+                and not isinstance(existing, (str, bytes))
+                and not isinstance(incoming, (str, bytes))
+            ):
+                return tuple(dict.fromkeys(tuple(existing) + tuple(incoming)))
+            return incoming
+
         result = [dict(profile) for profile in builtin]
         index = {
             str(profile.get(key)): offset
@@ -1254,7 +1264,14 @@ class FourPillarPipeline:
                 continue
             if profile_key in index:
                 merged = dict(result[index[profile_key]])
-                merged.update(profile)
+                for profile_field, profile_value in profile.items():
+                    if profile_field == key:
+                        merged[profile_field] = profile_value
+                    else:
+                        merged[profile_field] = merge_value(
+                            merged.get(profile_field),
+                            profile_value,
+                        )
                 result[index[profile_key]] = merged
             else:
                 index[profile_key] = len(result)
@@ -2123,7 +2140,19 @@ class FourPillarPipeline:
         probe = self._benchmark_service_probe_registry().get(probe_key)
         if callable(probe):
             profile["probe"] = probe
-        if not any(key in profile for key in ("match_all", "match_any", "match_any_all")):
+        if not any(
+            key in profile
+            for key in (
+                "match_all",
+                "match_any",
+                "match_any_all",
+                "probe_paths",
+                "handoff_context",
+                "handoff_steps",
+                "reason",
+                "probe",
+            )
+        ):
             return None
         return profile
 

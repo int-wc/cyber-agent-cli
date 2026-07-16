@@ -3178,6 +3178,72 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("GET /debug/export", joined)
         self.assertEqual(curl_mock.call_count, 2)
 
+    def test_benchmark_external_service_profile_can_extend_builtin_by_fingerprint(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "langflow",
+                                "probe_paths": ["api/v1/custom-health"],
+                                "handoff_steps": [
+                                    "Benchmark langflow custom step：check {current} at {addr_text}"
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profile = self.pipeline._benchmark_matching_service_probe_profile(
+                "HTTP/1.1 200 OK\nServer: uvicorn\n<title>Langflow</title>"
+            )
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["fingerprint"], "langflow")
+        self.assertIn("/api/v1/validate/code", profile["match_any"])
+        self.assertIn("api/v1/custom-health", profile["probe_paths"])
+        self.assertIn("probe", profile)
+        self.assertIn("handoff_steps", profile)
+
+    def test_benchmark_external_webapp_profile_extends_builtin_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "webapp_flow_profiles": [
+                            {
+                                "name": "form-login-and-file-download",
+                                "credentials": [
+                                    {"username": "auditor", "password": "auditor123"}
+                                ],
+                                "handoff_paths": ["api/audit/export"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            profile = self.pipeline._benchmark_matching_webapp_flow_profile(
+                '<form action="/login"><input name="password"></form>'.lower()
+            )
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["name"], "form-login-and-file-download")
+        self.assertIn(("admin", "admin123"), profile["credentials"])
+        self.assertIn(("auditor", "auditor123"), profile["credentials"])
+        self.assertIn("dashboard.php", profile["authenticated_paths"])
+        self.assertIn("api/audit/export", profile["handoff_paths"])
+
     def test_benchmark_handoff_followup_uses_custom_service_probe_profile(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

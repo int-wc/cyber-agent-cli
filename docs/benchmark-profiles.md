@@ -24,6 +24,13 @@ examples/benchmark-profiles.example.json
 Copy only the entries that match evidence you have actually observed. The file
 is JSON, so it cannot contain comments and it does not execute code.
 
+Profiles with the same `name` or `fingerprint` as a built-in profile are merged
+as incremental extensions: list-like fields such as `probe_paths`,
+`credentials`, `authenticated_paths`, and `handoff_paths` are appended and
+deduplicated, while scalar fields such as `reason` override the default. This
+lets you add observed paths or credentials without copying the whole built-in
+profile.
+
 ## Supported Sections
 
 - `selection_policy`: difficulty order, fast-path difficulties, handoff

@@ -98,6 +98,13 @@
   ],
   "service_probe_profiles": [
     {
+      "fingerprint": "langflow",
+      "probe_paths": [
+        "api/v1/health",
+        "api/v1/flows"
+      ]
+    },
+    {
       "fingerprint": "customsvc",
       "match_any": [
         "customsvc",
