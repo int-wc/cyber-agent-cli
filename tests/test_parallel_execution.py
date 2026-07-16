@@ -3640,6 +3640,45 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertIn("http://10.0.1.2:80/artifacts/latest/flag.txt", urls)
 
+    def test_benchmark_derives_payloads_from_openapi_schema_names(self):
+        body = json.dumps(
+            {
+                "openapi": "3.0.0",
+                "paths": {
+                    "/download": {
+                        "get": {
+                            "parameters": [
+                                {"name": "filename", "in": "query"},
+                                {"name": "redirect_url", "in": "query"},
+                            ]
+                        }
+                    }
+                },
+                "components": {
+                    "schemas": {
+                        "ExportRequest": {
+                            "type": "object",
+                            "properties": {
+                                "template": {"type": "string"},
+                                "api_token": {"type": "string"},
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+        urls = self.pipeline._benchmark_derive_probe_urls(
+            "http://10.0.1.2:80/",
+            body,
+        )
+        joined = "\n".join(urls)
+
+        self.assertIn("filename=..%2Fflag", joined)
+        self.assertIn("redirect_url=file%3A%2F%2F%2Fflag", joined)
+        self.assertIn("template=..%2Fflag", joined)
+        self.assertIn("api_token=%7B%7B7%2A7%7D%7D", joined)
+
     def test_benchmark_object_storage_derives_quoted_bucket_and_xml_keys(self):
         body = (
             'Internal note: migrated to the "secret-data" bucket. '

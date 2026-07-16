@@ -3879,6 +3879,7 @@ class FourPillarPipeline:
                 flags=_re_mod.IGNORECASE,
             )
         }
+        discovered_names.update(self._benchmark_schema_parameter_names(html))
         for url in list(urls):
             parsed = _urlparse(url)
             for key, _ in _parse_qsl(parsed.query, keep_blank_values=True):
@@ -3890,6 +3891,64 @@ class FourPillarPipeline:
         for name in sorted(discovered_names):
             urls.extend(self._benchmark_payload_urls_for_param(base, name))
         return urls
+
+    @staticmethod
+    def _benchmark_schema_parameter_names(text: str) -> set[str]:
+        names: set[str] = set()
+        if not text:
+            return names
+        sample = text[:40000]
+        try:
+            parsed = json.loads(sample)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, (dict, list)):
+            def visit(value: Any) -> None:
+                if isinstance(value, dict):
+                    raw_name = value.get("name")
+                    if isinstance(raw_name, str):
+                        names.add(raw_name)
+                    properties = value.get("properties")
+                    if isinstance(properties, dict):
+                        for property_name in properties:
+                            if isinstance(property_name, str):
+                                names.add(property_name)
+                    for child in value.values():
+                        visit(child)
+                elif isinstance(value, list):
+                    for child in value[:200]:
+                        visit(child)
+
+            visit(parsed)
+        patterns = (
+            r'"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_-]{0,39})"',
+            r"'name'\s*:\s*'([A-Za-z_][A-Za-z0-9_-]{0,39})'",
+            r'"properties"\s*:\s*\{([^{}]{1,3000})\}',
+            r"'properties'\s*:\s*\{([^{}]{1,3000})\}",
+        )
+        for pattern in patterns[:2]:
+            for raw_name in _re_mod.findall(pattern, sample):
+                names.add(raw_name)
+        for pattern in patterns[2:]:
+            for block in _re_mod.findall(pattern, sample):
+                for raw_name in _re_mod.findall(
+                    r"""["']([A-Za-z_][A-Za-z0-9_-]{0,39})["']\s*:""",
+                    block,
+                ):
+                    names.add(raw_name)
+        ignored = {
+            "type",
+            "title",
+            "description",
+            "required",
+            "schema",
+            "items",
+            "properties",
+        }
+        return {
+            name for name in names
+            if name.lower() not in ignored and len(name) <= 40
+        }
 
     def _benchmark_text_path_probe_urls(self, base: str, text: str) -> list[str]:
         urls: list[str] = []

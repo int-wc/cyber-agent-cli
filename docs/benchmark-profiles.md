@@ -47,6 +47,8 @@ without copying the whole built-in profile.
   `artifact_endpoint`, `export_path`, or `debug_url`.
 - `param_payload_profiles`: payloads selected by parameter name, such as
   `token`, `file`, or `_url`.
+  Parameter names are collected from HTML fields, query strings, OpenAPI
+  `parameters[].name`, and JSON schema `properties`.
 - `lfi_base_paths`: extra bounded LFI candidate paths.
 - `object_storage_buckets` and `object_storage_keys`: bucket/key candidates for
   S3-like or artifact-index services.
