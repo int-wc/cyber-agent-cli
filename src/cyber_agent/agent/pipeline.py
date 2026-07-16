@@ -2024,6 +2024,9 @@ class FourPillarPipeline:
         handoff_steps = self._benchmark_string_tuple(raw.get("handoff_steps"), limit=10)
         if handoff_steps:
             profile["handoff_steps"] = handoff_steps
+        probe_paths = self._benchmark_string_tuple(raw.get("probe_paths"), limit=40)
+        if probe_paths:
+            profile["probe_paths"] = probe_paths
         probe_key = str(raw.get("probe_key") or "").strip().lower()
         probe = self._benchmark_service_probe_registry().get(probe_key)
         if callable(probe):
@@ -2117,6 +2120,13 @@ class FourPillarPipeline:
             service_output = probe(code, base, evidence)
             if service_output:
                 service_outputs.append(str(service_output))
+        profile_path_output = self._benchmark_probe_profile_paths_local(
+            code,
+            base,
+            profile,
+        )
+        if profile_path_output:
+            service_outputs.append(profile_path_output)
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
         if code in completed:
@@ -2127,6 +2137,47 @@ class FourPillarPipeline:
         else:
             self._benchmark_mark_abandoned(code, reason)
         return service_outputs
+
+    def _benchmark_probe_profile_paths_local(
+        self,
+        code: str,
+        base: str,
+        profile: dict[str, Any],
+    ) -> str:
+        paths = self._benchmark_string_tuple(profile.get("probe_paths"), limit=20)
+        if not paths:
+            return ""
+        fingerprint = str(profile.get("fingerprint") or "service")
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## {fingerprint}-profile-probe {base}"]
+        seen: set[str] = set()
+        for raw_path in paths:
+            path = raw_path.lstrip("/")
+            url = _urljoin(base, path)
+            if url in seen:
+                continue
+            seen.add(url)
+            result = self._benchmark_curl_local(
+                url,
+                tun_interface=tun_interface,
+                timeout=8,
+            )
+            body = (result.stdout or "")[:5000]
+            outputs.append(
+                f"## GET /{path}\n{body}\n{(result.stderr or '')[:300]}"
+            )
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: {fingerprint}_profile_probe {url}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                break
+        return "\n".join(outputs)
 
     def _benchmark_probe_langflow_local(self, code: str, base: str) -> str:
         tun_interface = self._benchmark_tun_interface()

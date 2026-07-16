@@ -2994,6 +2994,55 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["service_fingerprints"]["custom-01"], "customsvc")
         self.assertIn("custom-01", state["reasoning_challenges"])
 
+    def test_benchmark_external_service_profile_probe_paths_are_executed(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "probe_paths": ["api/status", "/debug/export"],
+                                "unresolved": "reasoning",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            profile = self.pipeline._benchmark_matching_service_probe_profile(
+                "CustomSvc banner"
+            )
+
+            with patch.object(
+                self.pipeline,
+                "_benchmark_curl_local",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="HTTP/1.1 200 OK\n\nstatus=ok",
+                    stderr="",
+                ),
+            ) as curl_mock:
+                outputs = self.pipeline._benchmark_run_service_probe_profile(
+                    "custom-01",
+                    "http://10.0.1.2:8080/",
+                    "CustomSvc banner",
+                    profile,
+                )
+
+        joined = "\n".join(outputs)
+        self.assertIsNotNone(profile)
+        self.assertIn("customsvc-profile-probe", joined)
+        self.assertIn("GET /api/status", joined)
+        self.assertIn("GET /debug/export", joined)
+        self.assertEqual(curl_mock.call_count, 2)
+
     def test_benchmark_handoff_followup_uses_custom_service_probe_profile(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3599,6 +3648,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn(("demo", "demo123"), generic_web_profile["credentials"])
         self.assertIsNotNone(service_profile)
         self.assertEqual(service_profile["fingerprint"], "customsvc")
+        self.assertIn("api/config", service_profile["probe_paths"])
         self.assertEqual(len(rendered), 3)
         self.assertIn("generic-01", rendered[0]["task_description"])
         self.assertIn("CustomSvc generic handoff", rendered[0]["context"])

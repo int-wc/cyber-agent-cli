@@ -42,9 +42,10 @@ is JSON, so it cannot contain comments and it does not execute code.
   retrieval attempts.
 - `webapp_flow_profiles`: generic login/dashboard/download flows driven by page
   indicators and demo credentials.
-- `service_probe_profiles`: service fingerprints and optional handoff context.
-  Use response headers, titles, OpenAPI/RPC metadata, cookies, redirects, error
-  messages, or visible service banners. Do not use challenge IDs as match keys.
+- `service_probe_profiles`: service fingerprints, optional service-level
+  `probe_paths`, and optional handoff context. Use response headers, titles,
+  OpenAPI/RPC metadata, cookies, redirects, error messages, or visible service
+  banners. Do not use challenge IDs as match keys.
 - `service_handoff_profiles`: focused multi-step handoff plans for a matched
   fingerprint.
 - `service_action_profiles`: optional action summaries for fingerprints already
@@ -59,6 +60,8 @@ Profiles should describe reusable behavior:
 - Avoid fixed challenge IDs, known validation-set flags, one-off paths, or
   assumptions that only make sense for a single historical task.
 - Prefer adding a new `service_probe_profiles` entry before editing Python.
+- Prefer `probe_paths` for bounded service-specific checks before adding an
+  in-code probe function.
 
 The runtime still enforces the platform safety rules: no hint by default,
 single active challenge sequencing, submit immediately on flag-like output, and
