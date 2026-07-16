@@ -3253,6 +3253,56 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("username=demo", flattened)
         self.assertEqual(len(commands), 2)
 
+    def test_benchmark_external_service_profile_tcp_ports_are_executed(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "tcp_ports": [
+                                    {"port": 5005, "label": "jdwp candidate"},
+                                    8562,
+                                    {"port": 70000, "label": "invalid"},
+                                ],
+                                "unresolved": "reasoning",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            profile = self.pipeline._benchmark_matching_service_probe_profile(
+                "CustomSvc banner"
+            )
+
+            with patch.object(
+                self.pipeline,
+                "_benchmark_probe_tcp_port",
+                side_effect=lambda _host, port: port == 5005,
+            ) as tcp_probe:
+                outputs = self.pipeline._benchmark_run_service_probe_profile(
+                    "custom-01",
+                    "http://10.0.1.2:8080/",
+                    "CustomSvc banner",
+                    profile,
+                )
+
+        joined = "\n".join(outputs)
+        self.assertIsNotNone(profile)
+        self.assertIn("customsvc-tcp-probe", joined)
+        self.assertIn("jdwp candidate 10.0.1.2:5005", joined)
+        self.assertIn("reachable=True", joined)
+        self.assertIn("tcp/8562 10.0.1.2:8562", joined)
+        self.assertNotIn("70000", joined)
+        self.assertEqual(tcp_probe.call_count, 2)
+
     def test_benchmark_external_service_profile_can_extend_builtin_by_fingerprint(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3265,6 +3315,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                             {
                                 "fingerprint": "langflow",
                                 "probe_paths": ["api/v1/custom-health"],
+                                "tcp_ports": [{"port": 7860, "label": "langflow ui"}],
                                 "handoff_steps": [
                                     "Benchmark langflow custom step：check {current} at {addr_text}"
                                 ],
@@ -3284,6 +3335,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(profile["fingerprint"], "langflow")
         self.assertIn("/api/v1/validate/code", profile["match_any"])
         self.assertIn("api/v1/custom-health", profile["probe_paths"])
+        self.assertEqual(profile["tcp_ports"][0]["port"], 7860)
         self.assertIn("probe", profile)
         self.assertIn("handoff_steps", profile)
 
@@ -3928,6 +3980,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(service_profile["fingerprint"], "customsvc")
         self.assertIn("api/config", service_profile["probe_paths"])
         self.assertEqual(service_profile["probe_requests"][0]["path"], "rpc/export")
+        self.assertEqual(service_profile["tcp_ports"][0]["port"], 5005)
         self.assertEqual(len(rendered), 3)
         self.assertIn("generic-01", rendered[0]["task_description"])
         self.assertIn("CustomSvc generic handoff", rendered[0]["context"])

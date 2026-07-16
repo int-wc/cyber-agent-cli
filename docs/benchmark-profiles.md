@@ -26,10 +26,10 @@ is JSON, so it cannot contain comments and it does not execute code.
 
 Profiles with the same `name` or `fingerprint` as a built-in profile are merged
 as incremental extensions: list-like fields such as `probe_paths`,
-`probe_requests`, `credentials`, `authenticated_paths`, and `handoff_paths` are
-appended and deduplicated, while scalar fields such as `reason` override the
-default. This lets you add observed paths or credentials without copying the
-whole built-in profile.
+`probe_requests`, `tcp_ports`, `credentials`, `authenticated_paths`, and
+`handoff_paths` are appended and deduplicated, while scalar fields such as
+`reason` override the default. This lets you add observed paths or credentials
+without copying the whole built-in profile.
 
 ## Supported Sections
 
@@ -53,11 +53,13 @@ whole built-in profile.
 - `webapp_flow_profiles`: generic login/dashboard/download flows driven by page
   indicators and demo credentials.
 - `service_probe_profiles`: service fingerprints, optional service-level
-  `probe_paths`, bounded `probe_requests`, and optional handoff context. Use
-  response headers, titles, OpenAPI/RPC metadata, cookies, redirects, error
-  messages, or visible service banners. Do not use challenge IDs as match keys.
+  `probe_paths`, bounded `probe_requests`, `tcp_ports`, and optional handoff
+  context. Use response headers, titles, OpenAPI/RPC metadata, cookies,
+  redirects, error messages, or visible service banners. Do not use challenge
+  IDs as match keys.
   `probe_requests` support same-container relative `path`, `method` (`GET`,
   `POST`, or `PUT`), optional safe headers, and either `json` or form `data`.
+  `tcp_ports` entries may be integers or objects with `port` and `label`.
 - `service_handoff_profiles`: focused multi-step handoff plans for a matched
   fingerprint.
 - `service_action_profiles`: optional action summaries for fingerprints already

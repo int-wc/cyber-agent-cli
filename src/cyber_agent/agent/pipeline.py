@@ -2203,6 +2203,37 @@ class FourPillarPipeline:
             requests.append(request)
         return tuple(requests)
 
+    @staticmethod
+    def _benchmark_normalize_tcp_ports(raw: Any) -> tuple[dict[str, Any], ...]:
+        if not isinstance(raw, list):
+            return ()
+        ports: list[dict[str, Any]] = []
+        for item in raw[:20]:
+            label = ""
+            raw_port: Any = item
+            if isinstance(item, dict):
+                raw_port = item.get("port")
+                label = str(item.get("label") or "").strip()[:80]
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError):
+                continue
+            if port < 1 or port > 65535:
+                continue
+            entry: dict[str, Any] = {"port": port}
+            if label:
+                entry["label"] = label
+            ports.append(entry)
+        seen: set[int] = set()
+        unique: list[dict[str, Any]] = []
+        for entry in ports:
+            port = int(entry["port"])
+            if port in seen:
+                continue
+            seen.add(port)
+            unique.append(entry)
+        return tuple(unique)
+
     def _benchmark_normalize_service_probe_profile(
         self,
         raw: Any,
@@ -2237,6 +2268,9 @@ class FourPillarPipeline:
         probe_requests = self._benchmark_normalize_probe_requests(raw.get("probe_requests"))
         if probe_requests:
             profile["probe_requests"] = probe_requests
+        tcp_ports = self._benchmark_normalize_tcp_ports(raw.get("tcp_ports"))
+        if tcp_ports:
+            profile["tcp_ports"] = tcp_ports
         probe_key = str(raw.get("probe_key") or "").strip().lower()
         probe = self._benchmark_service_probe_registry().get(probe_key)
         if callable(probe):
@@ -2249,6 +2283,7 @@ class FourPillarPipeline:
                 "match_any_all",
                 "probe_paths",
                 "probe_requests",
+                "tcp_ports",
                 "handoff_context",
                 "handoff_steps",
                 "reason",
@@ -2357,6 +2392,9 @@ class FourPillarPipeline:
         )
         if profile_request_output:
             service_outputs.append(profile_request_output)
+        tcp_output = self._benchmark_probe_profile_tcp_ports_local(code, base, profile)
+        if tcp_output:
+            service_outputs.append(tcp_output)
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
         if code in completed:
@@ -2526,6 +2564,48 @@ class FourPillarPipeline:
                 f"退出码: {result.returncode}\n"
                 "输出:\n"
                 f"{body}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                break
+        return "\n".join(outputs)
+
+    def _benchmark_probe_profile_tcp_ports_local(
+        self,
+        code: str,
+        base: str,
+        profile: dict[str, Any],
+    ) -> str:
+        raw_ports = profile.get("tcp_ports")
+        if not isinstance(raw_ports, (tuple, list)) or not raw_ports:
+            return ""
+        parsed = _urlparse(base)
+        host = parsed.hostname or ""
+        if not host:
+            return ""
+        fingerprint = str(profile.get("fingerprint") or "service")
+        outputs: list[str] = [f"## {fingerprint}-tcp-probe {host}"]
+        seen: set[int] = set()
+        for entry in list(raw_ports)[:12]:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                port = int(entry.get("port"))
+            except (TypeError, ValueError):
+                continue
+            if port in seen:
+                continue
+            seen.add(port)
+            label = str(entry.get("label") or f"tcp/{port}")[:80]
+            reachable = self._benchmark_probe_tcp_port(host, port)
+            outputs.append(f"## {label} {host}:{port}\nreachable={reachable}")
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: {fingerprint}_tcp_probe {host}:{port}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                "退出码: 0\n"
+                "输出:\n"
+                f"{label} reachable={reachable}"
             )
             with self._benchmark_state_lock:
                 completed = set(self._benchmark_state.get("completed_challenges", set()))
