@@ -3178,6 +3178,81 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("GET /debug/export", joined)
         self.assertEqual(curl_mock.call_count, 2)
 
+    def test_benchmark_external_service_profile_probe_requests_are_executed(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "probe_requests": [
+                                    {
+                                        "label": "rpc export",
+                                        "method": "POST",
+                                        "path": "rpc/export",
+                                        "headers": {
+                                            "X-Custom-Trace": "1",
+                                            "Authorization": "blocked",
+                                        },
+                                        "json": {"method": "export", "limit": 1},
+                                    },
+                                    {
+                                        "method": "POST",
+                                        "path": "/debug/login",
+                                        "data": {"username": "demo", "password": "demo"},
+                                    },
+                                ],
+                                "unresolved": "reasoning",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            profile = self.pipeline._benchmark_matching_service_probe_profile(
+                "CustomSvc banner"
+            )
+            commands: list[list[str]] = []
+
+            def fake_run(cmd, **_kwargs):
+                commands.append(list(cmd))
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout="HTTP/1.1 200 OK\n\ncustom-ok",
+                    stderr="",
+                )
+
+            with (
+                patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+                patch.object(self.pipeline, "_benchmark_auto_submit_flags_from_tool_result"),
+            ):
+                outputs = self.pipeline._benchmark_run_service_probe_profile(
+                    "custom-01",
+                    "http://10.0.1.2:8080/",
+                    "CustomSvc banner",
+                    profile,
+                )
+
+        joined = "\n".join(outputs)
+        flattened = "\n".join(" ".join(cmd) for cmd in commands)
+        self.assertIsNotNone(profile)
+        self.assertIn("customsvc-profile-requests", joined)
+        self.assertIn("rpc export", joined)
+        self.assertIn("POST /debug/login", joined)
+        self.assertIn("rpc/export", flattened)
+        self.assertIn('"method":"export"', flattened)
+        self.assertIn("X-Custom-Trace: 1", flattened)
+        self.assertNotIn("Authorization: blocked", flattened)
+        self.assertIn("username=demo", flattened)
+        self.assertEqual(len(commands), 2)
+
     def test_benchmark_external_service_profile_can_extend_builtin_by_fingerprint(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3852,6 +3927,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIsNotNone(service_profile)
         self.assertEqual(service_profile["fingerprint"], "customsvc")
         self.assertIn("api/config", service_profile["probe_paths"])
+        self.assertEqual(service_profile["probe_requests"][0]["path"], "rpc/export")
         self.assertEqual(len(rendered), 3)
         self.assertIn("generic-01", rendered[0]["task_description"])
         self.assertIn("CustomSvc generic handoff", rendered[0]["context"])

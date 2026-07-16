@@ -1249,7 +1249,20 @@ class FourPillarPipeline:
                 and not isinstance(existing, (str, bytes))
                 and not isinstance(incoming, (str, bytes))
             ):
-                return tuple(dict.fromkeys(tuple(existing) + tuple(incoming)))
+                merged_items: list[Any] = []
+                seen_items: set[str] = set()
+                for item in tuple(existing) + tuple(incoming):
+                    key_text = json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    if key_text in seen_items:
+                        continue
+                    seen_items.add(key_text)
+                    merged_items.append(item)
+                return tuple(merged_items)
             return incoming
 
         result = [dict(profile) for profile in builtin]
@@ -2105,6 +2118,91 @@ class FourPillarPipeline:
             ),
         }
 
+    @staticmethod
+    def _benchmark_normalize_probe_headers(raw: Any) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        headers: dict[str, str] = {}
+        for key, value in list(raw.items())[:8]:
+            header = str(key or "").strip()
+            if not _re_mod.fullmatch(r"[A-Za-z0-9-]{1,60}", header):
+                continue
+            if header.lower() in {"host", "content-length", "authorization", "benchmark_token"}:
+                continue
+            headers[header] = str(value or "").strip()[:300]
+        return headers
+
+    @staticmethod
+    def _benchmark_normalize_probe_body(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        body: dict[str, Any] = {}
+        for key, value in list(raw.items())[:20]:
+            body_key = str(key or "").strip()
+            if not _re_mod.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", body_key):
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                body[body_key] = value if not isinstance(value, str) else value[:1000]
+            elif isinstance(value, (list, tuple)):
+                items: list[Any] = []
+                for item in list(value)[:12]:
+                    if isinstance(item, (str, int, float, bool)) or item is None:
+                        items.append(item if not isinstance(item, str) else item[:500])
+                body[body_key] = items
+            elif isinstance(value, dict):
+                nested: dict[str, Any] = {}
+                for nested_key, nested_value in list(value.items())[:12]:
+                    nested_name = str(nested_key or "").strip()
+                    if not _re_mod.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", nested_name):
+                        continue
+                    if isinstance(nested_value, (str, int, float, bool)) or nested_value is None:
+                        nested[nested_name] = (
+                            nested_value
+                            if not isinstance(nested_value, str)
+                            else nested_value[:500]
+                        )
+                if nested:
+                    body[body_key] = nested
+        return body or None
+
+    def _benchmark_normalize_probe_requests(self, raw: Any) -> tuple[dict[str, Any], ...]:
+        if not isinstance(raw, list):
+            return ()
+        requests: list[dict[str, Any]] = []
+        for item in raw[:20]:
+            if not isinstance(item, dict):
+                continue
+            raw_path = str(item.get("path") or item.get("url_path") or "").strip()
+            if not raw_path or raw_path.startswith(("http://", "https://", "//")):
+                continue
+            path = raw_path.lstrip("/")
+            if not _re_mod.fullmatch(r"[A-Za-z0-9_./?=&:%+\-]{1,220}", path):
+                continue
+            method = str(item.get("method") or "GET").strip().upper()
+            if method not in {"GET", "POST", "PUT"}:
+                continue
+            request: dict[str, Any] = {"method": method, "path": path}
+            label = str(item.get("label") or "").strip()
+            if label:
+                request["label"] = label[:100]
+            headers = self._benchmark_normalize_probe_headers(item.get("headers"))
+            if headers:
+                request["headers"] = headers
+            json_body = self._benchmark_normalize_probe_body(item.get("json"))
+            data_body = self._benchmark_normalize_probe_body(
+                item.get("data", item.get("form"))
+            )
+            if json_body is not None:
+                request["json"] = json_body
+            elif data_body is not None:
+                request["data"] = {
+                    key: str(value)[:1000]
+                    for key, value in data_body.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                }
+            requests.append(request)
+        return tuple(requests)
+
     def _benchmark_normalize_service_probe_profile(
         self,
         raw: Any,
@@ -2136,6 +2234,9 @@ class FourPillarPipeline:
         probe_paths = self._benchmark_string_tuple(raw.get("probe_paths"), limit=40)
         if probe_paths:
             profile["probe_paths"] = probe_paths
+        probe_requests = self._benchmark_normalize_probe_requests(raw.get("probe_requests"))
+        if probe_requests:
+            profile["probe_requests"] = probe_requests
         probe_key = str(raw.get("probe_key") or "").strip().lower()
         probe = self._benchmark_service_probe_registry().get(probe_key)
         if callable(probe):
@@ -2147,6 +2248,7 @@ class FourPillarPipeline:
                 "match_any",
                 "match_any_all",
                 "probe_paths",
+                "probe_requests",
                 "handoff_context",
                 "handoff_steps",
                 "reason",
@@ -2248,6 +2350,13 @@ class FourPillarPipeline:
         )
         if profile_path_output:
             service_outputs.append(profile_path_output)
+        profile_request_output = self._benchmark_probe_profile_requests_local(
+            code,
+            base,
+            profile,
+        )
+        if profile_request_output:
+            service_outputs.append(profile_request_output)
         with self._benchmark_state_lock:
             completed = set(self._benchmark_state.get("completed_challenges", set()))
         if code in completed:
@@ -2289,6 +2398,130 @@ class FourPillarPipeline:
             )
             self._benchmark_auto_submit_flags_from_tool_result(
                 f"命令: {fingerprint}_profile_probe {url}\n"
+                "工作目录: /home/my/cyber/benchmark_test\n"
+                f"退出码: {result.returncode}\n"
+                "输出:\n"
+                f"{body}"
+            )
+            with self._benchmark_state_lock:
+                completed = set(self._benchmark_state.get("completed_challenges", set()))
+            if code in completed:
+                break
+        return "\n".join(outputs)
+
+    def _benchmark_probe_profile_requests_local(
+        self,
+        code: str,
+        base: str,
+        profile: dict[str, Any],
+    ) -> str:
+        raw_requests = profile.get("probe_requests")
+        if not isinstance(raw_requests, (tuple, list)) or not raw_requests:
+            return ""
+        fingerprint = str(profile.get("fingerprint") or "service")
+        tun_interface = self._benchmark_tun_interface()
+        outputs: list[str] = [f"## {fingerprint}-profile-requests {base}"]
+        seen: set[tuple[str, str, str]] = set()
+        for request in list(raw_requests)[:12]:
+            if not isinstance(request, dict):
+                continue
+            method = str(request.get("method") or "GET").upper()
+            path = str(request.get("path") or "").lstrip("/")
+            url = _urljoin(base, path)
+            body_key = json.dumps(
+                request.get("json", request.get("data", "")),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )[:1000]
+            dedupe_key = (method, url, body_key)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            label = str(request.get("label") or f"{method} /{path}")[:140]
+            result: subprocess.CompletedProcess[str]
+            if "json" in request:
+                cmd = [
+                    "curl",
+                    "-sS",
+                    "-k",
+                    "--interface",
+                    tun_interface,
+                    "--connect-timeout",
+                    "2",
+                    "--max-time",
+                    "6",
+                    "--globoff",
+                    "-i",
+                    "-X",
+                    method,
+                    "-H",
+                    "Content-Type: application/json",
+                ]
+                for header, value in dict(request.get("headers") or {}).items():
+                    cmd.extend(["-H", f"{header}: {value}"])
+                cmd.extend([
+                    "-d",
+                    json.dumps(request["json"], ensure_ascii=False, separators=(",", ":")),
+                    url,
+                ])
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        check=False,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=8,
+                    )
+                except Exception as exc:
+                    result = subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+            else:
+                data = request.get("data")
+                headers = dict(request.get("headers") or {})
+                if method == "GET" and not headers and not data:
+                    result = self._benchmark_curl_local(
+                        url,
+                        tun_interface=tun_interface,
+                        timeout=8,
+                    )
+                else:
+                    cmd = [
+                        "curl",
+                        "-sS",
+                        "-k",
+                        "--interface",
+                        tun_interface,
+                        "--connect-timeout",
+                        "2",
+                        "--max-time",
+                        "6",
+                        "--globoff",
+                        "-i",
+                        "-X",
+                        method,
+                    ]
+                    for header, value in headers.items():
+                        cmd.extend(["-H", f"{header}: {value}"])
+                    if isinstance(data, dict):
+                        for key, value in data.items():
+                            cmd.extend(["--data-urlencode", f"{key}={value}"])
+                    cmd.append(url)
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            check=False,
+                            text=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            timeout=8,
+                        )
+                    except Exception as exc:
+                        result = subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
+            body = (result.stdout or "")[:5000]
+            outputs.append(f"## {label}\n{body}\n{(result.stderr or '')[:300]}")
+            self._benchmark_auto_submit_flags_from_tool_result(
+                f"命令: {fingerprint}_profile_request {label} {url}\n"
                 "工作目录: /home/my/cyber/benchmark_test\n"
                 f"退出码: {result.returncode}\n"
                 "输出:\n"

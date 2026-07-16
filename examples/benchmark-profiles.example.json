@@ -123,6 +123,28 @@
         "rpc/methods",
         "debug/export"
       ],
+      "probe_requests": [
+        {
+          "label": "rpc export preview",
+          "method": "POST",
+          "path": "rpc/export",
+          "headers": {
+            "X-Requested-With": "CyberAgent"
+          },
+          "json": {
+            "method": "export",
+            "limit": 1
+          }
+        },
+        {
+          "method": "POST",
+          "path": "debug/login",
+          "data": {
+            "username": "demo",
+            "password": "demo"
+          }
+        }
+      ],
       "handoff_context": "## CustomSvc generic handoff\nUse only observed response headers, exposed RPC methods, OpenAPI/RPC metadata, cookies, redirects, and error messages. Do not assume a fixed challenge ID or fixed exploit path.",
       "handoff_steps": [
         "Benchmark customsvc handoff step 1: re-check current active challenge {current} ({addr_text}) for service headers, exposed RPC/OpenAPI metadata, auth cookies, redirects, and error messages; submit immediately if a flag appears.",
