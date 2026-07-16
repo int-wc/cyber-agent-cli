@@ -2252,6 +2252,73 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("c-03 已获取有效响应", result)
         probe_local.assert_called_once_with("c-03", ["10.0.1.2:3000"])
 
+    def test_benchmark_fast_step1_treats_running_snapshot_as_active(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_list_challenges_local",
+                return_value=[
+                    {
+                        "unique_code": "c-03",
+                        "difficulty": "easy",
+                        "is_completed": False,
+                        "container_status": "running",
+                        "container_addr": ["10.0.1.2:3000"],
+                    },
+                    {
+                        "unique_code": "c-04",
+                        "difficulty": "easy",
+                        "is_completed": False,
+                        "container_status": "stopped",
+                        "container_addr": [],
+                    },
+                ],
+            ),
+            patch.object(self.pipeline, "_benchmark_start_local") as start_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 1：只做调度。",
+                reason="deterministic_scheduler",
+            )
+
+        self.assertIn("继续当前 active 题 c-03", result)
+        start_local.assert_not_called()
+
+    def test_benchmark_step2_refreshes_running_active_from_platform(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_list_challenges_local",
+                return_value=[
+                    {
+                        "unique_code": "c-03",
+                        "difficulty": "easy",
+                        "is_completed": False,
+                        "container_status": "running",
+                        "container_addr": ["10.0.1.2:3000"],
+                    }
+                ],
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                return_value="HTTP/1.1 200 OK\n<html>Dify</html>",
+            ) as probe_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        self.assertIn("c-03 已获取有效响应", result)
+        probe_local.assert_called_once_with("c-03", ["10.0.1.2:3000"])
+
     def test_benchmark_deterministic_step1_starts_medium_when_easy_exhausted(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

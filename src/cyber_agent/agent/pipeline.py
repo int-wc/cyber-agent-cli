@@ -920,7 +920,7 @@ class FourPillarPipeline:
                 target_is_recoverable = (
                     isinstance(target_item, dict)
                     and target_item.get("is_completed") is not True
-                    and target_item.get("container_status") == "stopped"
+                    and self._benchmark_is_startable_status(target_item)
                 )
                 if code in completed:
                     return f"{code} 已确认通关，禁止重复 start。"
@@ -937,7 +937,10 @@ class FourPillarPipeline:
                         and isinstance(item.get("unique_code"), str)
                         and item.get("unique_code") not in completed
                         and item.get("is_completed") is not True
-                        and item.get("container_status") in {"stopped", "available", None}
+                        and (
+                            self._benchmark_is_startable_status(item)
+                            or self._benchmark_is_active_status(item)
+                        )
                         and self._benchmark_difficulty_rank(item.get("difficulty")) < target_rank
                     ]
                     if better_candidates:
@@ -991,7 +994,7 @@ class FourPillarPipeline:
                         and target_item.get("is_completed") is not True
                         and str(target_item.get("difficulty") or "").lower()
                         in set(self._benchmark_selection_policy()["difficulty_order"])
-                        and target_item.get("container_status") == "stopped"
+                        and self._benchmark_is_startable_status(target_item)
                     ):
                         difficulty = str(target_item.get("difficulty") or "unknown").lower()
                         return (
@@ -1401,6 +1404,51 @@ class FourPillarPipeline:
             str(item.get("unique_code") or ""),
         )
 
+    @staticmethod
+    def _benchmark_container_status(item: dict[str, Any]) -> str:
+        status = item.get("container_status")
+        return str(status or "").strip().lower()
+
+    @classmethod
+    def _benchmark_is_active_status(cls, item: dict[str, Any]) -> bool:
+        status = cls._benchmark_container_status(item)
+        addrs = item.get("container_addr")
+        has_addrs = isinstance(addrs, list) and bool(addrs)
+        if status in {
+            "available",
+            "active",
+            "running",
+            "started",
+            "up",
+            "healthy",
+        }:
+            return True
+        if status == "ready" and has_addrs:
+            return True
+        if not status:
+            return has_addrs
+        return False
+
+    @classmethod
+    def _benchmark_is_startable_status(cls, item: dict[str, Any]) -> bool:
+        status = cls._benchmark_container_status(item)
+        if status in {
+            "",
+            "stopped",
+            "stop",
+            "closed",
+            "ready",
+            "pending",
+            "created",
+            "not_started",
+            "not-started",
+            "unstarted",
+        }:
+            return True
+        if cls._benchmark_is_active_status(item):
+            return False
+        return bool(status.endswith("stopped") or status.endswith("_stopped"))
+
     def _benchmark_select_next_candidate(
         self,
         challenges: list[dict[str, Any]],
@@ -1425,7 +1473,7 @@ class FourPillarPipeline:
             difficulty = str(item.get("difficulty") or "").lower()
             if difficulty not in {"easy", "medium", "hard"}:
                 continue
-            if item.get("container_status") != "stopped":
+            if not self._benchmark_is_startable_status(item):
                 continue
             if code in (closed | abandoned) and code not in recovered:
                 recovery_candidates.append(item)
@@ -1518,7 +1566,7 @@ class FourPillarPipeline:
                 continue
             if str(item.get("difficulty") or "").lower() != "easy":
                 continue
-            if item.get("container_status") != "stopped":
+            if not self._benchmark_is_startable_status(item):
                 continue
             if code in (closed | abandoned) and code not in recovered:
                 recovery_candidates.append(item)
@@ -1535,7 +1583,10 @@ class FourPillarPipeline:
             and item.get("unique_code") not in excluded
             and item.get("is_completed") is not True
             and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
-            and item.get("container_status") in {"stopped", "available", None}
+            and (
+                self._benchmark_is_startable_status(item)
+                or self._benchmark_is_active_status(item)
+            )
             for item in challenges
         )
         if has_untried_non_easy:
@@ -1693,7 +1744,7 @@ class FourPillarPipeline:
             return None, []
         active_items = [
             item for item in challenges
-            if item.get("container_status") == "available"
+            if self._benchmark_is_active_status(item)
             and item.get("is_completed") is not True
         ]
         if not active_items:
@@ -1783,7 +1834,7 @@ class FourPillarPipeline:
                 or code in closed
                 or code in seen
                 or item.get("is_completed") is not True
-                or item.get("container_status") != "available"
+                or not self._benchmark_is_active_status(item)
             ):
                 continue
             seen.add(code)
@@ -3969,7 +4020,7 @@ class FourPillarPipeline:
                 challenges = self._benchmark_list_challenges_local()
             active_items = [
                 item for item in challenges
-                if item.get("container_status") == "available"
+                if self._benchmark_is_active_status(item)
                 and item.get("is_completed") is not True
             ]
             with self._benchmark_state_lock:
@@ -4008,7 +4059,7 @@ class FourPillarPipeline:
                             for item in challenges
                             if item.get("unique_code") == code
                             and item.get("is_completed") is not True
-                            and item.get("container_status") == "stopped"
+                            and self._benchmark_is_startable_status(item)
                         ),
                         None,
                     )
@@ -4538,13 +4589,9 @@ class FourPillarPipeline:
                 code = value.get("unique_code")
                 if isinstance(code, str) and code:
                     addrs = value.get("container_addr")
-                    status = value.get("container_status")
                     if isinstance(addrs, list) and addrs and (
-                        status == "available"
-                        or (
-                            status is None
-                            and "/challenges/start" in lowered
-                        )
+                        self._benchmark_is_active_status(value)
+                        or "/challenges/start" in lowered
                     ):
                         active_updates[code] = [str(addr) for addr in addrs]
                         current_challenge = code
@@ -4594,7 +4641,7 @@ class FourPillarPipeline:
                         total_score = item.get("total_score")
                         if isinstance(total_score, int):
                             completed_scores.setdefault(code, total_score)
-                    if item.get("container_status") == "available":
+                    if self._benchmark_is_active_status(item):
                         addrs = item.get("container_addr")
                         if isinstance(addrs, list) and addrs:
                             active_updates[code] = [str(addr) for addr in addrs]
@@ -4685,7 +4732,7 @@ class FourPillarPipeline:
                     addrs = item.get("container_addr")
                     if (
                         isinstance(code, str)
-                        and item.get("container_status") == "available"
+                        and self._benchmark_is_active_status(item)
                         and isinstance(addrs, list)
                         and addrs
                         and code not in completed_set
@@ -4768,7 +4815,7 @@ class FourPillarPipeline:
             ]
             active_items = [
                 item for item in last_snapshot
-                if isinstance(item, dict) and item.get("container_status") == "available"
+                if isinstance(item, dict) and self._benchmark_is_active_status(item)
             ]
             snapshot_summary = {
                 "total": len(last_snapshot),
@@ -6672,8 +6719,10 @@ class FourPillarPipeline:
             difficulty = str(item.get("difficulty") or "").lower()
             if difficulty not in fast_difficulties:
                 continue
-            status = item.get("container_status")
-            if status in {"stopped", "available", None}:
+            if (
+                self._benchmark_is_startable_status(item)
+                or self._benchmark_is_active_status(item)
+            ):
                 return True, f"仍有未完成 {difficulty} 候选 {code}，继续 fast path。"
 
         for item in snapshot:
@@ -6688,7 +6737,7 @@ class FourPillarPipeline:
             if difficulty not in recovery_difficulties:
                 continue
             if (
-                item.get("container_status") == "stopped"
+                self._benchmark_is_startable_status(item)
                 and code in (closed | abandoned)
                 and code not in recovered
             ):
@@ -6704,7 +6753,10 @@ class FourPillarPipeline:
             and item.get("unique_code") not in excluded
             and item.get("is_completed") is not True
             and str(item.get("difficulty") or "").lower() in handoff_difficulties
-            and item.get("container_status") in {"stopped", "available", None}
+            and (
+                self._benchmark_is_startable_status(item)
+                or self._benchmark_is_active_status(item)
+            )
             for item in snapshot
         )
         if has_untried_non_easy:
