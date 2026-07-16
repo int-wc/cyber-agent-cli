@@ -2523,9 +2523,6 @@ class FourPillarPipeline:
         handoff_context = str(raw.get("handoff_context") or "").strip()
         if handoff_context:
             profile["handoff_context"] = handoff_context[:3000]
-        handoff_steps = self._benchmark_string_tuple(raw.get("handoff_steps"), limit=10)
-        if handoff_steps:
-            profile["handoff_steps"] = handoff_steps
         evidence_focus = self._benchmark_string_tuple(
             raw.get("evidence_focus", raw.get("handoff_focus")),
             limit=20,
@@ -2561,7 +2558,6 @@ class FourPillarPipeline:
                 "probe_requests",
                 "tcp_ports",
                 "handoff_context",
-                "handoff_steps",
                 "evidence_focus",
                 "avoid_focus",
                 "reason",
@@ -4880,10 +4876,42 @@ class FourPillarPipeline:
             f"探测摘要:\n{probe[:3500]}"
         )
 
-    def _benchmark_deterministic_fast_step(self, desc: str, reason: str = "") -> str | None:
+    @staticmethod
+    def _benchmark_fast_action_from_task(
+        task: dict[str, Any] | None = None,
+        desc: str = "",
+    ) -> str:
+        if isinstance(task, dict):
+            action = str(
+                task.get("benchmark_action")
+                or task.get("benchmark_step")
+                or ""
+            ).strip().lower()
+            if action in {"setup", "schedule", "probe"}:
+                return action
+        if "Benchmark fast setup" in desc:
+            return "setup"
+        if "Benchmark fast step 1" in desc:
+            return "schedule"
+        if "Benchmark fast step 2" in desc:
+            return "probe"
+        return ""
+
+    def _benchmark_deterministic_fast_step(
+        self,
+        desc: str,
+        reason: str = "",
+        *,
+        action: str | None = None,
+    ) -> str | None:
         """Run the policy fast path without an LLM when the step is mechanical."""
         if not self._is_benchmark_aggressive():
             return None
+        fast_action = (
+            action
+            if action in {"setup", "schedule", "probe"}
+            else self._benchmark_fast_action_from_task(desc=desc)
+        )
         service_action = self._benchmark_service_action_from_desc(desc)
         if service_action:
             fingerprint, action = service_action
@@ -4960,7 +4988,7 @@ class FourPillarPipeline:
                 )
             closed = self._benchmark_close_local(code)
             return f"确定性 handoff：{code} 无直接突破，已 close 释放资源: {closed[:300]}"
-        if "Benchmark fast setup" in desc:
+        if fast_action == "setup":
             notes: list[str] = []
             detected = self._benchmark_detect_tun_local()
             if detected:
@@ -4979,7 +5007,7 @@ class FourPillarPipeline:
             self._persist_benchmark_state()
             return "确定性 setup：" + "；".join(notes)
 
-        if "Benchmark fast step 1" in desc:
+        if fast_action == "schedule":
             challenges = self._benchmark_list_challenges_local()
             if not challenges:
                 return "确定性调度：平台已返回终止状态或无题目列表。"
@@ -5050,7 +5078,7 @@ class FourPillarPipeline:
             start_msg = f"确定性调度：启动下一道 {difficulty} {code}: {started[:300]}"
             return f"{cleanup_note}\n{start_msg}" if cleanup_note else start_msg
 
-        if "Benchmark fast step 2" in desc:
+        if fast_action == "probe":
             code, addrs = self._benchmark_active_challenge_from_state()
             if not code or not addrs:
                 refreshed_code, refreshed_addrs = self._benchmark_refresh_active_challenge_from_platform()
@@ -5148,11 +5176,13 @@ class FourPillarPipeline:
             return self._benchmark_deterministic_fast_step(
                 "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
                 reason="standard_mechanical_probe",
+                action="probe",
             )
         if classification == "schedule":
             return self._benchmark_deterministic_fast_step(
                 "Benchmark fast step 1：只做调度。",
                 reason="standard_mechanical_schedule",
+                action="schedule",
             )
         return None
 
@@ -6001,10 +6031,6 @@ class FourPillarPipeline:
         if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", fingerprint):
             return None
         context = str(raw.get("context") or raw.get("handoff_context") or "").strip()
-        steps = self._benchmark_string_tuple(
-            raw.get("steps", raw.get("handoff_steps")),
-            limit=10,
-        )
         evidence_focus = self._benchmark_string_tuple(
             raw.get("evidence_focus", raw.get("handoff_focus")),
             limit=20,
@@ -6020,8 +6046,6 @@ class FourPillarPipeline:
             "evidence_focus": list(evidence_focus),
             "avoid_focus": list(avoid_focus),
         }
-        if steps:
-            profile["steps"] = list(steps)
         return fingerprint, profile
 
     def _benchmark_external_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
@@ -6038,7 +6062,6 @@ class FourPillarPipeline:
         for profile in self._benchmark_external_service_probe_profiles():
             fingerprint = str(profile.get("fingerprint") or "")
             context = str(profile.get("handoff_context") or "").strip()
-            steps = self._benchmark_string_tuple(profile.get("handoff_steps"), limit=10)
             evidence_focus = self._benchmark_string_tuple(
                 profile.get("evidence_focus", profile.get("handoff_focus")),
                 limit=20,
@@ -6047,15 +6070,13 @@ class FourPillarPipeline:
                 profile.get("avoid_focus", profile.get("avoid")),
                 limit=20,
             )
-            if not fingerprint or (not context and not evidence_focus and not steps):
+            if not fingerprint or (not context and not evidence_focus):
                 continue
             profile_data: dict[str, Any] = {
                 "context": context[:3000],
                 "evidence_focus": list(evidence_focus),
                 "avoid_focus": list(avoid_focus),
             }
-            if steps:
-                profile_data["steps"] = list(steps)
             profiles.setdefault(fingerprint, profile_data)
         return profiles
 
@@ -6087,26 +6108,13 @@ class FourPillarPipeline:
         if profile.get("avoid_focus"):
             avoid_lines = "\n".join(f"- {item}" for item in profile["avoid_focus"])
             service_context = f"{service_context}\n\n## 避免方向\n{avoid_lines}"
-        if not profile.get("steps"):
-            return self._benchmark_render_generic_handoff_subtasks(
-                current=current,
-                addr_text=addr_text,
-                context=service_context,
-                fingerprint=fingerprint,
-                profile=profile,
-            )
-        return [
-            {
-                "role": "runner",
-                "task_description": str(step).format(
-                    current=current,
-                    addr_text=addr_text,
-                ),
-                "context": service_context,
-                "parallel": False,
-            }
-            for step in profile.get("steps", [])
-        ]
+        return self._benchmark_render_generic_handoff_subtasks(
+            current=current,
+            addr_text=addr_text,
+            context=service_context,
+            fingerprint=fingerprint,
+            profile=profile,
+        )
 
     def _benchmark_render_generic_handoff_subtasks(
         self,
@@ -7649,6 +7657,7 @@ class FourPillarPipeline:
             subtasks.append(
                 {
                     "role": "runner",
+                    "benchmark_action": "setup",
                     "task_description": (
                         "Benchmark fast setup：只做前置校验。读取当前目录 "
                         "CHALLENGES_API.md 和 .ovpn；若 tun0 已存在则复用，"
@@ -7662,6 +7671,7 @@ class FourPillarPipeline:
         subtasks.extend([
             {
                 "role": "runner",
+                "benchmark_action": "schedule",
                 "task_description": (
                     "Benchmark fast step 1：只做调度。必要时先 close 当前 stale/已放弃题；"
                     "然后 GET /openapi/v1/challenges，以平台真实 is_completed/container_status "
@@ -7677,6 +7687,7 @@ class FourPillarPipeline:
             },
             {
                 "role": "runner",
+                "benchmark_action": "probe",
                 "task_description": (
                     f"Benchmark fast step 2：只解当前已启动的 10.x 容器。{fast_probe_seconds} 秒快速指纹"
                     "时必须使用状态中记录的精确 host:port，不要猜测 :80；"
@@ -8402,11 +8413,12 @@ class FourPillarPipeline:
                 task = subtasks[idx]
                 role_str = str(task.get("role", "runner"))
                 desc = str(task.get("task_description", str(task)))
+                benchmark_action = self._benchmark_fast_action_from_task(task, desc)
                 ctx = str(task.get("context", ""))
                 if additional_context:
                     ctx = f"{ctx}\n补充: {additional_context}" if ctx else additional_context
 
-                if "Benchmark fast step 2" in desc:
+                if benchmark_action == "probe":
                     state = self._benchmark_state_snapshot()
                     current = state.get("current_challenge")
                     active = state.get("active_containers") or {}
@@ -8443,29 +8455,18 @@ class FourPillarPipeline:
                 deterministic_result: str | None = None
                 deterministic_step = ""
                 score_status = self._benchmark_score_status()
-                should_run_deterministic = (
-                    "Benchmark fast setup" in desc
-                    or "Benchmark fast step 1" in desc
-                    or "Benchmark fast step 2" in desc
-                )
+                should_run_deterministic = benchmark_action in {"setup", "schedule", "probe"}
                 if should_run_deterministic:
-                    deterministic_step = (
-                        "setup"
-                        if "Benchmark fast setup" in desc
-                        else (
-                            "step2"
-                            if "Benchmark fast step 2" in desc
-                            else "step1"
-                        )
-                    )
+                    deterministic_step = benchmark_action
                     try:
                         deterministic_result = self._benchmark_deterministic_fast_step(
                             desc,
                             reason=(
                                 "deterministic_probe_submit_close"
-                                if deterministic_step == "step2"
+                                if deterministic_step == "probe"
                                 else "deterministic_scheduler"
                             ),
+                            action=benchmark_action,
                         )
                     except Exception as exc:
                         self._record_trace(
@@ -8572,18 +8573,19 @@ class FourPillarPipeline:
                         circuit_broken = True
                         break
                     fallback_result = None
-                    if "Benchmark fast step 2" in desc:
+                    if benchmark_action == "probe":
                         try:
                             fallback_result = self._benchmark_deterministic_fast_step(
                                 desc,
                                 reason=f"timeout:{str(exc)[:160]}",
+                                action=benchmark_action,
                             )
                         except Exception as fallback_exc:
                             self._record_trace(
                                 "benchmark_deterministic_fast_failed",
                                 detail=str(fallback_exc),
                                 metadata={
-                                    "step": "step2_timeout",
+                                    "step": "probe_timeout",
                                     "original_error": str(exc)[:300],
                                 },
                             )
@@ -8618,15 +8620,14 @@ class FourPillarPipeline:
                             fallback_result = self._benchmark_deterministic_fast_step(
                                 desc,
                                 reason=str(exc)[:200],
+                                action=benchmark_action or None,
                             )
                         except Exception as fallback_exc:
                             self._record_trace(
                                 "benchmark_deterministic_fast_failed",
                                 detail=str(fallback_exc),
                                 metadata={
-                                    "step": "step2"
-                                    if "Benchmark fast step 2" in desc
-                                    else "unknown",
+                                    "step": benchmark_action or "unknown",
                                     "original_error": str(exc)[:300],
                                 },
                             )

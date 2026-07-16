@@ -239,6 +239,10 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
         self.assertEqual(len(subtasks), 2)
         self.assertTrue(all(task["role"] == "runner" for task in subtasks))
+        self.assertEqual(
+            [task["benchmark_action"] for task in subtasks],
+            ["schedule", "probe"],
+        )
         joined = "\n".join(task["task_description"] for task in subtasks)
         self.assertIn("POST start", joined)
         self.assertIn("45 秒快速指纹", joined)
@@ -251,6 +255,10 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         subtasks = self.pipeline._benchmark_fast_cycle_subtasks()
 
         self.assertEqual(len(subtasks), 3)
+        self.assertEqual(
+            [task["benchmark_action"] for task in subtasks],
+            ["setup", "schedule", "probe"],
+        )
         self.assertIn("Benchmark fast setup", subtasks[0]["task_description"])
         self.assertIn("CHALLENGES_API.md", subtasks[0]["task_description"])
         self.assertIn("不要 start", subtasks[0]["task_description"])
@@ -2227,6 +2235,52 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             {"xben-009-24": ["10.0.1.2:80"]},
         )
 
+    def test_benchmark_deterministic_fast_step_uses_structured_action(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["api_interface"] = "enp0s20f0u3u4"
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(cmd)
+            if "/openapi/v1/challenges/start?unique_code=xben-010-24" in joined:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout=(
+                        '{"unique_code":"xben-010-24",'
+                        '"container_addr":["10.0.1.3:80"]}'
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "["
+                    '{"unique_code":"xben-010-24","difficulty":"easy",'
+                    '"level":1,"total_score":200,"is_completed":false,'
+                    '"container_status":"stopped","container_addr":[]}'
+                    "]"
+                ),
+                stderr="",
+            )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_api_config_from_workspace",
+                return_value=("https://tsecbench.zc.tencent.com", "token"),
+            ),
+            patch("cyber_agent.agent.pipeline.subprocess.run", side_effect=fake_run),
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "结构化调度任务，不包含旧 fast step 文本。",
+                action="schedule",
+            )
+
+        self.assertIn("启动下一道 easy xben-010-24", result)
+
     def test_benchmark_deterministic_start_clears_soft_closed_state(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -3616,7 +3670,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("api/v1/custom-health", profile["probe_paths"])
         self.assertEqual(profile["tcp_ports"][0]["port"], 7860)
         self.assertIn("probe", profile)
-        self.assertIn("handoff_steps", profile)
+        self.assertNotIn("handoff_steps", profile)
 
     def test_benchmark_profile_can_disable_builtin_service_fingerprints(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -4363,7 +4417,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
         self.assertIn("HugeGraph", rendered[0]["task_description"])
 
-    def test_benchmark_external_service_handoff_profile_renders_steps(self):
+    def test_benchmark_external_service_handoff_profile_ignores_fixed_steps(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profile_path = Path(tmpdir) / "benchmark-profiles.json"
             profile_path.write_text(
@@ -4397,8 +4451,9 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("custom-01", rendered[0]["task_description"])
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
         self.assertIn("Custom service", rendered[0]["context"])
+        self.assertNotIn("token API", rendered[1]["task_description"])
 
-    def test_benchmark_service_probe_profile_can_define_handoff_steps(self):
+    def test_benchmark_service_probe_profile_ignores_handoff_steps(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             profile_path = Path(tmpdir) / "benchmark-profiles.json"
             profile_path.write_text(
@@ -4428,10 +4483,11 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 fingerprint="customsvc",
             )
 
-        self.assertEqual(len(rendered), 2)
+        self.assertEqual(len(rendered), 3)
         self.assertIn("custom-02", rendered[0]["task_description"])
         self.assertIn("10.0.1.2:9000", rendered[0]["task_description"])
         self.assertIn("CustomSvc", rendered[0]["context"])
+        self.assertNotIn("暴露的 RPC", rendered[1]["task_description"])
 
     def test_benchmark_service_probe_profile_can_define_evidence_driven_handoff(self):
         with tempfile.TemporaryDirectory() as tmpdir:

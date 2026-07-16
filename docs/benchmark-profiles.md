@@ -44,7 +44,7 @@ examples/benchmark-profiles.example.json
 - `telnet_credentials`、`telnet_flag_command`：有界 Telnet 登录和 flag 读取尝试。
 - `webapp_flow_profiles`：由页面指示器和 demo 凭据驱动的通用登录、后台、下载流程。
 - `service_probe_profiles`：服务指纹、可选的服务级 `probe_paths`、有界 `probe_requests`、`tcp_ports` 和可选移交上下文。匹配依据应来自响应头、标题、OpenAPI/RPC 元数据、Cookie、跳转、错误信息或可见服务标识，不要用题号作为匹配键。`probe_requests` 支持同容器相对 `path`、`method`（`GET`、`POST`、`PUT`）、可选安全 header，以及 `json` 或表单 `data`。`tcp_ports` 可以是整数，也可以是包含 `port` 和 `label` 的对象。需要移交深挖时，优先提供 `handoff_context`、`evidence_focus` 和 `avoid_focus`，由架构生成通用三步移交任务。
-- `service_handoff_profiles`：匹配某个 fingerprint 后的移交数据。推荐只写 `context`、`evidence_focus` 和 `avoid_focus`。旧字段 `steps` 仍兼容，但不建议新配置使用，因为它会把配置档重新变成固定流程。
+- `service_handoff_profiles`：匹配某个 fingerprint 后的移交数据。只支持 `context`、`evidence_focus` 和 `avoid_focus` 这类证据描述；旧字段 `steps` / `handoff_steps` 不再参与任务生成，避免配置档重新变成固定流程。
 - `service_action_profiles`：已发现 fingerprint 的可选动作摘要。
 
 ## 泛化规则
@@ -54,7 +54,7 @@ examples/benchmark-profiles.example.json
 - 用协议、响应头、页面、API 形态和服务标识匹配。
 - 探测必须有界，并且由证据驱动。
 - 用 `execution_control_policy` 调节工具调用和调度宽度，不要把固定单题步骤写进提示词。
-- 用 `evidence_focus` 和 `avoid_focus` 描述证据焦点和止损方向；不要新增固定 `steps` 或 `handoff_steps`。
+- 用 `evidence_focus` 和 `avoid_focus` 描述证据焦点和止损方向；固定 `steps` 或 `handoff_steps` 会被忽略，不应新增。
 - 避免固定题号、已知验证集 flag、一次性路径，或只对历史某一道题成立的假设。
 - 优先新增 `service_probe_profiles`，再考虑改 Python 代码。
 - 优先用 `probe_paths` 表达有界服务检查，再考虑新增代码级探测函数。
