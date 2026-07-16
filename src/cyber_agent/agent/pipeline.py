@@ -4549,6 +4549,7 @@ class FourPillarPipeline:
                     score_map.setdefault(code, score)
             if challenges_snapshot is not None:
                 self._benchmark_state["last_challenges_snapshot"] = challenges_snapshot
+                self._benchmark_state["task_finished"] = False
                 snapshot_completed = {
                     str(item["unique_code"])
                     for item in challenges_snapshot

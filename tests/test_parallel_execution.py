@@ -4120,6 +4120,29 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertTrue(state["task_finished"])
         self.assertEqual(state["active_containers"], {})
 
+    def test_benchmark_runtime_state_valid_list_clears_transient_finished(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["task_finished"] = True
+
+        self.pipeline._update_benchmark_runtime_state(
+            "命令: curl --interface enp0s20f0u3u4 "
+            "https://tsecbench.zc.tencent.com/openapi/v1/challenges\n"
+            "工作目录: /tmp\n退出码: 0\n输出:\n"
+            "["
+            '{"unique_code":"fresh-1","difficulty":"medium",'
+            '"is_completed":false,"container_status":"available",'
+            '"container_addr":["10.0.1.2:8080"]}'
+            "]"
+        )
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertFalse(state["task_finished"])
+        self.assertEqual(state["current_challenge"], "fresh-1")
+        self.assertEqual(state["active_containers"], {"fresh-1": ["10.0.1.2:8080"]})
+        self.assertEqual(state["last_challenges_snapshot"]["active_challenges"], ["fresh-1"])
+
     def test_benchmark_terminal_stop_records_hard_stop_once(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
