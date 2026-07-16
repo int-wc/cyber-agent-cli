@@ -152,7 +152,7 @@ Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
 Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
 // 伪造 platform
 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-// chrome 对象
+// 模拟 chrome 对象
 window.chrome = {
     runtime: {},
     loadTimes: () => {},

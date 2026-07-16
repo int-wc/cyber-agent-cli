@@ -77,7 +77,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.gateway_default_model, "deepseek-v4-flash-free")
         self.assertIsNone(settings.gateway_base_url)
         self.assertEqual(settings.resolve_base_url(), "https://opencode.ai/zen/v1")
-        self.assertEqual(settings.resolve_proxy_url(), "http://192.168.31.47:7892")
+        self.assertIsNone(settings.resolve_proxy_url())
         self.assertEqual(settings.subagent_model, "deepseek-v4-flash-free")
         self.assertEqual(settings.max_context_chars, 4_000_000)
         self.assertEqual(settings.max_context_tokens, 4_000_000)
@@ -214,14 +214,14 @@ class SettingsTestCase(unittest.TestCase):
         with temporary_config_env(
             GATEWAY_DEFAULT_SERVICE="opencode",
             OPENCODE_API_KEY="opencode-key",
-            OPENCODE_PROXY_URL="socks://192.168.31.47:7892",
+            OPENCODE_PROXY_URL="socks://proxy.example:7892",
         ):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
 
         kwargs = settings.get_chat_openai_kwargs(settings.get_service())
 
-        self.assertEqual(kwargs["openai_proxy"], "socks5://192.168.31.47:7892")
+        self.assertEqual(kwargs["openai_proxy"], "socks5://proxy.example:7892")
 
     def test_opencode_proxy_does_not_leak_to_other_services(self) -> None:
         """

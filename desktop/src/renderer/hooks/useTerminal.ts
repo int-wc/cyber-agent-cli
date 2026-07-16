@@ -18,7 +18,7 @@ export function useTerminal() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
   const create = useCallback(async (shell?: string) => {
-    // Clean up previous listener
+    // 创建新会话前先清理旧监听器，避免重复写入输出。
     if (unlistenRef.current) {
       unlistenRef.current();
       unlistenRef.current = null;
@@ -29,7 +29,7 @@ export function useTerminal() {
     });
     setSession(sess);
 
-    // Listen for output events for this session
+    // 只监听当前终端会话的输出事件。
     unlistenRef.current = await listen<TerminalOutputPayload>(
       "terminal:output",
       (event) => {

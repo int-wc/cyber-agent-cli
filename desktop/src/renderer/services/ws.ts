@@ -39,7 +39,7 @@ class WebSocketClient {
         const data = JSON.parse(evt.data);
         this._emit(data);
       } catch {
-        // ignore malformed messages
+        // 忽略无法解析的后端消息，避免单条异常断开连接。
       }
     };
 
@@ -50,7 +50,7 @@ class WebSocketClient {
     };
 
     this.ws.onerror = () => {
-      // onclose will fire after onerror
+      // 出现 onerror 后仍会触发 onclose，统一在 onclose 中处理重连。
     };
   }
 

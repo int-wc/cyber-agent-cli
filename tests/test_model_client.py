@@ -16,8 +16,8 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
 
     def test_socks_proxy_can_fallback_to_http_proxy(self) -> None:
         self.assertEqual(
-            get_http_proxy_fallback_url("socks5://192.168.31.47:7892"),
-            "http://192.168.31.47:7892",
+            get_http_proxy_fallback_url("socks5://proxy.example:7892"),
+            "http://proxy.example:7892",
         )
 
     def test_missing_socksio_retries_with_http_proxy(self) -> None:
@@ -27,7 +27,7 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
             def __init__(self, **kwargs):
                 proxy = kwargs.get("openai_proxy")
                 calls.append(proxy)
-                if proxy == "socks5://192.168.31.47:7892":
+                if proxy == "socks5://proxy.example:7892":
                     raise ImportError(
                         "Using SOCKS proxy, but the 'socksio' package is not installed."
                     )
@@ -35,13 +35,13 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
 
         llm = build_llm_with_proxy_fallback(
             FakeLlm,
-            {"openai_proxy": "socks5://192.168.31.47:7892"},
+            {"openai_proxy": "socks5://proxy.example:7892"},
         )
 
-        self.assertEqual(llm.proxy, "http://192.168.31.47:7892")
+        self.assertEqual(llm.proxy, "http://proxy.example:7892")
         self.assertEqual(
             calls,
-            ["socks5://192.168.31.47:7892", "http://192.168.31.47:7892"],
+            ["socks5://proxy.example:7892", "http://proxy.example:7892"],
         )
 
     def test_missing_socksio_warning_is_emitted_once(self) -> None:
@@ -57,15 +57,15 @@ class ModelClientProxyFallbackTestCase(unittest.TestCase):
         with patch("cyber_agent.logging.log_warning") as log_warning:
             first = build_llm_with_proxy_fallback(
                 FakeLlm,
-                {"openai_proxy": "socks5://192.168.31.47:7892"},
+                {"openai_proxy": "socks5://proxy.example:7892"},
             )
             second = build_llm_with_proxy_fallback(
                 FakeLlm,
-                {"openai_proxy": "socks5://192.168.31.47:7892"},
+                {"openai_proxy": "socks5://proxy.example:7892"},
             )
 
-        self.assertEqual(first.proxy, "http://192.168.31.47:7892")
-        self.assertEqual(second.proxy, "http://192.168.31.47:7892")
+        self.assertEqual(first.proxy, "http://proxy.example:7892")
+        self.assertEqual(second.proxy, "http://proxy.example:7892")
         log_warning.assert_called_once()
 
     def test_provider_fallback_retries_with_next_key_and_model(self) -> None:

@@ -4499,7 +4499,7 @@ class FourPillarPipeline(
                                     "  [dim yellow]Benchmark 子任务超时，"
                                     "下一轮将强制 close 当前题并换题。[/]"
                                 )
-                            # Benchmark aggressive 的 180s 超时是预期内止损信号，
+                            # aggressive Benchmark 的 180s 超时是预期内止损信号，
                             # 不应累计为管线熔断失败。
                             self._consecutive_failures = 0
                             round_results.append(

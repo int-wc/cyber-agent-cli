@@ -83,7 +83,7 @@ def prepare_messages_for_openai_compatible_service(
     if service_name == "deepseek":
         if deepseek_thinking_enabled:
             return [_ensure_deepseek_reasoning_content(message) for message in messages]
-        # thinking 关闭时仍需透传模型返回的 reasoning_content
+        # 关闭 thinking 时仍需透传模型返回的 reasoning_content。
         return list(messages)
     return [_strip_reasoning_content(message) for message in messages]
 

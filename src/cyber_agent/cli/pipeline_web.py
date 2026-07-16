@@ -926,7 +926,7 @@ function updateAgentFromEvent(ev) {
   const e = ev.event || '';
   const det = ev.detail || '';
 
-  // Phase 1 — 按顺序触发
+  // 阶段 1：按顺序触发
   const p1seq = [
     { event:'role_analyst',   id:'analyst',      arrow:1 },
     { event:'role_diffuser',  id:'diffuser',     arrow:2 },
@@ -944,13 +944,13 @@ function updateAgentFromEvent(ev) {
     }
   }
 
-  // Checker
+  // 检查器
   if (e === 'role_checker') {
     const failed = det.includes('失败') || det.includes('不通过');
     setAgentStatus('checker', failed ? 'failed' : 'done', det.substring(0, 200));
   }
 
-  // Tool call — 找最近的活跃角色
+  // 工具调用：找最近的活跃角色
   if (e === 'tool_call') {
     const toolName = ev.metadata?.tool || '?';
     // 找第一个 running/thinking 的角色显示工具调用

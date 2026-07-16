@@ -313,7 +313,7 @@ def _start_backend_in_thread(
             _backend_ready.set()
             return
 
-        # Step 1: 读取配置
+        # 步骤 1：读取配置
         svc = service_name or _cfg.get_service()
         mdl = model_name or _cfg.get_model_name(service_name=svc)
         _progress("读取配置", f"service={svc}  model={mdl}", None)
@@ -321,7 +321,7 @@ def _start_backend_in_thread(
         _progress("审批策略", approval_policy, None)
         _progress("运行模式", mode, None)
 
-        # Step 2: 构建运行上下文
+        # 步骤 2：构建运行上下文
         _progress("构建运行上下文", "build_ide_runtime_context()", None)
         try:
             rt = build_ide_runtime_context(
@@ -335,7 +335,7 @@ def _start_backend_in_thread(
             return
         _progress("构建运行上下文", "完成", True)
 
-        # Step 3: 初始化 AgentRunner + 加载工具
+        # 步骤 3：初始化 AgentRunner 并加载工具
         _progress("初始化 AgentRunner", "init_runner() ...", None)
         try:
             runner = init_runner(rt)
@@ -354,7 +354,7 @@ def _start_backend_in_thread(
         if n_tools > 6:
             _progress_sub("...", f"还有 {n_tools - 6} 个工具")
 
-        # Step 4: 创建 FastAPI 应用
+        # 步骤 4：创建 FastAPI 应用
         try:
             _progress("创建 API 应用", "create_app()", None)
             app = create_app()
@@ -365,7 +365,7 @@ def _start_backend_in_thread(
             _backend_ready.set()
             return
 
-        # Step 5: 启动 uvicorn（不依赖 started() 回调，用健康检查轮询）
+        # 步骤 5：启动 uvicorn（不依赖 started() 回调，用健康检查轮询）
         try:
             config = uvicorn.Config(app, host=host, port=port, log_level="error")
             server = uvicorn.Server(config)
@@ -545,7 +545,7 @@ def launch_ide(
     _row("Tauri CLI", _c(_BWHITE, tauri_cli))
     _row("窗口协议", _ok("Wayland") if _detect_wayland(env) else _label("X11 / 默认"))
 
-    # Step 1: Start Vite dev server in background (tauri dev needs it)
+    # 步骤 1：后台启动 Vite 开发服务器，tauri dev 需要它先就绪。
     _row("Vite dev server", _label("启动 localhost:5173 …"))
     try:
         vite_proc = subprocess.Popen(
@@ -559,7 +559,7 @@ def launch_ide(
         _row("Vite", _err(f"启动失败: {e}"), False)
         return 1
 
-    # Wait for Vite to be ready
+    # 等待 Vite 就绪。
     vite_ready = False
     for _ in range(30):
         try:
@@ -576,7 +576,7 @@ def launch_ide(
         vite_proc.kill()
         return 1
 
-    # Step 2: Launch Tauri
+    # 步骤 2：启动 Tauri。
     _row("启动 Tauri", _label("正在编译并启动 …"))
     print()
 

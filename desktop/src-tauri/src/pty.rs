@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Serialize, Clone)]
 pub struct TerminalOutputPayload {
@@ -83,7 +83,7 @@ pub fn terminal_create(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    // Use login shell on Unix
+    // 在 Unix 平台使用登录 shell，保持用户环境变量和启动脚本一致。
     if !cfg!(target_os = "windows") {
         cmd.arg("-l");
     }
@@ -117,7 +117,7 @@ pub fn terminal_create(
         .map_err(|e| e.to_string())?
         .insert(session_id.clone(), session);
 
-    // Read stdout in background thread -> emit events
+    // 后台线程读取 stdout，并转发为前端终端事件。
     let app_handle = app.clone();
     let sid = session_id.clone();
     std::thread::spawn(move || {
@@ -180,11 +180,12 @@ pub fn terminal_write(
 #[tauri::command]
 pub fn terminal_resize(
     _state: State<'_, TerminalManager>,
-    _data: ResizeData,
+    data: ResizeData,
 ) -> Result<(), String> {
-    // PTY resize requires a real PTY master fd.
-    // With piped stdin/stdout (simple mode), resize is not supported.
-    // A full portable-pty implementation would use ioctl(TIOCSWINSZ).
+    let _ = (&data.session_id, data.cols, data.rows);
+    // 调整 PTY 尺寸需要真实的 PTY master fd。
+    // 当前简单模式使用管道 stdin/stdout，因此暂不支持 resize。
+    // 后续若接入 portable-pty，可通过 ioctl(TIOCSWINSZ) 实现。
     Ok(())
 }
 

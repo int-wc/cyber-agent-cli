@@ -1847,7 +1847,7 @@ class BenchmarkProbeMixin:
         cookie_path = cookie_file.name
         cookie_file.close()
         try:
-            # Known demo/admin credentials are common in these benchmark web apps.
+            # 这类 benchmark Web 应用常使用已知的 demo/admin 凭据。
             web_profile = self._benchmark_webapp_flow_profiles()[0]
             for username, password in list(web_profile.get("credentials") or [])[:4]:
                 remaining = self._benchmark_deadline_remaining(deadline)
@@ -2495,4 +2495,3 @@ class BenchmarkProbeMixin:
             if "close step 3" in lowered and "close" in actions:
                 return fingerprint, "close"
         return None
-

@@ -137,7 +137,7 @@ def _extract_usage_from_chunk(accumulated_chunk: AIMessageChunk) -> dict[str, in
                 "output_tokens": int(usage_metadata.get("output_tokens", 0)),
                 "total_tokens": int(usage_metadata.get("total_tokens", 0)),
             }
-        # OpenAI Usage 对象（有 prompt_tokens, completion_tokens 属性）
+        # OpenAI 的 Usage 对象（有 prompt_tokens, completion_tokens 属性）
         if hasattr(usage_metadata, "prompt_tokens"):
             return {
                 "input_tokens": int(getattr(usage_metadata, "prompt_tokens", 0)),
@@ -170,7 +170,7 @@ def _extract_usage_from_chunk(accumulated_chunk: AIMessageChunk) -> dict[str, in
                 "output_tokens": int(usage.get("completion_tokens", usage.get("output_tokens", 0))),
                 "total_tokens": int(usage.get("total_tokens", 0)),
             }
-        # usage 可能也在顶层（某些代理网关格式）
+        # 某些代理网关会把 usage 放在顶层。
         if "prompt_tokens" in source:
             return {
                 "input_tokens": int(source.get("prompt_tokens", 0)),
@@ -793,7 +793,7 @@ class AgentRunner:
                     break
 
         # 安全兜底 2：全部历史被压缩（压缩边界吞噬了所有非 SystemMessage），
-        # tail 完全为空 → 回退搜索最近的一条 HumanMessage
+        # 当 tail 完全为空时，回退搜索最近的一条 HumanMessage。
         if not tail:
             for idx in range(len(self.history) - 1, 0, -1):
                 if isinstance(self.history[idx], HumanMessage):
@@ -1136,7 +1136,7 @@ class AgentRunner:
                     except ExecutionInterruptedError:
                         # 超时/中断后清理本轮追加的孤立 AIMessage(tool_calls) 和
                         # 已部分执行的 ToolMessage，防止 retry 时 API 端收到
-                        # tool_use 无对应 tool_result 的 400 错误
+                        # 避免 tool_use 无对应 tool_result 的 400 错误。
                         self._cleanup_tool_round(ai_message)
                         raise
                     except Exception:

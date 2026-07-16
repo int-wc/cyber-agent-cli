@@ -90,12 +90,12 @@ if TEXTUAL_IMPORT_ERROR is None:
                 return renderable
             if isinstance(renderable, Text):
                 return renderable.plain
-            # Rich Panel → 递归提取内部 renderable
+            # 对 Rich Panel 递归提取内部 renderable。
             if isinstance(renderable, _RichPanel):
                 inner = renderable.renderable
                 if inner is not None and inner is not renderable:
                     return RenderableBlock._extract_text(inner)
-            # Rich Table → 遍历所有列的单元格（col.cells 是 col._cells 的生成器）
+            # 对 Rich Table 遍历所有列的单元格（col.cells 是 col._cells 的生成器）。
             if hasattr(renderable, "columns"):
                 parts: list[str] = []
                 for col in renderable.columns:
@@ -1022,7 +1022,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             self._cumulative_output_tokens -= self._estimated_output_tokens
             self._cumulative_output_tokens += output_tokens
             self._estimated_output_tokens = 0
-            # input token 仅在 TURN_END 可知
+            # 输入 token 仅在 TURN_END 可知。
             self._cumulative_input_tokens += input_tokens
             cost = _estimate_cost(
                 input_tokens, output_tokens,

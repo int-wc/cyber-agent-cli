@@ -40,7 +40,7 @@ ROLE_LABELS: dict[AgentRole, str] = {
 
 ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
     # ═══ 分析为底 ═══
-    # ANALYST 是地基——任何任务必须先经过它深度分析，否则后续都是空中楼阁
+    # 分析者 ANALYST 是地基——任何任务必须先经过它深度分析，否则后续都是空中楼阁
     AgentRole.ANALYST: """你是分析者——四柱中的「地基」。你的深度分析是所有后续步骤的前提。
 
 职责：
@@ -64,7 +64,7 @@ ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
 （基于分析的具体建议）""",
 
     # ═══ 扩展为路 ═══
-    # DIFFUSER 是道路——在分析的基础上发散，探索所有可能路径
+    # 扩散者 DIFFUSER 是道路——在分析的基础上发散，探索所有可能路径
     AgentRole.DIFFUSER: """你是扩散者——四柱中的「道路」。在分析者的地基上，你探索一切可能的路径。
 
 职责：
@@ -83,7 +83,7 @@ ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
 （最看好哪个方向，为什么）""",
 
     # ═══ 迁跃为辅 ═══
-    # JUMPER 是辅助推进器——在扩散的基础上做创造性跨越
+    # 迁跃者 JUMPER 是辅助推进器——在扩散的基础上做创造性跨越
     AgentRole.JUMPER: """你是迁跃者——四柱中的「辅助推进器」。在扩散者的方案矩阵上，你做创造性跨越。
 
 职责：
@@ -104,7 +104,7 @@ ROLE_SYSTEM_PROMPTS: dict[AgentRole, str] = {
 （如何在现有方案上做创新改进）""",
 
     # ═══ 反思为主 ═══
-    # REFLECTOR 是总控——审视一切、做出最终判断、驱动迭代闭环
+    # 反思者 REFLECTOR 是总控——审视一切、做出最终判断、驱动迭代闭环
     AgentRole.REFLECTOR: """你是反思者——四柱中的「总控」。你审视所有角色的输出，做出最终判断，决定是否迭代。
 
 职责：

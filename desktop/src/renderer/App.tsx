@@ -11,7 +11,7 @@ export default function App() {
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
 
-    // Tauri: listen for backend:status event from Rust backend manager
+    // Tauri 环境下监听 Rust 后端管理器发出的 backend:status 事件。
     listen<{ ready: boolean; port: number }>("backend:status", (event) => {
       if (event.payload.ready) {
         setBackendPort(event.payload.port);
@@ -19,7 +19,7 @@ export default function App() {
       }
     }).then((fn) => { unlistenFn = fn; });
 
-    // Fallback: URL query param for browser dev mode
+    // 浏览器开发模式下通过 URL 查询参数兜底传入端口。
     const params = new URLSearchParams(window.location.search);
     const port = parseInt(params.get("port") || "0", 10);
     if (port) {

@@ -24,7 +24,7 @@ export async function apiFetch<T = unknown>(
   return res.json();
 }
 
-// File system APIs
+// 文件系统 API
 export const fsApi = {
   roots: () => apiFetch<{ roots: { path: string; name: string }[] }>("/api/fs/roots"),
   list: (path = ".") => apiFetch<{ path: string; entries: import("../types/agent").FileEntry[] }>(`/api/fs/list?path=${encodeURIComponent(path)}`),
@@ -36,7 +36,7 @@ export const fsApi = {
   search: (query: string, path = ".") => apiFetch<{ query: string; results: { path: string; name: string; match: string }[] }>(`/api/fs/search?query=${encodeURIComponent(query)}&path=${encodeURIComponent(path)}`),
 };
 
-// Git APIs
+// Git 操作 API
 export const gitApi = {
   status: () => apiFetch<{ stdout: string; stderr: string; returncode: number }>("/api/git/status"),
   diff: (staged = false) => apiFetch<{ stdout: string }>(`/api/git/diff?staged=${staged}`),
@@ -47,7 +47,7 @@ export const gitApi = {
   branches: () => apiFetch<{ stdout: string }>("/api/git/branches"),
 };
 
-// Session APIs
+// 会话 API
 export const sessionApi = {
   status: () => apiFetch<{ mode: string; service: string; model: string; allowed_roots: string[]; message_count: number }>("/api/session/status"),
   reset: () => apiFetch("/api/session/reset", { method: "POST" }),

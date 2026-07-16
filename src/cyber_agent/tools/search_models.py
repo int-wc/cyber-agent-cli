@@ -37,7 +37,7 @@ _ROTATING_VIEWPORTS = (
     {"width": 1536, "height": 864},
     {"width": 1280, "height": 720},
 )
-# Chrome 启动参数：关闭自动化检测标记
+# 浏览器启动参数：关闭 Chrome 自动化检测标记。
 _STEALTH_LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process",

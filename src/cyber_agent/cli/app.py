@@ -1184,7 +1184,14 @@ def print_history_list(
 ) -> None:
     """列出当前工作目录下可访问的历史会话摘要。"""
     session_store = _load_session_store_support()
-    stored_sessions = session_store["list_stored_sessions"]()
+    current_session_id = str(runtime_context.get("session_id") or "")
+    stored_sessions = [
+        summary for summary in session_store["list_stored_sessions"]()
+        if not (
+            summary.session_id == current_session_id
+            and summary.turn_count == 0
+        )
+    ]
     if not stored_sessions:
         cli_renderer.print_info("当前工作目录下还没有已保存的历史会话。")
         return

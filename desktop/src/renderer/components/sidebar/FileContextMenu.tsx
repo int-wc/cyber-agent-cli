@@ -28,7 +28,7 @@ export default function FileContextMenu({ x, y, onClose, items }: Props) {
     const keyHandler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    // delay to avoid the same click closing immediately
+    // 延迟绑定事件，避免打开菜单的同一次点击立即触发关闭。
     const t = setTimeout(() => {
       document.addEventListener("mousedown", handler);
       document.addEventListener("keydown", keyHandler);
@@ -40,7 +40,7 @@ export default function FileContextMenu({ x, y, onClose, items }: Props) {
     };
   }, [onClose]);
 
-  // keep menu in viewport
+  // 将菜单限制在视口内，避免右侧或底部被裁切。
   const [adjX, adjY] = (() => {
     const w = 220; const h = items.length * 34 + 8;
     let ax = x; let ay = y;

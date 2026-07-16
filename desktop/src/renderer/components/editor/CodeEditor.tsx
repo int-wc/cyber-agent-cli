@@ -2,7 +2,6 @@ import { useCallback, useRef, useEffect, lazy, Suspense, useState } from "react"
 import { useEditorStore } from "../../stores/editorStore";
 import { fsApi } from "../../services/api";
 import { X } from "lucide-react";
-import { loader } from "@monaco-editor/react";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 
@@ -69,8 +68,11 @@ let monacoPromise: Promise<void> | null = null;
 function ensureMonacoLoaded(): Promise<void> {
   if (monacoReady) return Promise.resolve();
   if (!monacoPromise) {
-    monacoPromise = import("monaco-editor").then((m) => {
-      loader.config({ monaco: m });
+    monacoPromise = Promise.all([
+      import("@monaco-editor/react"),
+      import("monaco-editor"),
+    ]).then(([reactMonaco, monaco]) => {
+      reactMonaco.loader.config({ monaco });
       monacoReady = true;
     });
   }
@@ -87,8 +89,8 @@ export default function CodeEditor() {
 
   const activeTab = tabs.find((t) => t.path === activeTabPath);
 
-  // Dynamically load monaco-editor when editor view first appears.
-  // Static import would execute monaco-editor at app startup and break window.prompt().
+  // 编辑器首次出现时再动态加载 monaco-editor。
+  // 静态导入会在应用启动时执行 monaco-editor，并影响 window.prompt()。
   useEffect(() => {
     if (!activeTab) return;
     let cancelled = false;
@@ -98,7 +100,7 @@ export default function CodeEditor() {
     return () => { cancelled = true; };
   }, [!!activeTab]);
 
-  // ResizeObserver — measure container pixel height
+  // 使用 ResizeObserver 测量容器像素高度，避免编辑器高度抖动。
   useEffect(() => {
     if (!activeTab) return;
     const el = containerRef.current;

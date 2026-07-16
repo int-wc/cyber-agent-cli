@@ -57,7 +57,7 @@ GATEWAY_DEFAULT_MODEL=deepseek-v4-flash-free
 OPENCODE_API_KEY=your_api_key
 OPENCODE_MODEL=deepseek-v4-flash-free
 OPENCODE_BASE_URL=https://opencode.ai/zen/v1
-OPENCODE_PROXY_URL=http://192.168.31.47:7892
+OPENCODE_PROXY_URL=
 SUBAGENT_MODEL=deepseek-v4-flash-free
 
 DEEPSEEK_API_KEY=
@@ -84,7 +84,7 @@ SEARCH_SHOW_BROWSER=true
 - `GATEWAY_DEFAULT_MODEL`：可选，当前默认是 `deepseek-v4-flash-free`。
 - `GATEWAY_BASE_URL`：可选，统一模型网关基址；若服务商配置了专属基址，如 `OPENCODE_BASE_URL`，专属基址优先。
 - `OPENCODE_API_KEY` / `OPENCODE_MODEL` / `OPENCODE_BASE_URL`：可选，OpenCode Zen 专属配置。默认基址是 `https://opencode.ai/zen/v1`。
-- `OPENCODE_PROXY_URL`：可选，OpenCode Zen 专属代理，默认 `http://192.168.31.47:7892`。也支持 `socks://192.168.31.47:7892`（会按 `socks5://` 处理），需安装 socks 支持依赖。
+- `OPENCODE_PROXY_URL`：可选，OpenCode Zen 专属代理，默认不启用。也支持 `socks://proxy.example:7892`（会按 `socks5://` 处理），需安装 socks 支持依赖。
 - `MODEL_PROXY_URL`：可选，通用模型代理；服务商专属代理优先。
 - `SUBAGENT_MODEL`：可选，四柱/多 Agent 子模型，OpenCode 默认建议使用 `deepseek-v4-flash-free`，避免触发付费模型。
 - `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL`：可选，DeepSeek 专属配置。

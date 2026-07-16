@@ -19,6 +19,12 @@ from ..execution_control import ExecutionController, ExecutionInterruptedError
 from .metadata import attach_tool_risk
 
 from .search_models import *  # noqa: F403  # 向后兼容：模型与常量已拆分至独立模块
+from .search_models import (  # noqa: E402
+    _ROTATING_USER_AGENTS,
+    _ROTATING_VIEWPORTS,
+    _STEALTH_LAUNCH_ARGS,
+    _STEALTH_SCRIPT,
+)
 if TYPE_CHECKING:
     from ..capability_registry import CapabilityRegistry
 
@@ -1014,7 +1020,6 @@ def _create_stealth_browser_context(playwright: Any) -> tuple[Any, Any]:
     browser = playwright.chromium.launch(
         headless=not settings.search_show_browser,
         args=_STEALTH_LAUNCH_ARGS,
-        timeout=PARALLEL_ENGINE_TIMEOUT_SECONDS * 1000,
     )
     browser_context = browser.new_context(
         user_agent=_pick_random_user_agent(),
@@ -1057,7 +1062,7 @@ def _search_engine_in_isolated_context(
                 if remaining <= 0.2:
                     return [], f"{engine_spec.name} 超时（启动前已超预算）"
 
-                # Bing 使用多查询模式获取更多结果
+                # 搜索 Bing 时使用多查询模式获取更多结果。
                 if engine_spec.search_url_template and "bing.com" in engine_spec.search_url_template:
                     return _search_bing_multiquery(
                         page, engine_spec, query, result_limit, execution_controller
@@ -1195,7 +1200,7 @@ def _search_all_variants_parallel(
         future_map: dict[concurrent.futures.Future, tuple[str, str]] = {}
 
         # 三引擎均用原始查询各 1 路，共 3 个 chromium 实例
-        # Bing: 内部多查询展开（10 变体），Google/Baidu: 直接搜索 URL 快速通道
+        # 对 Bing 做内部多查询展开（10 变体），Google/Baidu 使用直接搜索 URL 快速通道。
         for engine_spec in PLAYWRIGHT_SEARCH_ENGINES:
             if execution_controller is not None:
                 execution_controller.ensure_not_cancelled()
@@ -1760,7 +1765,7 @@ def create_search_web_tool(
         # 原始拉取量 = 目标 × 倍数，弥补 CSDN 剔除 + 合并两路来源
         fetch_count = max(safe_result_count + 15, int(safe_result_count * FETCH_MULTIPLIER_FOR_CSDN_FILTER))
 
-        # 直接走 Playwright 浏览器搜索（DuckDuckGo HTTP 在此环境不可达，跳过）
+        # 优先走 Playwright 浏览器搜索，失败后再回退到 HTTP HTML 搜索。
         try:
             browser_results, browser_notes = search_with_playwright(
                 normalized_query, fetch_count, execution_controller, capability_registry,
@@ -1774,6 +1779,15 @@ def create_search_web_tool(
         if browser_results:
             return render_search_results(normalized_query, browser_results, browser_notes)
 
-        return render_search_failure([], [*browser_notes, "❌ 浏览器搜索未返回可用结果"])
+        http_results, http_notes, request_errors = search_with_httpx(
+            normalized_query,
+            safe_result_count,
+            execution_controller,
+        )
+        combined_notes = [*browser_notes, "❌ 浏览器搜索未返回可用结果", *http_notes]
+        if http_results:
+            return render_search_results(normalized_query, http_results, combined_notes)
+
+        return render_search_failure(request_errors, combined_notes)
 
     return attach_tool_risk(search_web, "read")

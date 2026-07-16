@@ -1,13 +1,13 @@
-/* ── Cyber Agent IDE — Apple Liquid Glass Light Theme ── */
+/* ── Cyber Agent IDE：Apple Liquid Glass 浅色主题 ── */
 
 :root {
-  /* Light base */
+  /* 浅色底色 */
   --bg-base: #f0f0f5;
   --bg-elevated: #f8f8fd;
   --bg-overlay: #ffffff;
   --bg-surface: #fafafe;
 
-  /* Glass — white translucent */
+  /* 玻璃拟态：白色半透明层 */
   --glass-fill: rgba(255, 255, 255, 0.45);
   --glass-fill-hover: rgba(255, 255, 255, 0.65);
   --glass-fill-active: rgba(255, 255, 255, 0.80);
@@ -17,38 +17,38 @@
   --glass-blur-heavy: 48px;
   --glass-saturate: 1.8;
 
-  /* Accent — Soft purple (Apple style) */
+  /* 强调色：Apple 风格柔和紫色 */
   --accent: #7c6ff7;
   --accent-soft: rgba(124, 111, 247, 0.10);
   --accent-glow: rgba(124, 111, 247, 0.25);
   --accent-light: #9b8ffb;
 
-  /* Semantic */
+  /* 语义色 */
   --blue: #3b82f6;
   --green: #22c55e;
   --orange: #f59e0b;
   --red: #ef4444;
   --yellow: #eab308;
 
-  /* Text — dark for light bg */
+  /* 文本色：适配浅色背景 */
   --text-primary: rgba(0, 0, 0, 0.88);
   --text-secondary: rgba(0, 0, 0, 0.58);
   --text-tertiary: rgba(0, 0, 0, 0.32);
   --text-accent: #7c6ff7;
 
-  /* Shadows — soft and elevated */
+  /* 阴影：柔和悬浮层级 */
   --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
   --shadow-glow: 0 0 24px -4px var(--accent-glow);
 
-  /* Radius */
+  /* 圆角 */
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 22px;
 
-  /* Easing */
+  /* 动效曲线 */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --duration-fast: 150ms;
@@ -56,7 +56,7 @@
   --duration-slow: 500ms;
 }
 
-/* ── Typography ── */
+/* ── 排版 ── */
 .text-primary { color: var(--text-primary); }
 .text-secondary { color: var(--text-secondary); }
 .text-tertiary { color: var(--text-tertiary); }

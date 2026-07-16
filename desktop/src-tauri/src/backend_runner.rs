@@ -23,7 +23,7 @@ impl BackendManager {
 }
 
 pub fn spawn_and_monitor(app: AppHandle) {
-    // If the Python launcher already started a backend, just relay the port
+    // 若 Python 启动器已经拉起后端，这里只转发已有端口。
     if let Ok(port_str) = std::env::var("CYBER_AGENT_BACKEND_PORT") {
         if let Ok(port) = port_str.parse::<u16>() {
             println!("[backend] using pre-started backend on port {}", port);
@@ -44,7 +44,7 @@ pub fn spawn_and_monitor(app: AppHandle) {
         "python3"
     };
 
-    // Resolve project root: during dev, this is the desktop/ directory
+    // 解析项目根目录；开发模式下当前目录通常是 desktop/。
     let project_root = std::env::current_dir().unwrap_or_default();
 
     let mut child = match Command::new(python_cmd)
@@ -82,14 +82,14 @@ pub fn spawn_and_monitor(app: AppHandle) {
     let stdout = child.stdout.take().expect("failed to capture stdout");
     let stderr = child.stderr.take().expect("failed to capture stderr");
 
-    // Store child handle for cleanup
+    // 保存子进程句柄，便于退出时清理。
     if let Ok(mut proc) = app.state::<BackendManager>().process.lock() {
         *proc = Some(child);
     }
 
     let app_clone = app.clone();
 
-    // Read stdout for port
+    // 从 stdout 读取后端随机分配的端口。
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut found_port = false;
@@ -125,7 +125,7 @@ pub fn spawn_and_monitor(app: AppHandle) {
         }
     });
 
-    // Read stderr in background
+    // 后台转发 stderr，便于排查后端启动错误。
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -143,7 +143,7 @@ pub fn stop_backend(state: State<'_, BackendManager>) -> Result<(), String> {
         let pid = child.id();
         println!("[backend] stopping process (pid={})", pid);
 
-        // Kill the process
+        // 先尝试终止进程。
         #[cfg(unix)]
         {
             unsafe {
@@ -155,7 +155,7 @@ pub fn stop_backend(state: State<'_, BackendManager>) -> Result<(), String> {
             let _ = child.kill();
         }
 
-        // Wait up to 5 seconds
+        // 最多等待 5 秒，仍未退出则强制清理。
         let start = std::time::Instant::now();
         let mut exited = false;
         while start.elapsed() < std::time::Duration::from_secs(5) {

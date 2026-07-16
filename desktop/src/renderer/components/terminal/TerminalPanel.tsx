@@ -65,7 +65,7 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
 
         xtermRef.current = { term, fitAddon, sessionId: null };
 
-        // Tauri PTY bridge: create session via Rust command
+        // 通过 Tauri PTY 桥接调用 Rust 命令创建终端会话。
         try {
           const sess = await invoke<{ sessionId: string; pid: number }>("terminal_create", {
             options: { shell: null },
@@ -74,7 +74,7 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
             xtermRef.current.sessionId = sess.sessionId;
           }
 
-          // Listen for PTY output events from Rust
+          // 监听 Rust 侧转发的 PTY 输出事件。
           currentUnlisten = await listen<TerminalOutputPayload>(
             "terminal:output",
             (event) => {
@@ -101,7 +101,7 @@ export default function TerminalPanel({ standalone, sessionKey }: Props) {
           }
         });
 
-        // Resize observer
+        // 监听容器尺寸变化，并同步终端行列数。
         const resizeObserver = new ResizeObserver(() => {
           try { fitAddon.fit(); } catch {}
           const ref = xtermRef.current;

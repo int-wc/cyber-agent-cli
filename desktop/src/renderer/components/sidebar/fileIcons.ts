@@ -151,10 +151,10 @@ export function getFileIcon(name: string, isDir: boolean, open: boolean): FileIc
     if (m) return { ...m, icon: open ? FolderOpen : m.icon };
     return { ...DEFAULT_FOLDER, icon: open ? FolderOpen : DEFAULT_FOLDER.icon };
   }
-  // check special name
+  // 优先匹配特殊文件名。
   const nm = NAME_MAP[key];
   if (nm) return nm;
-  // check extension
+  // 再按扩展名匹配通用图标。
   const ext = key.includes(".") ? key.split(".").pop()! : "";
   return EXT_MAP[ext] || DEFAULT_FILE;
 }

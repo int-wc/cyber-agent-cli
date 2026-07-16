@@ -29,7 +29,7 @@ from ..tools import (
     describe_command_registry,
     describe_tool_instances,
 )
-# build_doctor_payload 延迟导入，见 _build_feishu_doctor_payload
+# 延迟导入 build_doctor_payload，见 _build_feishu_doctor_payload。
 from .interactive import BUILTIN_COMMAND_SPECS, get_interaction_ui_mode_label
 from .webhook_models import *  # noqa: F403
 

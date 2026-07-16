@@ -3,6 +3,31 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from tempfile import TemporaryDirectory
+
+from typer.testing import CliRunner
+
+
+if not hasattr(CliRunner, "isolated_filesystem"):
+    @contextmanager
+    def _isolated_filesystem(self: CliRunner):  # type: ignore[no-untyped-def]
+        """兼容旧版测试写法：在临时目录中执行 CliRunner 用例。"""
+        old_cwd = os.getcwd()
+        old_home = os.environ.get("CYBER_AGENT_HOME")
+        with TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            os.environ["CYBER_AGENT_HOME"] = temp_dir
+            try:
+                yield temp_dir
+            finally:
+                os.chdir(old_cwd)
+                if old_home is None:
+                    os.environ.pop("CYBER_AGENT_HOME", None)
+                else:
+                    os.environ["CYBER_AGENT_HOME"] = old_home
+
+    CliRunner.isolated_filesystem = _isolated_filesystem  # type: ignore[attr-defined]
 
 
 def pytest_configure(config: object) -> None:

@@ -8,7 +8,7 @@ interface StreamingTextProps {
 function StreamingTextInner({ content, isStreaming }: StreamingTextProps) {
   if (!content) return null;
 
-  // Simple markdown rendering: code blocks, inline code, bold, italic
+  // 轻量 Markdown 渲染：支持代码块、行内代码、粗体和斜体。
   const renderLine = (line: string, inCodeBlock: boolean): [string, boolean] => {
     if (line.startsWith("```")) {
       return [inCodeBlock ? "</code></pre>" : "<pre><code>", !inCodeBlock];
@@ -16,11 +16,12 @@ function StreamingTextInner({ content, isStreaming }: StreamingTextProps) {
     if (inCodeBlock) {
       return [escapeHtml(line) + "\n", true];
     }
-    // Inline code
-    let html = line.replace(/`([^`]+)`/g, "<code>$1</code>");
-    // Bold
+    let html = escapeHtml(line);
+    // 行内代码
+    html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // 粗体
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    // Italic
+    // 斜体
     html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
     return [html, false];
   };
@@ -33,7 +34,7 @@ function StreamingTextInner({ content, isStreaming }: StreamingTextProps) {
     return html;
   });
 
-  // Close any remaining code block
+  // 补齐未闭合的代码块，避免后续内容被吞进 pre/code。
   if (inCode) {
     htmlLines.push("</code></pre>");
   }

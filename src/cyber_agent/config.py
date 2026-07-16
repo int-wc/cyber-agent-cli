@@ -19,7 +19,7 @@ DEFAULT_MODELS: dict[str, str] = {
 }
 DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_BAISUB_BASE_URL = "https://baisub.bai.edu.kg/v1"
-DEFAULT_OPENCODE_PROXY_URL = "http://192.168.31.47:7892"
+DEFAULT_OPENCODE_PROXY_URL: str | None = None
 ANTHROPIC_TOKEN_SERVICES = frozenset({"deepseek", "mimo", "claude"})
 # DeepSeek V4 Pro [1m] 上下文窗口参数
 DEEPSEEK_MAX_CONTEXT_TOKENS = 4_000_000
@@ -398,7 +398,7 @@ class Settings(BaseSettings):
     def resolve_proxy_url(self, service_name: str | None = None) -> str | None:
         """解析模型客户端代理地址。
 
-        优先级：服务商专属代理 > MODEL_PROXY_URL。当前仅为 opencode 设置默认代理。
+        优先级：服务商专属代理 > MODEL_PROXY_URL。默认不设置代理，避免仓库内固化私有网络地址。
         """
         normalized_service = self.normalize_service_name(service_name)
         service_proxies: dict[str, str | None] = {
