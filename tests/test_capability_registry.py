@@ -21,6 +21,19 @@ class NoopChatOpenAI:
         raise AssertionError("当前用例不应触发真实对话流。")
 
 
+class JsonPromptResponse:
+    content = [{"text": '{"ok": true}'}]
+
+
+class JsonPromptLLM:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def invoke(self, messages):
+        self.messages = list(messages)
+        return JsonPromptResponse()
+
+
 def build_tool_capability_spec(name: str, *, register_as_tool: bool = True) -> dict[str, object]:
     return {
         "name": name,
@@ -58,6 +71,20 @@ def build_skill_prompt() -> str:
 
 
 class CapabilityRegistryTestCase(unittest.TestCase):
+    def test_json_prompt_parses_list_content_response(self) -> None:
+        """
+        测试：模型响应为列表结构时仍能解析 JSON，防止拆分私有函数后遗漏导入。
+        """
+        with TemporaryDirectory() as temp_dir:
+            registry = CapabilityRegistry(base_dir=Path(temp_dir))
+            fake_llm = JsonPromptLLM()
+
+            with patch.object(registry, "_get_llm", return_value=fake_llm):
+                parsed_data = registry.invoke_json_prompt("系统提示", "用户提示")
+
+        self.assertEqual(parsed_data, {"ok": True})
+        self.assertEqual(len(fake_llm.messages), 2)
+
     def test_registry_can_create_real_code_files_and_expose_runtime_tool(self) -> None:
         """
         测试：生成 capability 后会写出真实代码文件，并作为当前 agent 的工具暴露。
