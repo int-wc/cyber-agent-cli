@@ -1715,6 +1715,33 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(state["active_containers"], {})
         self.assertEqual(state["completed_scores"]["d-01"], 200)
 
+    def test_benchmark_close_local_clears_active_state_immediately(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "d-01"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "d-01": ["10.0.180.232:8000"],
+            }
+            self.pipeline._benchmark_current_challenge = "d-01"
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_platform_request",
+                return_value=(200, '{"unique_code":"d-01","closed":true}', ""),
+            ),
+            patch.object(self.pipeline, "_persist_benchmark_state") as persist,
+        ):
+            result = self.pipeline._benchmark_close_local("d-01")
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn('"closed":true', result)
+        self.assertIsNone(state["current_challenge"])
+        self.assertEqual(state["active_containers"], {})
+        self.assertIn("d-01", state["closed_challenges"])
+        persist.assert_called_once()
+
     def test_benchmark_runtime_state_does_not_record_tun_as_platform_interface(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

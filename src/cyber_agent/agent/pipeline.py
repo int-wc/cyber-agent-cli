@@ -1942,6 +1942,29 @@ class FourPillarPipeline:
             method="POST",
             path=f"/openapi/v1/challenges/close?unique_code={code}",
         )
+        closed_ok = False
+        try:
+            value = json.loads(stdout)
+        except Exception:
+            value = None
+        if isinstance(value, dict):
+            closed_ok = value.get("closed") is True or value.get("status") in {
+                "closed",
+                "already_closed",
+            }
+        if closed_ok or "already" in stdout.lower():
+            with self._benchmark_state_lock:
+                closed = set(self._benchmark_state.get("closed_challenges", set()))
+                closed.add(code)
+                active = dict(self._benchmark_state.get("active_containers", {}))
+                active.pop(code, None)
+                self._benchmark_state["closed_challenges"] = closed
+                self._benchmark_state["active_containers"] = active
+                if self._benchmark_state.get("current_challenge") == code:
+                    self._benchmark_state["current_challenge"] = None
+                if self._benchmark_current_challenge == code:
+                    self._benchmark_current_challenge = None
+            self._persist_benchmark_state()
         return stdout
 
     def _benchmark_start_local(self, code: str) -> str:

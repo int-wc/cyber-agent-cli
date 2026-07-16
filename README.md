@@ -1,4 +1,4 @@
-# Cyber Agent CLI
+# Cyber Agent 命令行工具
 
 一个面向本地终端的网络安全与代码辅助智能体原型。
 
@@ -64,8 +64,8 @@ DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING_MODE=enabled
 
-# BaiSub OpenAI-compatible endpoint. 多个 key/model 按顺序一一对应；
-# 当前 key 不可用、限流或模型不支持时会自动尝试下一个。
+# BaiSub 的 OpenAI 兼容端点。多个 key/model 按顺序一一对应；
+# 当前 key 不可用、限流或模型不支持时，会自动尝试下一个。
 BAISUB_API_KEYS=primary_key,fallback_key
 BAISUB_MODELS=primary_model,fallback_model
 BAISUB_BASE_URL=https://baisub.bai.edu.kg/v1
@@ -129,7 +129,7 @@ cyber-agent run "扫描 127.0.0.1 的 80 端口"
 cyber-agent --mode authorized --allow-path ./labs --approval-policy auto
 ```
 
-### TSec Benchmark Profile
+### TSec Benchmark 配置档
 
 Benchmark 跑分策略可以通过数据文件扩展，避免把新题型写死到 Python 代码里。参考
 [`docs/benchmark-profiles.md`](docs/benchmark-profiles.md) 和
@@ -146,7 +146,7 @@ Benchmark 跑分策略可以通过数据文件扩展，避免把新题型写死�
 cyber-agent --mode authorized --tool python=/absolute/path/to/python tools
 ```
 
-### 启动 webhook 移动端桥接
+### 启动 Webhook 移动端桥接
 
 ```bash
 cyber-agent webhook example-config webhook-routes.json
@@ -278,9 +278,9 @@ cyber-agent --mode authorized --approval-policy never webhook serve --config web
 
 ## Webhook 移动交互
 
-项目现在提供一个最小可运行的 webhook 网关，用于把第三方移动端消息桥接到当前智能体会话。
+项目现在提供一个最小可运行的 Webhook 网关，用于把第三方移动端消息桥接到当前智能体会话。
 
-当前内置支持的 provider：
+当前内置支持的服务商：
 
 - `feishu`
 - `dingtalk`
@@ -365,8 +365,8 @@ cyber-agent --mode authorized --approval-policy never webhook serve-feishu-long-
 
 补充说明：
 
-- webhook 场景下不支持交互式审批；若使用 `prompt`，高风险工具会被拒绝。
-- `providers` 是面向统一运维的通用配置格式：保留全部平台入口即可，某个平台只要没有填写 `secret`、`reply_webhook_url` 或 `provider_options` 中的有效字段，就会在启动时自动跳过，不会注册该 webhook。
+- Webhook 场景下不支持交互式审批；若使用 `prompt`，高风险工具会被拒绝。
+- `providers` 是面向统一运维的通用配置格式：保留全部平台入口即可，某个平台只要没有填写 `secret`、`reply_webhook_url` 或 `provider_options` 中的有效字段，就会在启动时自动跳过，不会注册该 Webhook。
 - 若你已有旧版 `routes` 数组配置，当前版本仍然兼容；只是 `routes` 中每条都视为显式启用，不会做自动跳过。
 - `dingtalk` 会优先使用请求体中的 `sessionWebhook` 回包；若没有，则尝试同步 HTTP 响应。
 - `secret` 是项目自定义的共享密钥校验；若接入飞书/企微官方回调，通常应改为在 `provider_options` 中配置各平台自己的验签参数，而不是继续依赖 `secret`。
@@ -376,8 +376,8 @@ cyber-agent --mode authorized --approval-policy never webhook serve-feishu-long-
 - `webhook serve-feishu-long-connection` 会复用同一份 `webhook-routes.json` 中的 `feishu` 路由配置，通过飞书官方 SDK 建立长连接，不需要公网回调地址；若配置里存在多条 `feishu` 路由，可追加 `--path /webhook/feishu` 显式选择。
 - `wecom` 现已支持官方回调模式的 GET URL 校验、POST XML 验签解密，以及默认的加密被动文本回包。若希望继续把回复转发给外部桥接层，可把 `provider_options.reply_mode` 改为 `reply_webhook` 并配置 `reply_webhook_url`。
 - `reply_webhook_url` 现在支持 `provider_options.reply_retry_attempts`、`reply_retry_backoff_seconds`、`reply_signing_secret`、`reply_signature_header`、`reply_timestamp_header` 和 `reply_dead_letter_dir`，用于控制重试、HMAC 签名头和失败死信落盘。
-- `email` 当前默认支持 JSON 和 `application/x-www-form-urlencoded` 两类 webhook；若邮件服务使用 `multipart/form-data`，需要按真实供应商字段继续补充。
-- webhook 会按“provider + 会话键”自动复用本地历史会话，因此同一聊天线程会继承上下文。
+- `email` 当前默认支持 JSON 和 `application/x-www-form-urlencoded` 两类 Webhook；若邮件服务使用 `multipart/form-data`，需要按真实供应商字段继续补充。
+- Webhook 会按“服务商 + 会话键”自动复用本地历史会话，因此同一聊天线程会继承上下文。
 - 飞书/企微官方加密回调依赖运行环境中存在 `pycryptodome` 或 `cryptography` 之一；若两者都没有，网关会明确返回缺少加解密依赖的错误。
 
 ## 本地配置
