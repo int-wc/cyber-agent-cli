@@ -129,6 +129,17 @@ cyber-agent run "扫描 127.0.0.1 的 80 端口"
 cyber-agent --mode authorized --allow-path ./labs --approval-policy auto
 ```
 
+### TSec Benchmark Profile
+
+Benchmark 跑分策略可以通过数据文件扩展，避免把新题型写死到 Python 代码里。参考
+[`docs/benchmark-profiles.md`](docs/benchmark-profiles.md) 和
+[`examples/benchmark-profiles.example.json`](examples/benchmark-profiles.example.json)，
+将需要的配置放到：
+
+```text
+/home/my/cyber/benchmark_test/benchmark-profiles.json
+```
+
 ### 注册外部工具
 
 ```bash

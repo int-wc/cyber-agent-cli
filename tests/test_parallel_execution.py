@@ -3558,6 +3558,52 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("10.0.1.2:9000", rendered[0]["task_description"])
         self.assertIn("CustomSvc", rendered[0]["context"])
 
+    def test_benchmark_example_profile_is_loadable_and_drives_generic_handoff(self):
+        example_path = (
+            Path(__file__).resolve().parents[1]
+            / "examples"
+            / "benchmark-profiles.example.json"
+        )
+        data = json.loads(example_path.read_text(encoding="utf-8"))
+        self.pipeline._runtime_context["benchmark_profiles_path"] = str(example_path)
+
+        policy = self.pipeline._benchmark_selection_policy()
+        paths = self.pipeline._benchmark_probe_paths()
+        payloads = self.pipeline._benchmark_payloads_for_param("api_token")
+        raw_commands = self.pipeline._benchmark_raw_protocol_commands()
+        telnet_credentials = self.pipeline._benchmark_telnet_credentials()
+        web_profiles = self.pipeline._benchmark_webapp_flow_profiles()
+        service_profile = self.pipeline._benchmark_matching_service_probe_profile(
+            "HTTP/1.1 200 OK\nX-CustomSvc-Version: 1\n\nrpc-methods export"
+        )
+        rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+            current="generic-01",
+            addr_text="10.0.1.2:8080",
+            context="state context",
+            fingerprint="customsvc",
+        )
+
+        self.assertIn("selection_policy", data)
+        self.assertEqual(policy["unreachable_retries"], 3)
+        self.assertEqual(policy["estimated_fast_score"], 150)
+        self.assertIn("healthz", paths)
+        self.assertIn("../../../../../run/secrets/app_token", payloads)
+        self.assertIn("INFO", raw_commands)
+        self.assertIn(("operator", "operator"), telnet_credentials)
+        generic_web_profile = next(
+            profile
+            for profile in web_profiles
+            if profile["name"] == "generic-admin-portal"
+        )
+        self.assertIn("data-login-form", generic_web_profile["indicators"])
+        self.assertIn(("demo", "demo123"), generic_web_profile["credentials"])
+        self.assertIsNotNone(service_profile)
+        self.assertEqual(service_profile["fingerprint"], "customsvc")
+        self.assertEqual(len(rendered), 3)
+        self.assertIn("generic-01", rendered[0]["task_description"])
+        self.assertIn("CustomSvc generic handoff", rendered[0]["context"])
+        self.assertNotIn("xben-", example_path.read_text(encoding="utf-8").lower())
+
     def test_benchmark_service_action_profiles_drive_deterministic_steps(self):
         profiles = self.pipeline._benchmark_service_action_profiles()
 

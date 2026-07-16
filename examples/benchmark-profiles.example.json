@@ -1,0 +1,144 @@
+{
+  "selection_policy": {
+    "difficulty_order": ["easy", "medium", "hard"],
+    "fast_path_difficulties": ["easy"],
+    "handoff_difficulties": ["medium", "hard"],
+    "recovery_difficulties": ["easy"],
+    "unreachable_retries": 3,
+    "estimated_fast_score": 150
+  },
+  "probe_paths": [
+    "healthz",
+    "status",
+    ".well-known/security.txt",
+    "api/version"
+  ],
+  "text_path_prefixes": [
+    "debug",
+    "internal",
+    "download",
+    "assets"
+  ],
+  "param_payload_profiles": [
+    {
+      "name_contains": ["token", "secret", "key"],
+      "payloads": [
+        "../../../../../run/secrets/app_token",
+        "../../../../../var/run/secrets/kubernetes.io/serviceaccount/token",
+        "file:///run/secrets/app_token"
+      ]
+    },
+    {
+      "name_suffix": ["_url", "_uri"],
+      "payloads": [
+        "http://127.0.0.1/flag",
+        "http://localhost/admin",
+        "file:///flag"
+      ]
+    }
+  ],
+  "lfi_base_paths": [
+    "../../../../app/config.py",
+    "../../../../app/.env",
+    "../../../../opt/service/config.yaml"
+  ],
+  "object_storage_buckets": [
+    "public-artifacts",
+    "private-artifacts",
+    "app-backups"
+  ],
+  "object_storage_keys": [
+    "flag.txt",
+    "secrets.json",
+    "backup/config.yaml",
+    ".env"
+  ],
+  "raw_protocol_commands": [
+    "INFO",
+    "STATUS",
+    "DUMP",
+    "GET FLAG"
+  ],
+  "telnet_credentials": [
+    {"username": "operator", "password": "operator"},
+    {"username": "service", "password": "service123"}
+  ],
+  "telnet_flag_command": "cat /flag /flag.txt /challenge/flag.txt /run/secrets/flag 2>/dev/null",
+  "webapp_flow_profiles": [
+    {
+      "name": "generic-admin-portal",
+      "indicators": [
+        "admin portal",
+        "demo account",
+        "name=\"password\"",
+        "data-login-form"
+      ],
+      "credentials": [
+        {"username": "admin", "password": "admin"},
+        {"username": "demo", "password": "demo123"}
+      ],
+      "authenticated_paths": [
+        "",
+        "admin",
+        "dashboard",
+        "api/me"
+      ],
+      "handoff_paths": [
+        "api/config",
+        "api/secret",
+        "api/export",
+        "download?file=../../../../flag"
+      ]
+    }
+  ],
+  "service_probe_profiles": [
+    {
+      "fingerprint": "customsvc",
+      "match_any": [
+        "customsvc",
+        "x-customsvc-version",
+        "custom service gateway"
+      ],
+      "match_any_all": [
+        ["rpc-methods", "export"],
+        ["service", "workspace", "token"]
+      ],
+      "unresolved": "reasoning",
+      "reason": "CustomSvc fingerprint matched; continue only from observed RPC/API evidence.",
+      "handoff_context": "## CustomSvc generic handoff\nUse only observed response headers, exposed RPC methods, OpenAPI/RPC metadata, cookies, redirects, and error messages. Do not assume a fixed challenge ID or fixed exploit path.",
+      "handoff_steps": [
+        "Benchmark customsvc handoff step 1: re-check current active challenge {current} ({addr_text}) for service headers, exposed RPC/OpenAPI metadata, auth cookies, redirects, and error messages; submit immediately if a flag appears.",
+        "Benchmark customsvc exploit step 2: choose one primary hypothesis and one fallback from observed CustomSvc evidence only, such as unauthenticated export, debug config, or token leakage; stop if responses do not differ.",
+        "Benchmark customsvc close step 3: only close?unique_code={current} after exposed RPC/API/config paths produce no new signal and no candidate flag."
+      ]
+    }
+  ],
+  "service_handoff_profiles": [
+    {
+      "fingerprint": "artifactstore",
+      "context": "## ArtifactStore generic handoff\nThe service behaves like an artifact/object index. Prefer listed keys, bucket names, signed URL mistakes, directory listings, and metadata endpoints observed in responses.",
+      "steps": [
+        "Benchmark artifactstore handoff step 1: inspect only current active challenge {current} ({addr_text}) for object listings, metadata, bucket names, and signed URL parameters; submit immediately if a flag appears.",
+        "Benchmark artifactstore exploit step 2: try one highest-confidence artifact/key traversal or unsigned download hypothesis derived from the observed listing; stop without broad brute force if responses do not differ.",
+        "Benchmark artifactstore close step 3: close?unique_code={current} only after observed artifact and metadata paths are exhausted without a flag."
+      ]
+    }
+  ],
+  "service_action_profiles": [
+    {
+      "fingerprint": "customsvc",
+      "label": "CustomSvc",
+      "actions": {
+        "handoff": {
+          "reasoning_reason": "CustomSvc bounded probe found service evidence; hand off for one evidence-driven exploit hypothesis.",
+          "summary": "{code} has CustomSvc evidence but no direct flag; keep active for focused reasoning."
+        },
+        "exploit": {
+          "abandon_reason": "CustomSvc bounded exploit did not find a submit-ready flag.",
+          "summary": "{code} CustomSvc follow-up found no flag or submit-ready candidate; mark abandoned for close/switch."
+        },
+        "close": true
+      }
+    }
+  ]
+}
