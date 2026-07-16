@@ -4425,7 +4425,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("不要套用固定题号或固定技术栈", handoff[0]["task_description"])
         self.assertNotIn("HugeGraph/Gremlin/Arthas/JDWP", handoff[0]["task_description"])
 
-    def test_benchmark_reasoning_handoff_specializes_hugegraph(self):
+    def test_benchmark_reasoning_handoff_uses_generic_template_for_hugegraph(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -4441,29 +4441,49 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         handoff = self.pipeline._benchmark_reasoning_handoff_subtasks()
 
         self.assertEqual(len(handoff), 3)
-        self.assertIn("HugeGraph 指纹和关键端口", handoff[0]["task_description"])
+        self.assertIn("已识别服务指纹为 hugegraph", handoff[0]["context"])
+        self.assertIn("状态码、响应头、标题", handoff[0]["task_description"])
         self.assertIn("Benchmark handoff step 2", handoff[1]["task_description"])
-        self.assertIn("JDWP 5005", handoff[1]["task_description"])
-        self.assertIn("禁止继续", handoff[1]["task_description"])
-        self.assertIn("普通 HTTP 目录枚举", handoff[1]["task_description"])
-        self.assertIn("nmap jdwp-exec", handoff[1]["context"])
+        self.assertIn("禁止继续：固定题号", handoff[1]["task_description"])
+        self.assertNotIn("JDWP 5005", handoff[1]["task_description"])
+        self.assertNotIn("nmap jdwp-exec", handoff[1]["context"])
 
-    def test_benchmark_service_handoff_profiles_are_fingerprint_driven(self):
-        profiles = self.pipeline._benchmark_service_handoff_profiles()
+    def test_benchmark_external_service_handoff_profiles_are_fingerprint_driven(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_handoff_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "context": "## Custom service\nUse observed endpoints.",
+                                "evidence_focus": ["observed endpoint"],
+                                "avoid_focus": ["fixed exploit path"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            profiles = self.pipeline._benchmark_service_handoff_profiles()
 
-        self.assertIn("hugegraph", profiles)
-        self.assertIn("dify", profiles)
-        rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
-            current="any-code-1",
-            addr_text="10.0.1.2:8080",
-            context="state context",
-            fingerprint="hugegraph",
-        )
+            rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+                current="any-code-1",
+                addr_text="10.0.1.2:8080",
+                context="state context",
+                fingerprint="customsvc",
+            )
 
+        self.assertNotIn("hugegraph", profiles)
+        self.assertNotIn("dify", profiles)
+        self.assertIn("customsvc", profiles)
         self.assertEqual(len(rendered), 3)
         self.assertIn("any-code-1", rendered[0]["task_description"])
         self.assertIn("10.0.1.2:8080", rendered[0]["task_description"])
-        self.assertIn("HugeGraph", rendered[0]["task_description"])
+        self.assertIn("observed endpoint", rendered[0]["task_description"])
+        self.assertIn("fixed exploit path", rendered[0]["task_description"])
 
     def test_benchmark_external_service_handoff_profile_ignores_fixed_steps(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4831,7 +4851,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIsNone(result)
         followup.assert_not_called()
 
-    def test_benchmark_reasoning_handoff_specializes_dify(self):
+    def test_benchmark_reasoning_handoff_uses_generic_template_for_dify(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -4847,11 +4867,12 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         handoff = self.pipeline._benchmark_reasoning_handoff_subtasks()
 
         self.assertEqual(len(handoff), 3)
-        self.assertIn("Dify/Next.js 指纹", handoff[0]["task_description"])
+        self.assertIn("已识别服务指纹为 dify", handoff[0]["context"])
+        self.assertIn("状态码、响应头、标题", handoff[0]["task_description"])
         self.assertIn("Benchmark handoff step 2", handoff[1]["task_description"])
-        self.assertIn("Dify public/console API", handoff[1]["task_description"])
-        self.assertIn("泛化目录枚举", handoff[0]["task_description"])
-        self.assertIn("127.0.0.1:5001", handoff[1]["context"])
+        self.assertIn("禁止继续：固定题号", handoff[1]["task_description"])
+        self.assertNotIn("Dify public/console API", handoff[1]["task_description"])
+        self.assertNotIn("127.0.0.1:5001", handoff[1]["context"])
 
     def test_benchmark_dify_handoff_step1_runs_deterministic_probe(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

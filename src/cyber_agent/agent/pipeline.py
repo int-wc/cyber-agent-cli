@@ -6079,50 +6079,7 @@ class FourPillarPipeline:
 
     @staticmethod
     def _benchmark_builtin_service_handoff_profiles() -> dict[str, dict[str, Any]]:
-        return {
-            "hugegraph": {
-                "context": (
-                    "## 当前题专项线索\n"
-                    "fast path 已识别当前服务为 HugeGraph/Gremlin/Arthas/JDWP 类 Java 服务。"
-                    "根路径、/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas "
-                    "和 JDWP 5005 是优先路径。不要继续做普通 Web/PHP/LFI/目录枚举。"
-                    "如果 nmap jdwp-exec 因本机 nselib 解析错误失败，应改用 jdb、自定义 JDWP、"
-                    "Arthas 或 Gremlin 侧信道，不要重复 HTTP 字典扫描。"
-                ),
-                "evidence_focus": [
-                    "HugeGraph 指纹和关键端口",
-                    "/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas",
-                    "JDWP 5005、Arthas 8561/8562、Gremlin 侧信道",
-                    "System.getenv/System.getProperties 或 HugeGraph API 泄露",
-                ],
-                "avoid_focus": [
-                    "普通 HTTP 目录枚举",
-                    "SQLi/XSS/PHP/LFI 泛化扫描",
-                    "重复 nmap jdwp-exec 失败路径",
-                ],
-            },
-            "dify": {
-                "context": (
-                    "## 当前题专项线索\n"
-                    "fast path 已识别当前服务为 Dify/Next.js。前端 3000 可达，"
-                    "`data-api-prefix`/`data-public-api-prefix` 指向 127.0.0.1:5001，"
-                    "直连 5001 可能被拒绝。不要按普通 PHP/LFI/目录字典扫；优先基于 "
-                    "Next.js 静态 chunk、RSC payload、Dify public/console API、安装/登录态、"
-                    "SSR/proxy/rewrite 行为和暴露的 app/dataset/workspace 标识推进。"
-                ),
-                "evidence_focus": [
-                    "Dify/Next.js 指纹",
-                    "Next.js 静态 chunk、RSC payload、rewrite/proxy 行为",
-                    "Dify public/console API、install/setup/signin 状态",
-                    "app_id、dataset、workspace、secret、token 或可调用 public API",
-                ],
-                "avoid_focus": [
-                    "普通 PHP/LFI 字典扫描",
-                    "泛化目录枚举",
-                    "重复 setup/VPN/toolchain/list/start",
-                ],
-            },
-        }
+        return {}
 
     def _benchmark_normalize_service_handoff_profile(
         self,
