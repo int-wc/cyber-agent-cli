@@ -770,7 +770,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
         pause, reason = (
             self.pipeline._benchmark_should_pause_generic_plan_after_deterministic(
-                "Benchmark dify handoff step 1：只深挖当前 active 题"
+                "Benchmark handoff step 1：只深挖当前 active 题"
             )
         )
 
@@ -779,9 +779,9 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
     def test_benchmark_handoff_selection_restores_close_step(self):
         subtasks = [
-            {"task_description": "Benchmark dify handoff step 1：只深挖当前 active"},
-            {"task_description": "Benchmark dify exploit step 2：尝试最高置信利用"},
-            {"task_description": "Benchmark dify close step 3：无 flag 则 close"},
+            {"task_description": "Benchmark handoff step 1：只深挖当前 active"},
+            {"task_description": "Benchmark handoff step 2：尝试最高置信利用"},
+            {"task_description": "Benchmark handoff step 3：无 flag 则 close"},
         ]
 
         selected, note = self.pipeline._benchmark_normalize_selected_indices(
@@ -4647,22 +4647,19 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("CustomSvc generic handoff", rendered[0]["context"])
         self.assertNotIn("xben-", example_path.read_text(encoding="utf-8").lower())
 
-    def test_benchmark_service_action_profiles_drive_deterministic_steps(self):
+    def test_benchmark_service_action_profiles_have_no_builtin_fixed_actions(self):
         profiles = self.pipeline._benchmark_service_action_profiles()
 
-        self.assertIn("dify", profiles)
-        self.assertIn("hugegraph", profiles)
-        self.assertEqual(
+        self.assertEqual(profiles, {})
+        self.assertIsNone(
             self.pipeline._benchmark_service_action_from_desc(
                 "Benchmark dify exploit step 2：围绕任意题选择一个最高置信路径"
-            ),
-            ("dify", "exploit"),
+            )
         )
-        self.assertEqual(
+        self.assertIsNone(
             self.pipeline._benchmark_service_action_from_desc(
                 "Benchmark hugegraph close step 3：无 flag 时 close"
-            ),
-            ("hugegraph", "close"),
+            )
         )
 
     def test_benchmark_external_service_action_profile_drives_detection(self):
@@ -4874,7 +4871,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertNotIn("Dify public/console API", handoff[1]["task_description"])
         self.assertNotIn("127.0.0.1:5001", handoff[1]["context"])
 
-    def test_benchmark_dify_handoff_step1_runs_deterministic_probe(self):
+    def test_benchmark_dify_text_no_longer_runs_fixed_action(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -4894,12 +4891,12 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
 
         state = self.pipeline._benchmark_state_snapshot()
-        self.assertIn("确定性 Dify handoff", result)
-        self.assertIn("c-03", state["reasoning_challenges"])
-        self.assertEqual(state["service_fingerprints"]["c-03"], "dify")
-        probe.assert_called_once_with("c-03", "http://10.0.180.232:3000/", "")
+        self.assertIsNone(result)
+        self.assertNotIn("c-03", state["reasoning_challenges"])
+        self.assertNotIn("c-03", state["service_fingerprints"])
+        probe.assert_not_called()
 
-    def test_benchmark_dify_exploit_step2_abandons_after_bounded_probe(self):
+    def test_benchmark_dify_exploit_text_no_longer_abandons(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -4912,17 +4909,18 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             self.pipeline,
             "_benchmark_probe_dify_local",
             return_value="Dify bounded probe no flag",
-        ):
+        ) as probe:
             result = self.pipeline._benchmark_deterministic_fast_step(
                 "Benchmark dify exploit step 2：围绕 c-03 选择一个最高置信 Dify/Next.js 利用路径",
                 reason="test",
             )
 
         state = self.pipeline._benchmark_state_snapshot()
-        self.assertIn("标记 abandoned", result)
-        self.assertIn("c-03", state["abandoned_challenges"])
+        self.assertIsNone(result)
+        self.assertNotIn("c-03", state["abandoned_challenges"])
+        probe.assert_not_called()
 
-    def test_benchmark_dify_close_step3_closes_active(self):
+    def test_benchmark_dify_close_text_no_longer_closes_active(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -4941,8 +4939,8 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 reason="test",
             )
 
-        self.assertIn("已 close 释放资源", result)
-        close_local.assert_called_once_with("c-03")
+        self.assertIsNone(result)
+        close_local.assert_not_called()
 
     def test_benchmark_deterministic_handoff_probes_and_closes(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -5025,7 +5023,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("跳过机械 close", result)
         close_local.assert_not_called()
 
-    def test_benchmark_hugegraph_exploit_step2_runs_deterministic_probe(self):
+    def test_benchmark_hugegraph_exploit_text_no_longer_runs_fixed_action(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -5048,12 +5046,11 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             )
 
         state = self.pipeline._benchmark_state_snapshot()
-        self.assertIn("确定性 HugeGraph exploit", result)
-        self.assertIn("标记 abandoned", result)
-        self.assertIn("c-06", state["abandoned_challenges"])
-        probe.assert_called_once_with("c-06", "http://10.0.180.232:8080/", "")
+        self.assertIsNone(result)
+        self.assertNotIn("c-06", state["abandoned_challenges"])
+        probe.assert_not_called()
 
-    def test_benchmark_hugegraph_close_step3_closes_active(self):
+    def test_benchmark_hugegraph_close_text_no_longer_closes_active(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         with self.pipeline._benchmark_state_lock:
@@ -5072,8 +5069,8 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
                 reason="test",
             )
 
-        self.assertIn("已 close 释放资源", result)
-        close_local.assert_called_once_with("c-06")
+        self.assertIsNone(result)
+        close_local.assert_not_called()
 
     def test_benchmark_standard_mechanical_tasks_use_deterministic_steps(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

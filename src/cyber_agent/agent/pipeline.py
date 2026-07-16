@@ -4765,46 +4765,7 @@ class FourPillarPipeline:
         return payloads
 
     def _benchmark_builtin_service_action_profiles(self) -> dict[str, dict[str, Any]]:
-        return {
-            "dify": {
-                "label": "Dify",
-                "probe": self._benchmark_probe_dify_local,
-                "actions": {
-                    "handoff": {
-                        "reasoning_reason": (
-                            "Dify/Next.js 专项静态/API 探测完成，需选择一个最高置信利用假设"
-                        ),
-                        "summary": (
-                            "已对当前题 {code} 执行 bounded Dify/Next.js 静态 chunk、"
-                            "RSC、public/console API、install/signin 探测；未直接发现 flag，"
-                            "保留 active 给 exploit step。"
-                        ),
-                    },
-                    "exploit": {
-                        "abandon_reason": "Dify bounded exploit 未发现可提交 flag",
-                        "summary": (
-                            "{code} 已完成 bounded Dify/Next.js 复核，未发现 flag/可提交候选；"
-                            "为最大化总分，标记 abandoned，下一步 close 换题。"
-                        ),
-                    },
-                    "close": {},
-                },
-            },
-            "hugegraph": {
-                "label": "HugeGraph",
-                "probe": self._benchmark_probe_hugegraph_local,
-                "actions": {
-                    "exploit": {
-                        "abandon_reason": "HugeGraph/JDWP bounded exploit 未发现可提交 flag",
-                        "summary": (
-                            "{code} 已完成 bounded HugeGraph/Gremlin/Arthas/JDWP 探测，"
-                            "未发现 flag/可提交候选；为最大化总分，标记 abandoned，下一步 close 换题。"
-                        ),
-                    },
-                    "close": {},
-                },
-            },
-        }
+        return {}
 
     def _benchmark_normalize_service_action_profile(
         self,

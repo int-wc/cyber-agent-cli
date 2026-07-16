@@ -45,7 +45,7 @@ examples/benchmark-profiles.example.json
 - `webapp_flow_profiles`：由页面指示器和 demo 凭据驱动的通用登录、后台、下载流程。
 - `service_probe_profiles`：服务指纹、可选的服务级 `probe_paths`、有界 `probe_requests`、`tcp_ports` 和可选移交上下文。匹配依据应来自响应头、标题、OpenAPI/RPC 元数据、Cookie、跳转、错误信息或可见服务标识，不要用题号作为匹配键。`probe_requests` 支持同容器相对 `path`、`method`（`GET`、`POST`、`PUT`）、可选安全 header，以及 `json` 或表单 `data`。`tcp_ports` 可以是整数，也可以是包含 `port` 和 `label` 的对象。需要移交深挖时，优先提供 `handoff_context`、`evidence_focus` 和 `avoid_focus`，由架构生成通用三步移交任务。
 - `service_handoff_profiles`：外部可选的、匹配某个 fingerprint 后的移交数据。只支持 `context`、`evidence_focus` 和 `avoid_focus` 这类证据描述；内置逻辑默认使用通用 handoff 模板，旧字段 `steps` / `handoff_steps` 不再参与任务生成，避免配置档重新变成固定流程。
-- `service_action_profiles`：已发现 fingerprint 的可选动作摘要。
+- `service_action_profiles`：外部可选的动作摘要兼容入口；内置逻辑不再提供服务固定动作，默认由通用 handoff 和运行时证据驱动。
 
 ## 泛化规则
 
