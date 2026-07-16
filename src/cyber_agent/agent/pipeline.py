@@ -1651,48 +1651,18 @@ class FourPillarPipeline:
                 outputs.append(raw_output)
         return "\n".join(outputs)
 
-    @staticmethod
-    def _benchmark_probe_suggests_hugegraph(probe: str) -> bool:
-        lowered = probe.lower()
-        return (
-            '"service":"hugegraph"' in lowered
-            or '"service": "hugegraph"' in lowered
-            or "hugegraph.apache.org" in lowered
-            or '"gremlin"' in lowered and '"arthas"' in lowered
-        )
-
-    @staticmethod
-    def _benchmark_probe_suggests_dify(probe: str) -> bool:
-        lowered = probe.lower()
-        return (
-            "data-api-prefix" in lowered
-            and "127.0.0.1:5001" in lowered
-            and (
-                "dify" in lowered
-                or "self_hosted" in lowered
-                or "/_next/static/" in lowered
-                or "x-powered-by: next.js" in lowered
-            )
-        )
-
-    @staticmethod
-    def _benchmark_probe_suggests_langflow(probe: str) -> bool:
-        lowered = probe.lower()
-        return (
-            "langflow" in lowered
-            and (
-                "<title>langflow</title>" in lowered
-                or '"title":"langflow"' in lowered
-                or "/api/v1/validate/code" in lowered
-                or "server: uvicorn" in lowered
-            )
-        )
-
     def _benchmark_service_probe_profiles(self) -> list[dict[str, Any]]:
         return [
             {
                 "fingerprint": "hugegraph",
-                "suggests": self._benchmark_probe_suggests_hugegraph,
+                "match_any": (
+                    '"service":"hugegraph"',
+                    '"service": "hugegraph"',
+                    "hugegraph.apache.org",
+                ),
+                "match_any_all": (
+                    ('"gremlin"', '"arthas"'),
+                ),
                 "probe": self._benchmark_probe_hugegraph_local,
                 "unresolved": "reasoning",
                 "reason": (
@@ -1701,7 +1671,16 @@ class FourPillarPipeline:
             },
             {
                 "fingerprint": "dify",
-                "suggests": self._benchmark_probe_suggests_dify,
+                "match_all": (
+                    "data-api-prefix",
+                    "127.0.0.1:5001",
+                ),
+                "match_any": (
+                    "dify",
+                    "self_hosted",
+                    "/_next/static/",
+                    "x-powered-by: next.js",
+                ),
                 "probe": self._benchmark_probe_dify_local,
                 "unresolved": "reasoning",
                 "reason": (
@@ -1710,7 +1689,13 @@ class FourPillarPipeline:
             },
             {
                 "fingerprint": "langflow",
-                "suggests": self._benchmark_probe_suggests_langflow,
+                "match_all": ("langflow",),
+                "match_any": (
+                    "<title>langflow</title>",
+                    '"title":"langflow"',
+                    "/api/v1/validate/code",
+                    "server: uvicorn",
+                ),
                 "probe": lambda code, base, _evidence: self._benchmark_probe_langflow_local(
                     code,
                     base,
@@ -1720,35 +1705,82 @@ class FourPillarPipeline:
             },
         ]
 
+    @staticmethod
+    def _benchmark_text_matches_profile(
+        text: str,
+        profile: dict[str, Any],
+    ) -> bool:
+        lowered = text.lower()
+        all_tokens = tuple(str(token).lower() for token in profile.get("match_all", ()))
+        any_tokens = tuple(str(token).lower() for token in profile.get("match_any", ()))
+        any_all_groups = tuple(profile.get("match_any_all", ()))
+
+        if all_tokens and not all(token in lowered for token in all_tokens):
+            return False
+        if any_tokens and any(token in lowered for token in any_tokens):
+            return True
+        for raw_group in any_all_groups:
+            group = tuple(str(token).lower() for token in raw_group)
+            if group and all(token in lowered for token in group):
+                return True
+        return bool(all_tokens) and not any_tokens and not any_all_groups
+
     def _benchmark_probe_matching_service_local(
         self,
         code: str,
         base: str,
         evidence: str,
     ) -> tuple[bool, list[str]]:
+        profile = self._benchmark_matching_service_probe_profile(evidence)
+        if profile is None:
+            return False, []
+        service_outputs = self._benchmark_run_service_probe_profile(
+            code,
+            base,
+            evidence,
+            profile,
+        )
+        return True, service_outputs
+
+    def _benchmark_matching_service_probe_profile(
+        self,
+        evidence: str,
+    ) -> dict[str, Any] | None:
         for profile in self._benchmark_service_probe_profiles():
             suggests = profile.get("suggests")
-            if not callable(suggests) or not suggests(evidence):
-                continue
-            fingerprint = str(profile["fingerprint"])
-            self._benchmark_set_service_fingerprint(code, fingerprint)
-            service_outputs: list[str] = []
-            probe = profile.get("probe")
-            if callable(probe):
-                service_output = probe(code, base, evidence)
-                if service_output:
-                    service_outputs.append(str(service_output))
-            with self._benchmark_state_lock:
-                completed = set(self._benchmark_state.get("completed_challenges", set()))
-            if code in completed:
-                return True, service_outputs
-            reason = str(profile.get("reason") or f"{fingerprint} bounded probe 未发现 flag")
-            if profile.get("unresolved") == "reasoning":
-                self._benchmark_mark_reasoning_needed(code, reason)
+            if callable(suggests):
+                matched = bool(suggests(evidence))
             else:
-                self._benchmark_mark_abandoned(code, reason)
-            return True, service_outputs
-        return False, []
+                matched = self._benchmark_text_matches_profile(evidence, profile)
+            if matched:
+                return profile
+        return None
+
+    def _benchmark_run_service_probe_profile(
+        self,
+        code: str,
+        base: str,
+        evidence: str,
+        profile: dict[str, Any],
+    ) -> list[str]:
+        fingerprint = str(profile["fingerprint"])
+        self._benchmark_set_service_fingerprint(code, fingerprint)
+        service_outputs: list[str] = []
+        probe = profile.get("probe")
+        if callable(probe):
+            service_output = probe(code, base, evidence)
+            if service_output:
+                service_outputs.append(str(service_output))
+        with self._benchmark_state_lock:
+            completed = set(self._benchmark_state.get("completed_challenges", set()))
+        if code in completed:
+            return service_outputs
+        reason = str(profile.get("reason") or f"{fingerprint} bounded probe 未发现 flag")
+        if profile.get("unresolved") == "reasoning":
+            self._benchmark_mark_reasoning_needed(code, reason)
+        else:
+            self._benchmark_mark_abandoned(code, reason)
+        return service_outputs
 
     def _benchmark_probe_langflow_local(self, code: str, base: str) -> str:
         tun_interface = self._benchmark_tun_interface()
@@ -2833,9 +2865,16 @@ class FourPillarPipeline:
         outputs: list[str] = [f"## handoff-followup {base}"]
         root = self._benchmark_curl_local(base, tun_interface=tun_interface, timeout=7)
         root_text = root.stdout or ""
-        if self._benchmark_probe_suggests_hugegraph(root_text):
-            self._benchmark_set_service_fingerprint(code, "hugegraph")
-            outputs.append(self._benchmark_probe_hugegraph_local(code, base, root_text))
+        service_profile = self._benchmark_matching_service_probe_profile(root_text)
+        if service_profile is not None:
+            outputs.extend(
+                self._benchmark_run_service_probe_profile(
+                    code,
+                    base,
+                    root_text,
+                    service_profile,
+                )
+            )
             return "\n".join(outputs)
         cookie_file = tempfile.NamedTemporaryFile(prefix="cyber-agent-bench-follow-", suffix=".cookies", delete=False)
         cookie_path = cookie_file.name

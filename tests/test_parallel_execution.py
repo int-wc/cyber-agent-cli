@@ -2546,6 +2546,72 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertIn("c-03", state["reasoning_challenges"])
         dify_probe.assert_called_once()
 
+    def test_benchmark_service_profile_matching_is_data_driven(self):
+        self.assertTrue(
+            self.pipeline._benchmark_text_matches_profile(
+                "alpha service banner beta",
+                {"match_all": ("alpha",), "match_any": ("beta", "gamma")},
+            )
+        )
+        self.assertTrue(
+            self.pipeline._benchmark_text_matches_profile(
+                "contains gremlin and arthas markers",
+                {"match_any_all": (("gremlin", "arthas"),)},
+            )
+        )
+        self.assertFalse(
+            self.pipeline._benchmark_text_matches_profile(
+                "alpha service banner",
+                {"match_all": ("alpha",), "match_any": ("missing",)},
+            )
+        )
+
+    def test_benchmark_handoff_followup_uses_custom_service_probe_profile(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        probe = MagicMock(return_value="custom profile probe")
+        curl_result = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="HTTP/1.1 200 OK\n\nCustomSvc banner",
+            stderr="",
+        )
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_service_probe_profiles",
+                return_value=[
+                    {
+                        "fingerprint": "customsvc",
+                        "match_any": ("customsvc banner",),
+                        "probe": probe,
+                        "unresolved": "reasoning",
+                        "reason": "custom service needs profile handoff",
+                    }
+                ],
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_curl_local",
+                return_value=curl_result,
+            ),
+        ):
+            result = self.pipeline._benchmark_probe_handoff_followup_local(
+                "custom-01",
+                ["10.0.1.2:8080"],
+            )
+
+        self.assertIn("custom profile probe", result)
+        probe.assert_called_once_with(
+            "custom-01",
+            "http://10.0.1.2:8080/",
+            curl_result.stdout,
+        )
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertEqual(state["service_fingerprints"]["custom-01"], "customsvc")
+        self.assertIn("custom-01", state["reasoning_challenges"])
+
     def test_benchmark_telnet_port_uses_bounded_login_probe(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
