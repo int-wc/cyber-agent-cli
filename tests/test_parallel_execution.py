@@ -543,7 +543,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertEqual(selected, [0, 2])
         self.assertEqual(note, "")
 
-    def test_benchmark_does_not_recover_closed_easy_when_medium_is_untried(self):
+    def test_benchmark_recovers_closed_easy_before_medium_is_untried(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True
         snapshot = [
@@ -569,8 +569,8 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
         selected = self.pipeline._benchmark_select_next_easy(snapshot)
 
-        self.assertFalse(should_fast)
-        self.assertIn("中/高难度", reason)
+        self.assertTrue(should_fast)
+        self.assertIn("恢复 fast path", reason)
         self.assertIsNone(selected)
 
 
@@ -1943,6 +1943,94 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             state["active_containers"],
             {"xben-009-24": ["10.0.1.2:80"]},
         )
+
+    def test_benchmark_deterministic_start_clears_soft_closed_state(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["closed_challenges"] = {"c-03"}
+            self.pipeline._benchmark_state["abandoned_challenges"] = {"c-03"}
+
+        with patch.object(
+            self.pipeline,
+            "_benchmark_platform_request",
+            return_value=(
+                0,
+                '{"unique_code":"c-03","container_addr":["10.0.1.2:3000"]}',
+                "",
+            ),
+        ):
+            result = self.pipeline._benchmark_start_local("c-03")
+
+        state = self.pipeline._benchmark_state_snapshot()
+        self.assertIn("10.0.1.2:3000", result)
+        self.assertEqual(state["current_challenge"], "c-03")
+        self.assertEqual(state["active_containers"], {"c-03": ["10.0.1.2:3000"]})
+        self.assertNotIn("c-03", state["closed_challenges"])
+        self.assertNotIn("c-03", state["abandoned_challenges"])
+
+    def test_benchmark_fast_path_recovers_closed_easy_before_medium(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                {
+                    "unique_code": "c-03",
+                    "difficulty": "easy",
+                    "level": 1,
+                    "total_score": 100,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                    "container_addr": [],
+                },
+                {
+                    "unique_code": "e1-01",
+                    "difficulty": "medium",
+                    "level": 1,
+                    "total_score": 250,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                    "container_addr": [],
+                },
+            ]
+            self.pipeline._benchmark_state["closed_challenges"] = {"c-03"}
+
+        should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertTrue(should_fast)
+        self.assertIn("恢复 fast path", reason)
+
+    def test_benchmark_step2_refreshes_active_from_platform_when_state_empty(self):
+        self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
+        self.pipeline._benchmark_profile_active = True
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_list_challenges_local",
+                return_value=[
+                    {
+                        "unique_code": "c-03",
+                        "difficulty": "easy",
+                        "is_completed": False,
+                        "container_status": "available",
+                        "container_addr": ["10.0.1.2:3000"],
+                    }
+                ],
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_container_local",
+                return_value="HTTP/1.1 200 OK\n<html>Dify</html>",
+            ) as probe_local,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark fast step 2：只解当前已启动的 10.x 容器。",
+                reason="deterministic_probe_submit_close",
+            )
+
+        self.assertIn("c-03 已获取有效响应", result)
+        probe_local.assert_called_once_with("c-03", ["10.0.1.2:3000"])
 
     def test_benchmark_deterministic_step1_starts_medium_when_easy_exhausted(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
@@ -3329,6 +3417,12 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(
             self.pipeline._benchmark_classify_standard_task(
                 "对选中的第一道未完成easy题调用start API，获取容器地址和端口"
+            ),
+            "schedule",
+        )
+        self.assertEqual(
+            self.pipeline._benchmark_classify_standard_task(
+                "如果c-03在平台仍为stopped/未完成，重新start c-03进行探测；否则直接start下一个未完成题"
             ),
             "schedule",
         )

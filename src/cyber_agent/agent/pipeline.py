@@ -907,11 +907,8 @@ class FourPillarPipeline:
                         f"/openapi/v1/challenges/start?unique_code={code or '<selected_code>'}；"
                         "不要用 JSON body 或 form body 传 unique_code。"
                     )
-                if code in completed:
-                    return f"{code} 已确认通关，禁止重复 start。"
-                if code in closed or code in abandoned:
-                    return f"{code} 已在本轮放弃/关闭，禁止回头重复 start；请选择下一道未完成题。"
                 snapshot = state.get("last_challenges_snapshot")
+                target_item = None
                 if isinstance(snapshot, list) and code:
                     target_item = next(
                         (
@@ -920,6 +917,16 @@ class FourPillarPipeline:
                         ),
                         None,
                     )
+                target_is_recoverable = (
+                    isinstance(target_item, dict)
+                    and target_item.get("is_completed") is not True
+                    and target_item.get("container_status") == "stopped"
+                )
+                if code in completed:
+                    return f"{code} 已确认通关，禁止重复 start。"
+                if (code in closed or code in abandoned) and not target_is_recoverable:
+                    return f"{code} 已在本轮放弃/关闭，禁止回头重复 start；请选择下一道未完成题。"
+                if isinstance(snapshot, list) and code:
                     target_difficulty = str(
                         (target_item or {}).get("difficulty") or ""
                     ).lower()
@@ -927,8 +934,6 @@ class FourPillarPipeline:
                         isinstance(item, dict)
                         and isinstance(item.get("unique_code"), str)
                         and item.get("unique_code") not in completed
-                        and item.get("unique_code") not in closed
-                        and item.get("unique_code") not in abandoned
                         and item.get("is_completed") is not True
                         and str(item.get("difficulty") or "").lower() == "easy"
                         and item.get("container_status") in {"stopped", "available", None}
@@ -1474,6 +1479,25 @@ class FourPillarPipeline:
                 return code, [str(addr) for addr in addrs or []]
         return None, []
 
+    def _benchmark_refresh_active_challenge_from_platform(self) -> tuple[str | None, list[str]]:
+        try:
+            challenges = self._benchmark_list_challenges_local()
+        except Exception:
+            return None, []
+        active_items = [
+            item for item in challenges
+            if item.get("container_status") == "available"
+            and item.get("is_completed") is not True
+        ]
+        if not active_items:
+            return None, []
+        item = active_items[0]
+        code = item.get("unique_code")
+        addrs = item.get("container_addr") or []
+        if not isinstance(code, str) or not code:
+            return None, []
+        return code, [str(addr) for addr in addrs or []]
+
     def _benchmark_close_local(self, code: str) -> str:
         _, stdout, _ = self._benchmark_platform_request(
             method="POST",
@@ -1486,6 +1510,26 @@ class FourPillarPipeline:
             method="POST",
             path=f"/openapi/v1/challenges/start?unique_code={code}",
         )
+        try:
+            value = json.loads(stdout)
+        except Exception:
+            value = None
+        if isinstance(value, dict):
+            addrs = value.get("container_addr")
+            if isinstance(addrs, list) and addrs:
+                with self._benchmark_state_lock:
+                    active = dict(self._benchmark_state.get("active_containers", {}))
+                    closed = set(self._benchmark_state.get("closed_challenges", set()))
+                    abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                    active[code] = [str(addr) for addr in addrs]
+                    closed.discard(code)
+                    abandoned.discard(code)
+                    self._benchmark_state["active_containers"] = active
+                    self._benchmark_state["current_challenge"] = code
+                    self._benchmark_state["closed_challenges"] = closed
+                    self._benchmark_state["abandoned_challenges"] = abandoned
+                    self._benchmark_current_challenge = code
+                self._persist_benchmark_state()
         lowered = stdout.lower()
         if (
             "resource_unavailable" in lowered
@@ -3418,18 +3462,17 @@ class FourPillarPipeline:
 
         if "Benchmark fast step 2" in desc:
             code, addrs = self._benchmark_active_challenge_from_state()
-            if not code:
-                challenges = self._benchmark_list_challenges_local()
-                active_items = [
-                    item for item in challenges
-                    if item.get("container_status") == "available"
-                    and item.get("is_completed") is not True
-                ]
-                if active_items:
-                    code = str(active_items[0].get("unique_code"))
-                    addrs = [str(addr) for addr in active_items[0].get("container_addr") or []]
+            if not code or not addrs:
+                refreshed_code, refreshed_addrs = self._benchmark_refresh_active_challenge_from_platform()
+                if refreshed_code:
+                    code, addrs = refreshed_code, refreshed_addrs
             if not code:
                 return "确定性探测：当前没有 active 容器，跳过。"
+            if not addrs:
+                return (
+                    f"确定性探测：{code} 平台显示 active 但没有 container_addr，"
+                    "本轮只刷新状态，不 start 新题。"
+                )
             with self._benchmark_state_lock:
                 abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
             if code in abandoned:
@@ -3602,6 +3645,12 @@ class FourPillarPipeline:
                 "kind": "schedule",
                 "all": ("post start",),
                 "any": ("easy",),
+            },
+            {
+                "kind": "schedule",
+                "all": ("start",),
+                "any_original": ("重新", "下一个", "下一道", "未完成"),
+                "any_original_2": ("题", "容器"),
             },
             {
                 "kind": "schedule",
@@ -4233,9 +4282,9 @@ class FourPillarPipeline:
                 )
         if state.get("closed_challenges"):
             parts.append(
-                "已关闭/放弃题："
+                "本地已关闭/软跳过题："
                 + ", ".join(state["closed_challenges"])
-                + "；本轮不要回头。"
+                + "；平台真实状态优先，若平台仍显示未完成 stopped，允许恢复一次后继续探测。"
             )
         if state.get("abandoned_challenges"):
             parts.append(
@@ -4278,7 +4327,8 @@ class FourPillarPipeline:
             "## Benchmark 已确认运行态（必须信任并复用）\n"
             f"{summary}\n"
             "除非上面的状态被平台 API 明确推翻，否则不要重复做 VPN 启动、"
-            "不要回头探测已完成/已关闭题。10.x 容器访问必须显式使用 "
+            "不要回头探测已完成题；本地已关闭但平台仍未完成的 stopped 题可恢复一次。"
+            "10.x 容器访问必须显式使用 "
             "`curl --interface tun0`；平台 API 才使用物理网卡。"
         )
 
@@ -5860,8 +5910,9 @@ class FourPillarPipeline:
                 "role": "runner",
                 "task_description": (
                     "Benchmark fast step 1：只做调度。必要时先 close 当前 stale/已放弃题；"
-                    "然后 GET /openapi/v1/challenges，筛选未完成、未关闭、未放弃、"
-                    "stopped 的下一题并 POST start；排序为 easy 优先，其次 medium/hard "
+                    "然后 GET /openapi/v1/challenges，以平台真实 is_completed/container_status "
+                    "为准筛选未完成 stopped 的下一题并 POST start；排序为 easy 优先，"
+                    "本地 closed/abandoned 只作为软跳过且可恢复一次，其次 medium/hard "
                     "按 level/分值；只记录 unique_code 和 container_addr，不探测、不 submit、"
                     "不 hint。"
                 ),
@@ -5943,18 +5994,6 @@ class FourPillarPipeline:
             if status in {"stopped", "available", None}:
                 return True, f"仍有未完成 easy 候选 {code}，继续 fast path。"
 
-        has_untried_non_easy = any(
-            isinstance(item, dict)
-            and isinstance(item.get("unique_code"), str)
-            and item.get("unique_code") not in excluded
-            and item.get("is_completed") is not True
-            and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
-            and item.get("container_status") in {"stopped", "available", None}
-            for item in snapshot
-        )
-        if has_untried_non_easy:
-            return False, "easy 已无新候选，切回四柱处理中/高难度题。"
-
         for item in snapshot:
             if not isinstance(item, dict):
                 continue
@@ -5975,6 +6014,18 @@ class FourPillarPipeline:
                     f"发现平台仍可启动的 easy {code} 被本地关闭/放弃状态误排除，"
                     "进入恢复 fast path。",
                 )
+
+        has_untried_non_easy = any(
+            isinstance(item, dict)
+            and isinstance(item.get("unique_code"), str)
+            and item.get("unique_code") not in excluded
+            and item.get("is_completed") is not True
+            and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
+            and item.get("container_status") in {"stopped", "available", None}
+            for item in snapshot
+        )
+        if has_untried_non_easy:
+            return False, "easy 已无新候选，切回四柱处理中/高难度题。"
 
         return False, "未发现未完成 easy 候选，切回四柱管线处理中/高难度题。"
 
@@ -6582,6 +6633,13 @@ class FourPillarPipeline:
                     state = self._benchmark_state_snapshot()
                     current = state.get("current_challenge")
                     active = state.get("active_containers") or {}
+                    if not (isinstance(current, str) and current) and not active:
+                        refreshed_code, refreshed_addrs = (
+                            self._benchmark_refresh_active_challenge_from_platform()
+                        )
+                        if refreshed_code and refreshed_addrs:
+                            current = refreshed_code
+                            active = {refreshed_code: refreshed_addrs}
                     if not (isinstance(current, str) and current) and not active:
                         skipped = "跳过：当前没有已启动的 10.x 容器，先回到调度步骤。"
                         renderer.console.print(f"  [dim yellow]－ {skipped}[/]")
