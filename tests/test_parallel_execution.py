@@ -2947,6 +2947,75 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
             ("hugegraph", "close"),
         )
 
+    def test_benchmark_service_action_detection_accepts_custom_profile_key(self):
+        with patch.object(
+            self.pipeline,
+            "_benchmark_service_action_profiles",
+            return_value={
+                "customsvc": {
+                    "label": "CustomSvc",
+                    "probe": MagicMock(return_value="custom probe"),
+                    "actions": {"exploit": {}, "close": {}},
+                }
+            },
+        ):
+            self.assertEqual(
+                self.pipeline._benchmark_service_action_from_desc(
+                    "Benchmark customsvc exploit step 2：验证当前服务最高置信路径"
+                ),
+                ("customsvc", "exploit"),
+            )
+            self.assertTrue(
+                self.pipeline._benchmark_plan_is_handoff_like(
+                    [
+                        {
+                            "task_description": (
+                                "Benchmark customsvc close step 3：无新线索则 close"
+                            )
+                        }
+                    ]
+                )
+            )
+
+    def test_benchmark_generic_handoff_step2_defers_to_profiled_service(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "custom-01"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "custom-01": ["10.0.1.2:8080"],
+            }
+            self.pipeline._benchmark_state["service_fingerprints"] = {
+                "custom-01": "customsvc",
+            }
+
+        with (
+            patch.object(
+                self.pipeline,
+                "_benchmark_service_action_profiles",
+                return_value={
+                    "customsvc": {
+                        "label": "CustomSvc",
+                        "probe": MagicMock(return_value="custom probe"),
+                        "actions": {"exploit": {}, "close": {}},
+                    }
+                },
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_service_handoff_profiles",
+                return_value={},
+            ),
+            patch.object(
+                self.pipeline,
+                "_benchmark_probe_handoff_followup_local",
+            ) as followup,
+        ):
+            result = self.pipeline._benchmark_deterministic_fast_step(
+                "Benchmark handoff step 2：继续当前题 custom-01 的一个最高置信后续假设"
+            )
+
+        self.assertIsNone(result)
+        followup.assert_not_called()
+
     def test_benchmark_reasoning_handoff_specializes_dify(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
         self.pipeline._benchmark_profile_active = True

@@ -3143,6 +3143,15 @@ class FourPillarPipeline:
                 return fingerprint, "close"
         return None
 
+    def _benchmark_profiled_service_fingerprints(self) -> set[str]:
+        return (
+            set(self._benchmark_service_action_profiles())
+            | set(self._benchmark_service_handoff_profiles())
+        )
+
+    def _benchmark_fingerprint_has_profiled_handoff(self, fingerprint: Any) -> bool:
+        return isinstance(fingerprint, str) and fingerprint in self._benchmark_profiled_service_fingerprints()
+
     def _benchmark_run_service_action_step(
         self,
         fingerprint: str,
@@ -3230,7 +3239,7 @@ class FourPillarPipeline:
                 return "确定性 handoff：当前没有 active 容器，跳过。"
             with self._benchmark_state_lock:
                 fingerprints = dict(self._benchmark_state.get("service_fingerprints", {}))
-            if fingerprints.get(code) in {"hugegraph", "dify"}:
+            if self._benchmark_fingerprint_has_profiled_handoff(fingerprints.get(code)):
                 return None
             probe = self._benchmark_probe_handoff_followup_local(code, addrs)
             with self._benchmark_state_lock:
@@ -4415,20 +4424,19 @@ class FourPillarPipeline:
         )
         return any(marker in text for marker in setup_markers)
 
-    @staticmethod
-    def _benchmark_plan_is_handoff_like(subtasks: list[dict[str, Any]]) -> bool:
+    def _benchmark_plan_is_handoff_like(self, subtasks: list[dict[str, Any]]) -> bool:
         if not subtasks:
             return False
         text = "\n".join(str(task.get("task_description", "")) for task in subtasks).lower()
-        return any(
-            marker in text
-            for marker in (
-                "benchmark handoff step",
-                "benchmark hugegraph",
-                "benchmark dify",
-                "只深挖当前 active",
-            )
+        markers = [
+            "benchmark handoff step",
+            "只深挖当前 active",
+        ]
+        markers.extend(
+            f"benchmark {fingerprint}"
+            for fingerprint in sorted(self._benchmark_profiled_service_fingerprints())
         )
+        return any(marker in text for marker in markers)
 
     def _benchmark_should_pause_generic_plan_after_deterministic(
         self,
@@ -7404,14 +7412,7 @@ class FourPillarPipeline:
                     )
 
                     deterministic_result: str | None = None
-                    if (
-                        "Benchmark handoff step" in desc
-                        or "Benchmark hugegraph exploit step" in desc
-                        or "Benchmark hugegraph close step" in desc
-                        or "Benchmark dify handoff step" in desc
-                        or "Benchmark dify exploit step" in desc
-                        or "Benchmark dify close step" in desc
-                    ):
+                    if "Benchmark handoff step" in desc or self._benchmark_service_action_from_desc(str(desc)):
                         try:
                             deterministic_result = self._benchmark_deterministic_fast_step(
                                 desc,
