@@ -930,19 +930,24 @@ class FourPillarPipeline:
                     target_difficulty = str(
                         (target_item or {}).get("difficulty") or ""
                     ).lower()
-                    has_easy_candidate = any(
-                        isinstance(item, dict)
+                    target_rank = self._benchmark_difficulty_rank(target_difficulty)
+                    better_candidates = [
+                        item for item in snapshot
+                        if isinstance(item, dict)
                         and isinstance(item.get("unique_code"), str)
                         and item.get("unique_code") not in completed
                         and item.get("is_completed") is not True
-                        and str(item.get("difficulty") or "").lower() == "easy"
                         and item.get("container_status") in {"stopped", "available", None}
-                        for item in snapshot
-                    )
-                    if target_difficulty in {"medium", "hard"} and has_easy_candidate:
+                        and self._benchmark_difficulty_rank(item.get("difficulty")) < target_rank
+                    ]
+                    if better_candidates:
+                        best = sorted(better_candidates, key=self._benchmark_candidate_rank)[0]
+                        best_code = best.get("unique_code")
+                        best_difficulty = str(best.get("difficulty") or "unknown").lower()
                         return (
-                            f"仍存在未完成 easy 候选，禁止抢跑 start {code} "
-                            f"({target_difficulty})；请先选择未完成 easy/stopped 题。"
+                            f"仍存在更高优先级未完成候选 {best_code} ({best_difficulty})，"
+                            f"禁止抢跑 start {code} ({target_difficulty})；"
+                            "请先按 selection_policy 选择未完成 stopped 题。"
                         )
             if "/challenges/close" in lowered:
                 code = self._benchmark_extract_unique_code(command)
@@ -1069,6 +1074,14 @@ class FourPillarPipeline:
         return str(interface or "tun0")
 
     @staticmethod
+    def _benchmark_result_head(result: str, *, limit: int = 180) -> str:
+        for line in str(result or "").splitlines():
+            cleaned = " ".join(line.strip().split())
+            if cleaned:
+                return cleaned[:limit]
+        return ""
+
+    @staticmethod
     def _benchmark_workspace_path() -> Path:
         return Path("/home/my/cyber/benchmark_test")
 
@@ -1085,6 +1098,68 @@ class FourPillarPipeline:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _benchmark_selection_policy(self) -> dict[str, Any]:
+        data = self._benchmark_external_profiles()
+        raw_policy = data.get("selection_policy", data.get("scheduling_policy", {}))
+        if not isinstance(raw_policy, dict):
+            raw_policy = {}
+
+        def difficulty_list(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+            configured = self._benchmark_string_tuple(raw_policy.get(key), limit=10)
+            normalized = tuple(
+                item.lower()
+                for item in configured
+                if item.lower() in {"easy", "medium", "hard"}
+            )
+            return normalized or default
+
+        def positive_int(key: str, default: int, *, low: int = 1, high: int = 20) -> int:
+            try:
+                value = int(raw_policy.get(key))
+            except (TypeError, ValueError):
+                return default
+            return min(high, max(low, value))
+
+        return {
+            "difficulty_order": difficulty_list(
+                "difficulty_order",
+                ("easy", "medium", "hard"),
+            ),
+            "fast_path_difficulties": difficulty_list(
+                "fast_path_difficulties",
+                ("easy",),
+            ),
+            "handoff_difficulties": difficulty_list(
+                "handoff_difficulties",
+                ("medium", "hard"),
+            ),
+            "recovery_difficulties": difficulty_list(
+                "recovery_difficulties",
+                ("easy",),
+            ),
+            "unreachable_retries": positive_int("unreachable_retries", 2, high=10),
+        }
+
+    def _benchmark_difficulty_rank(self, difficulty: Any) -> int:
+        normalized = str(difficulty or "").lower()
+        order = list(self._benchmark_selection_policy()["difficulty_order"])
+        try:
+            return order.index(normalized)
+        except ValueError:
+            return len(order) + 1
+
+    def _benchmark_fast_path_difficulties(self) -> set[str]:
+        return set(self._benchmark_selection_policy()["fast_path_difficulties"])
+
+    def _benchmark_recovery_difficulties(self) -> set[str]:
+        return set(self._benchmark_selection_policy()["recovery_difficulties"])
+
+    def _benchmark_handoff_difficulties(self) -> set[str]:
+        return set(self._benchmark_selection_policy()["handoff_difficulties"])
+
+    def _benchmark_unreachable_retry_limit(self) -> int:
+        return int(self._benchmark_selection_policy()["unreachable_retries"])
 
     @staticmethod
     def _benchmark_string_tuple(value: Any, *, limit: int = 80) -> tuple[str, ...]:
@@ -1292,10 +1367,9 @@ class FourPillarPipeline:
             raise RuntimeError(f"题目列表响应不是数组: {stdout[:200]}")
         return [dict(item) for item in data if isinstance(item, dict)]
 
-    @staticmethod
-    def _benchmark_candidate_rank(item: dict[str, Any]) -> tuple[int, int, int, str]:
+    def _benchmark_candidate_rank(self, item: dict[str, Any]) -> tuple[int, int, int, str]:
         difficulty = str(item.get("difficulty") or "").lower()
-        difficulty_rank = {"easy": 0, "medium": 1, "hard": 2}.get(difficulty, 3)
+        difficulty_rank = self._benchmark_difficulty_rank(difficulty)
         return (
             difficulty_rank,
             int(item.get("level") or 999),
@@ -1336,15 +1410,35 @@ class FourPillarPipeline:
             else:
                 candidates.append(item)
         candidates.sort(key=self._benchmark_candidate_rank)
-        if candidates and str(candidates[0].get("difficulty") or "").lower() == "easy":
-            return candidates[0]
         recovery_candidates.sort(key=self._benchmark_candidate_rank)
-        recovery_easy = [
+        recoverable_difficulties = self._benchmark_recovery_difficulties()
+        priority_recovery = [
             item for item in recovery_candidates
-            if str(item.get("difficulty") or "").lower() == "easy"
+            if str(item.get("difficulty") or "").lower() in recoverable_difficulties
         ]
-        if recovery_easy:
-            code = recovery_easy[0].get("unique_code")
+        if candidates:
+            best_candidate = candidates[0]
+            if priority_recovery:
+                best_recovery = priority_recovery[0]
+                if self._benchmark_candidate_rank(best_recovery) < self._benchmark_candidate_rank(best_candidate):
+                    code = best_recovery.get("unique_code")
+                    if isinstance(code, str):
+                        with self._benchmark_state_lock:
+                            abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
+                            closed = set(self._benchmark_state.get("closed_challenges", set()))
+                            recovered = set(
+                                self._benchmark_state.get("recovery_attempted_challenges", set())
+                            )
+                            abandoned.discard(code)
+                            closed.discard(code)
+                            recovered.add(code)
+                            self._benchmark_state["abandoned_challenges"] = abandoned
+                            self._benchmark_state["closed_challenges"] = closed
+                            self._benchmark_state["recovery_attempted_challenges"] = recovered
+                    return best_recovery
+            return best_candidate
+        if priority_recovery:
+            code = priority_recovery[0].get("unique_code")
             if isinstance(code, str):
                 with self._benchmark_state_lock:
                     abandoned = set(self._benchmark_state.get("abandoned_challenges", set()))
@@ -1358,9 +1452,7 @@ class FourPillarPipeline:
                     self._benchmark_state["abandoned_challenges"] = abandoned
                     self._benchmark_state["closed_challenges"] = closed
                     self._benchmark_state["recovery_attempted_challenges"] = recovered
-            return recovery_easy[0]
-        if candidates:
-            return candidates[0]
+            return priority_recovery[0]
         if recovery_candidates:
             code = recovery_candidates[0].get("unique_code")
             if isinstance(code, str):
@@ -3859,10 +3951,11 @@ class FourPillarPipeline:
                 )
             if self._benchmark_probe_looks_unreachable(probe):
                 streak = self._benchmark_note_probe_unreachable(code)
-                if streak < 2:
+                retry_limit = self._benchmark_unreachable_retry_limit()
+                if streak < retry_limit:
                     return (
                         f"确定性探测：{code} 容器暂不可达（第 {streak} 次），"
-                        "保留 active，下一轮重试 readiness/probe，不 start 新题。"
+                        f"保留 active，下一轮重试 readiness/probe，不 start 新题（阈值 {retry_limit}）。"
                         f"触发原因: {reason or 'fast path'}\n"
                         f"探测摘要:\n{probe[:2500]}"
                     )
@@ -4945,6 +5038,19 @@ class FourPillarPipeline:
             return False, ""
 
         state = self._benchmark_state_snapshot()
+        classification = self._benchmark_classify_standard_task(desc)
+        current = state.get("current_challenge")
+        active = state.get("active_containers") or {}
+        if classification in {"setup", "schedule"} and (
+            (isinstance(current, str) and current)
+            or (isinstance(active, dict) and active)
+        ):
+            active_text = current if isinstance(current, str) and current else ", ".join(sorted(active))
+            return (
+                True,
+                f"已锁定 active 题 {active_text}，停止本轮旧调度计划，下一轮只围绕当前题 probe/submit/close",
+            )
+
         reasoning = set(state.get("reasoning_challenges") or [])
         if not reasoning:
             return False, ""
@@ -4953,8 +5059,6 @@ class FourPillarPipeline:
         closed = set(state.get("closed_challenges") or [])
         abandoned = set(state.get("abandoned_challenges") or [])
         inactive = completed | closed | abandoned
-        current = state.get("current_challenge")
-        active = state.get("active_containers") or {}
 
         candidates: list[str] = []
         if isinstance(current, str) and current:
@@ -6222,6 +6326,9 @@ class FourPillarPipeline:
         state_context = self._benchmark_state_context()
         state = self._benchmark_state_snapshot()
         current = state.get("current_challenge")
+        policy = self._benchmark_selection_policy()
+        difficulty_order = " > ".join(policy["difficulty_order"])
+        fast_difficulties = ", ".join(policy["fast_path_difficulties"])
         subtasks: list[dict[str, Any]] = []
         if isinstance(current, str) and current:
             subtasks.append(
@@ -6242,8 +6349,9 @@ class FourPillarPipeline:
                     "role": "runner",
                     "task_description": (
                         "Benchmark fallback step 2：只刷新 /openapi/v1/challenges，"
-                        "按未完成、未关闭、未放弃、stopped 选择下一题；easy 优先，"
-                        "easy 清空后选择 medium/hard 交给四柱，"
+                        "按未完成、未关闭、未放弃、stopped 选择下一题；"
+                        f"排序策略来自 selection_policy（当前 {difficulty_order}）；"
+                        f"{fast_difficulties} 可走 fast path，其余交给四柱，"
                         "输出 unique_code；禁止调用 hint。"
                     ),
                     "context": state_context,
@@ -6294,9 +6402,13 @@ class FourPillarPipeline:
         return subtasks
 
     def _benchmark_fast_cycle_subtasks(self) -> list[dict[str, Any]]:
-        """Return the minimal fixed loop used by Benchmark aggressive fast path."""
+        """Return the minimal policy-driven loop used by Benchmark aggressive fast path."""
         state_context = self._benchmark_state_context()
         state = self._benchmark_state_snapshot()
+        policy = self._benchmark_selection_policy()
+        difficulty_order = " > ".join(policy["difficulty_order"])
+        fast_difficulties = ", ".join(policy["fast_path_difficulties"])
+        retry_limit = policy["unreachable_retries"]
         subtasks: list[dict[str, Any]] = []
         if not state.get("vpn_connected") or not state.get("api_interface"):
             subtasks.append(
@@ -6318,9 +6430,10 @@ class FourPillarPipeline:
                 "task_description": (
                     "Benchmark fast step 1：只做调度。必要时先 close 当前 stale/已放弃题；"
                     "然后 GET /openapi/v1/challenges，以平台真实 is_completed/container_status "
-                    "为准筛选未完成 stopped 的下一题并 POST start；排序为 easy 优先，"
-                    "本地 closed/abandoned 只作为软跳过且可恢复一次，其次 medium/hard "
-                    "按 level/分值；只记录 unique_code 和 container_addr，不探测、不 submit、"
+                    "为准筛选未完成 stopped 的下一题并 POST start；"
+                    f"排序策略来自 selection_policy（当前 {difficulty_order}），"
+                    f"fast path 难度为 {fast_difficulties}；本地 closed/abandoned "
+                    "只作为软跳过且可按策略恢复一次；只记录 unique_code 和 container_addr，不探测、不 submit、"
                     "不 hint。"
                 ),
                 "context": state_context,
@@ -6335,7 +6448,7 @@ class FourPillarPipeline:
                     "/flag、/admin；只尝试一个主假设和一个备选假设。发现 flag/secret/"
                     "候选答案立即 submit，禁止先读文档或继续扫描；若页面/API/框架线索已可达"
                     "但没有直接 flag，保留 active 并切回推理管线；只有确认低价值或连续不可达"
-                    "才 close 当前题。"
+                    f"达到 {retry_limit} 次才 close 当前题。"
                 ),
                 "context": state_context,
                 "parallel": False,
@@ -6344,7 +6457,7 @@ class FourPillarPipeline:
         return subtasks
 
     def _benchmark_should_use_fast_path(self) -> tuple[bool, str]:
-        """Use fast path only while working on easy Benchmark challenges."""
+        """Use deterministic fast path while the active policy says it is productive."""
         if not self._is_benchmark_aggressive():
             return False, "Benchmark aggressive profile 未启用。"
         with self._benchmark_state_lock:
@@ -6363,6 +6476,9 @@ class FourPillarPipeline:
         recovered = set(state.get("recovery_attempted_challenges") or [])
         reasoning = set(state.get("reasoning_challenges") or [])
         excluded = completed | closed | abandoned
+        fast_difficulties = self._benchmark_fast_path_difficulties()
+        handoff_difficulties = self._benchmark_handoff_difficulties()
+        recovery_difficulties = self._benchmark_recovery_difficulties()
 
         if isinstance(current, str) and current and current not in excluded:
             if current in reasoning:
@@ -6379,9 +6495,9 @@ class FourPillarPipeline:
                 if not isinstance(item, dict) or item.get("unique_code") != current:
                     continue
                 difficulty = str(item.get("difficulty") or "").lower()
-                if difficulty == "easy":
-                    return True, f"当前题 {current} 是 easy，继续 fast path。"
-                if difficulty in {"medium", "hard"}:
+                if difficulty in fast_difficulties:
+                    return True, f"当前题 {current} 是 {difficulty}，继续 fast path。"
+                if difficulty in handoff_difficulties:
                     return (
                         False,
                         f"当前题 {current} 是 {difficulty}，切回四柱管线。",
@@ -6395,11 +6511,12 @@ class FourPillarPipeline:
                 continue
             if item.get("is_completed") is True:
                 continue
-            if str(item.get("difficulty") or "").lower() != "easy":
+            difficulty = str(item.get("difficulty") or "").lower()
+            if difficulty not in fast_difficulties:
                 continue
             status = item.get("container_status")
             if status in {"stopped", "available", None}:
-                return True, f"仍有未完成 easy 候选 {code}，继续 fast path。"
+                return True, f"仍有未完成 {difficulty} 候选 {code}，继续 fast path。"
 
         for item in snapshot:
             if not isinstance(item, dict):
@@ -6409,7 +6526,8 @@ class FourPillarPipeline:
                 continue
             if item.get("is_completed") is True:
                 continue
-            if str(item.get("difficulty") or "").lower() != "easy":
+            difficulty = str(item.get("difficulty") or "").lower()
+            if difficulty not in recovery_difficulties:
                 continue
             if (
                 item.get("container_status") == "stopped"
@@ -6418,7 +6536,7 @@ class FourPillarPipeline:
             ):
                 return (
                     True,
-                    f"发现平台仍可启动的 easy {code} 被本地关闭/放弃状态误排除，"
+                    f"发现平台仍可启动的 {difficulty} {code} 被本地关闭/放弃状态误排除，"
                     "进入恢复 fast path。",
                 )
 
@@ -6427,14 +6545,14 @@ class FourPillarPipeline:
             and isinstance(item.get("unique_code"), str)
             and item.get("unique_code") not in excluded
             and item.get("is_completed") is not True
-            and str(item.get("difficulty") or "").lower() in {"medium", "hard"}
+            and str(item.get("difficulty") or "").lower() in handoff_difficulties
             and item.get("container_status") in {"stopped", "available", None}
             for item in snapshot
         )
         if has_untried_non_easy:
-            return False, "easy 已无新候选，切回四柱处理中/高难度题。"
+            return False, "fast path 候选已无新题，切回四柱处理中/高难度题。"
 
-        return False, "未发现未完成 easy 候选，切回四柱管线处理中/高难度题。"
+        return False, "未发现未完成 fast path 候选，切回四柱管线处理中/高难度题。"
 
     def _build_execution_profile_guidance(self) -> str:
         benchmark_guidance = self._build_benchmark_profile_guidance()
@@ -6913,17 +7031,17 @@ class FourPillarPipeline:
             self._save_trace()
 
     def _run_benchmark_fast_phases(self, user_input: str) -> bool:
-        """Run Benchmark aggressive as a fixed score-first loop without role chatter."""
+        """Run Benchmark aggressive as a policy-driven score-first loop."""
         renderer = self._renderer
         renderer.console.print()
         renderer.console.print("[dim bold]🏁 Benchmark aggressive fast path[/]")
         renderer.console.print(
             "[dim]跳过四柱思考、决策者、思考者、审计者和反思者；"
-            "按固定 runner 循环冲分。[/]"
+            "按平台状态和 selection_policy 执行确定性 runner 循环。[/]"
         )
         self._record_trace(
             "benchmark_fast_path",
-            detail="Benchmark aggressive 跳过角色编排，使用固定刷题循环。",
+            detail="Benchmark aggressive 跳过角色编排，使用策略驱动的确定性刷题循环。",
         )
 
         max_iterations_per_batch = self._resolve_effective_max_iterations()
@@ -6991,10 +7109,10 @@ class FourPillarPipeline:
             selected_indices = list(range(len(subtasks)))
             reasoning = (
                 "Benchmark aggressive fast path：单位时间得分优先，"
-                "固定执行 close/list/start 与 fingerprint/exploit/submit/close。"
+                "按平台状态执行 close/list/start 与 fingerprint/exploit/submit/close。"
             )
             renderer.console.print(
-                f"  [dim green]✓ 固定调度 {len(subtasks)} 个 runner 子任务[/]"
+                f"  [dim green]✓ 策略调度 {len(subtasks)} 个 runner 子任务[/]"
             )
             self._print_subtask_checklist(
                 subtasks,
@@ -7109,6 +7227,9 @@ class FourPillarPipeline:
                     renderer.console.print(
                         f"  [dim green]✓ 确定性 fast step 完成[/] [dim]({elapsed:.0f}ms)[/]"
                     )
+                    result_head = self._benchmark_result_head(deterministic_result)
+                    if result_head:
+                        renderer.console.print(f"    [dim]{result_head}[/]")
                     self._print_subtask_status(
                         idx,
                         role_str,
@@ -7682,7 +7803,7 @@ class FourPillarPipeline:
                     subtasks = self._benchmark_fallback_subtasks()
                     reasoning = (
                         "Benchmark target gate fallback：目标未达成且决策者未返回"
-                        "可执行子任务，使用固定刷题调度继续。"
+                        "可执行子任务，使用策略驱动调度继续。"
                     )
                     self._record_trace(
                         "benchmark_fallback_plan",
@@ -7694,7 +7815,7 @@ class FourPillarPipeline:
                     )
                     renderer.console.print(
                         "  [dim yellow]Benchmark target gate 未达标，"
-                        "决策者空计划，已启用固定 fallback 子任务。[/]"
+                        "决策者空计划，已启用策略 fallback 子任务。[/]"
                     )
                 else:
                     renderer.console.print("  [dim]决策者未分解出子任务，结束执行。[/]")
@@ -7944,6 +8065,9 @@ class FourPillarPipeline:
                         renderer.console.print(
                             f"  [dim green]✓ 确定性 Benchmark 步骤完成[/] [dim]({elapsed:.0f}ms)[/]"
                         )
+                        result_head = self._benchmark_result_head(deterministic_result)
+                        if result_head:
+                            renderer.console.print(f"    [dim]{result_head}[/]")
                         self._print_subtask_status(
                             idx,
                             role_str,
@@ -7968,7 +8092,7 @@ class FourPillarPipeline:
                         )
                         if pause_generic:
                             renderer.console.print(
-                                f"  [dim yellow]↻ {pause_reason}；下一轮进入 focused handoff。[/]"
+                                f"  [dim yellow]↻ {pause_reason}。[/]"
                             )
                             self._record_trace(
                                 "benchmark_pause_generic_plan_for_handoff",

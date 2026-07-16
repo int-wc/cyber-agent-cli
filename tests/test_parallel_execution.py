@@ -236,7 +236,7 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertIn("45 秒快速指纹", joined)
         self.assertIn("立即 submit", joined)
         self.assertIn("保留 active", joined)
-        self.assertIn("连续不可达才 close", joined)
+        self.assertIn("连续不可达达到 2 次才 close", joined)
         self.assertIn("不 hint", joined)
 
     def test_benchmark_fast_cycle_inserts_setup_when_state_unknown(self):
@@ -428,6 +428,107 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
 
         self.assertEqual(selected["unique_code"], "e1-01")
 
+    def test_benchmark_selection_policy_changes_difficulty_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "selection_policy": {
+                            "difficulty_order": ["medium", "easy", "hard"],
+                            "fast_path_difficulties": ["easy"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            snapshot = [
+                {
+                    "unique_code": "easy-1",
+                    "difficulty": "easy",
+                    "level": 1,
+                    "total_score": 100,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                },
+                {
+                    "unique_code": "medium-1",
+                    "difficulty": "medium",
+                    "level": 1,
+                    "total_score": 200,
+                    "is_completed": False,
+                    "container_status": "stopped",
+                },
+            ]
+
+            selected = self.pipeline._benchmark_select_next_candidate(snapshot)
+
+        self.assertEqual(selected["unique_code"], "medium-1")
+
+    def test_benchmark_fast_path_difficulties_are_profile_driven(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "selection_policy": {
+                            "fast_path_difficulties": ["easy", "medium"],
+                            "handoff_difficulties": ["hard"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            with self.pipeline._benchmark_state_lock:
+                self.pipeline._benchmark_state["current_challenge"] = "medium-1"
+                self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                    {
+                        "unique_code": "medium-1",
+                        "difficulty": "medium",
+                        "is_completed": False,
+                        "container_status": "available",
+                    }
+                ]
+
+            should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertTrue(should_fast)
+        self.assertIn("medium", reason)
+
+    def test_benchmark_invalid_selection_policy_keeps_default_fast_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "selection_policy": {
+                            "difficulty_order": ["invalid"],
+                            "fast_path_difficulties": ["invalid"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+            with self.pipeline._benchmark_state_lock:
+                self.pipeline._benchmark_state["current_challenge"] = "medium-1"
+                self.pipeline._benchmark_state["last_challenges_snapshot"] = [
+                    {
+                        "unique_code": "medium-1",
+                        "difficulty": "medium",
+                        "is_completed": False,
+                        "container_status": "available",
+                    }
+                ]
+
+            should_fast, reason = self.pipeline._benchmark_should_use_fast_path()
+
+        self.assertFalse(should_fast)
+        self.assertIn("medium", reason)
+
     def test_benchmark_select_next_candidate_recovers_closed_easy_before_medium(self):
         snapshot = [
             {
@@ -495,6 +596,23 @@ class BenchmarkFastPathTestCase(unittest.TestCase):
         self.assertTrue(pause)
         self.assertIn("xben-038-24", reason)
         self.assertIn("reasoning_handoff", reason)
+
+    def test_benchmark_pauses_same_round_generic_plan_after_active_schedule(self):
+        with self.pipeline._benchmark_state_lock:
+            self.pipeline._benchmark_state["current_challenge"] = "c-06"
+            self.pipeline._benchmark_state["active_containers"] = {
+                "c-06": ["10.0.1.2:8080"],
+            }
+
+        pause, reason = (
+            self.pipeline._benchmark_should_pause_generic_plan_after_deterministic(
+                "如果上一题不可做，则 start 下一道未完成题"
+            )
+        )
+
+        self.assertTrue(pause)
+        self.assertIn("active", reason)
+        self.assertIn("c-06", reason)
 
     def test_benchmark_does_not_pause_same_round_handoff_plan(self):
         with self.pipeline._benchmark_state_lock:
@@ -1335,7 +1453,7 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         )
 
         self.assertFalse(decision.approved)
-        self.assertIn("仍存在未完成 easy", decision.reason)
+        self.assertIn("更高优先级未完成候选 xben-006-24", decision.reason)
 
     def test_benchmark_stale_detector_resets_on_submit_signal(self):
         self.pipeline._runtime_context["benchmark_profile"] = "aggressive"
