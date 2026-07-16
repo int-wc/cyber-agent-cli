@@ -2480,6 +2480,18 @@ class FourPillarPipeline:
         handoff_steps = self._benchmark_string_tuple(raw.get("handoff_steps"), limit=10)
         if handoff_steps:
             profile["handoff_steps"] = handoff_steps
+        evidence_focus = self._benchmark_string_tuple(
+            raw.get("evidence_focus", raw.get("handoff_focus")),
+            limit=20,
+        )
+        if evidence_focus:
+            profile["evidence_focus"] = evidence_focus
+        avoid_focus = self._benchmark_string_tuple(
+            raw.get("avoid_focus", raw.get("avoid")),
+            limit=20,
+        )
+        if avoid_focus:
+            profile["avoid_focus"] = avoid_focus
         probe_paths = self._benchmark_string_tuple(raw.get("probe_paths"), limit=40)
         if probe_paths:
             profile["probe_paths"] = probe_paths
@@ -2504,6 +2516,8 @@ class FourPillarPipeline:
                 "tcp_ports",
                 "handoff_context",
                 "handoff_steps",
+                "evidence_focus",
+                "avoid_focus",
                 "reason",
                 "probe",
             )
@@ -5846,28 +5860,16 @@ class FourPillarPipeline:
                     "如果 nmap jdwp-exec 因本机 nselib 解析错误失败，应改用 jdb、自定义 JDWP、"
                     "Arthas 或 Gremlin 侧信道，不要重复 HTTP 字典扫描。"
                 ),
-                "steps": [
-                    (
-                        "Benchmark handoff step 1：只复核当前 active 题 {current} "
-                        "({addr_text}) 的 HugeGraph 指纹和关键端口。禁止 setup/VPN/"
-                        "toolchain/list/start。只允许访问 /、/versions、/graphs、"
-                        "/graphs/hugegraph/conf、/gremlin、/arthas，并探测 5005/8561/8562。"
-                        "发现 flag{{...}} 立即 submit。"
-                    ),
-                    (
-                        "Benchmark hugegraph exploit step 2：只围绕 {current} 的 "
-                        "HugeGraph/Gremlin/Arthas/JDWP 选择一个最高置信利用路径。"
-                        "优先顺序：1) JDWP 5005 读取 /flag 或执行 cat /flag；"
-                        "2) Arthas 8561/8562 默认/弱口令后执行命令；"
-                        "3) Gremlin System.getenv/System.getProperties 或 HugeGraph API "
-                        "泄露。禁止继续普通 HTTP 目录枚举、SQLi、XSS、PHP/LFI。"
-                        "最多验证一个主假设和一个备选假设；发现 flag 立即 submit。"
-                    ),
-                    (
-                        "Benchmark hugegraph close step 3：只有当 {current} 的 JDWP、"
-                        "Arthas、Gremlin 三条路径均无新线索且无 flag 时，才 close?"
-                        "unique_code={current}；否则保留 active 并返回下一步具体利用点。"
-                    ),
+                "evidence_focus": [
+                    "HugeGraph 指纹和关键端口",
+                    "/versions、/graphs、/graphs/hugegraph/conf、/gremlin、/arthas",
+                    "JDWP 5005、Arthas 8561/8562、Gremlin 侧信道",
+                    "System.getenv/System.getProperties 或 HugeGraph API 泄露",
+                ],
+                "avoid_focus": [
+                    "普通 HTTP 目录枚举",
+                    "SQLi/XSS/PHP/LFI 泛化扫描",
+                    "重复 nmap jdwp-exec 失败路径",
                 ],
             },
             "dify": {
@@ -5879,29 +5881,16 @@ class FourPillarPipeline:
                     "Next.js 静态 chunk、RSC payload、Dify public/console API、安装/登录态、"
                     "SSR/proxy/rewrite 行为和暴露的 app/dataset/workspace 标识推进。"
                 ),
-                "steps": [
-                    (
-                        "Benchmark dify handoff step 1：只深挖当前 active 题 {current} "
-                        "({addr_text}) 的 Dify/Next.js 指纹。禁止 setup/VPN/toolchain/"
-                        "list/start/PHP/LFI 字典扫描。只访问当前 host:port，必须使用 "
-                        "curl --interface tun0。复核 /apps、/signin、RSC payload、"
-                        "有限 Next.js chunk、/console/api/* 与 /api/* 的真实响应；"
-                        "发现 flag{{...}} 立即 submit。"
-                    ),
-                    (
-                        "Benchmark dify exploit step 2：围绕 {current} 选择一个最高置信"
-                        " Dify/Next.js 利用路径。优先顺序：1) chunk/RSC 泄露 app_id、"
-                        "secret、token、flag 或可调用 public API；2) install/setup/signin "
-                        "状态错误暴露初始化或管理员路径；3) Next rewrite/proxy 到 "
-                        "127.0.0.1:5001 的可利用入口。禁止继续泛化目录枚举。最多一个"
-                        "主假设和一个备选假设；发现候选 flag 立即 submit。"
-                    ),
-                    (
-                        "Benchmark dify close step 3：只有当 {current} 的静态 chunk、"
-                        "RSC、public/console API、install/signin 状态均无新线索且无 flag "
-                        "时，才 close?unique_code={current}；否则保留 active 并返回"
-                        "下一步具体利用点。"
-                    ),
+                "evidence_focus": [
+                    "Dify/Next.js 指纹",
+                    "Next.js 静态 chunk、RSC payload、rewrite/proxy 行为",
+                    "Dify public/console API、install/setup/signin 状态",
+                    "app_id、dataset、workspace、secret、token 或可调用 public API",
+                ],
+                "avoid_focus": [
+                    "普通 PHP/LFI 字典扫描",
+                    "泛化目录枚举",
+                    "重复 setup/VPN/toolchain/list/start",
                 ],
             },
         }
@@ -5915,14 +5904,29 @@ class FourPillarPipeline:
         fingerprint = str(raw.get("fingerprint") or "").strip().lower()
         if not _re_mod.fullmatch(r"[a-z0-9_.-]{1,80}", fingerprint):
             return None
-        context = str(raw.get("context") or "").strip()
-        steps = self._benchmark_string_tuple(raw.get("steps"), limit=10)
-        if not context or not steps:
+        context = str(raw.get("context") or raw.get("handoff_context") or "").strip()
+        steps = self._benchmark_string_tuple(
+            raw.get("steps", raw.get("handoff_steps")),
+            limit=10,
+        )
+        evidence_focus = self._benchmark_string_tuple(
+            raw.get("evidence_focus", raw.get("handoff_focus")),
+            limit=20,
+        )
+        avoid_focus = self._benchmark_string_tuple(
+            raw.get("avoid_focus", raw.get("avoid")),
+            limit=20,
+        )
+        if not context and not evidence_focus:
             return None
-        return fingerprint, {
+        profile: dict[str, Any] = {
             "context": context[:3000],
-            "steps": list(steps),
+            "evidence_focus": list(evidence_focus),
+            "avoid_focus": list(avoid_focus),
         }
+        if steps:
+            profile["steps"] = list(steps)
+        return fingerprint, profile
 
     def _benchmark_external_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
         data = self._benchmark_external_profiles()
@@ -5939,15 +5943,24 @@ class FourPillarPipeline:
             fingerprint = str(profile.get("fingerprint") or "")
             context = str(profile.get("handoff_context") or "").strip()
             steps = self._benchmark_string_tuple(profile.get("handoff_steps"), limit=10)
-            if not fingerprint or not context or not steps:
-                continue
-            profiles.setdefault(
-                fingerprint,
-                {
-                    "context": context[:3000],
-                    "steps": list(steps),
-                },
+            evidence_focus = self._benchmark_string_tuple(
+                profile.get("evidence_focus", profile.get("handoff_focus")),
+                limit=20,
             )
+            avoid_focus = self._benchmark_string_tuple(
+                profile.get("avoid_focus", profile.get("avoid")),
+                limit=20,
+            )
+            if not fingerprint or (not context and not evidence_focus and not steps):
+                continue
+            profile_data: dict[str, Any] = {
+                "context": context[:3000],
+                "evidence_focus": list(evidence_focus),
+                "avoid_focus": list(avoid_focus),
+            }
+            if steps:
+                profile_data["steps"] = list(steps)
+            profiles.setdefault(fingerprint, profile_data)
         return profiles
 
     def _benchmark_service_handoff_profiles(self) -> dict[str, dict[str, Any]]:
@@ -5972,6 +5985,20 @@ class FourPillarPipeline:
         if not profile:
             return []
         service_context = f"{context}\n\n{profile['context']}"
+        if profile.get("evidence_focus"):
+            focus_lines = "\n".join(f"- {item}" for item in profile["evidence_focus"])
+            service_context = f"{service_context}\n\n## 证据焦点\n{focus_lines}"
+        if profile.get("avoid_focus"):
+            avoid_lines = "\n".join(f"- {item}" for item in profile["avoid_focus"])
+            service_context = f"{service_context}\n\n## 避免方向\n{avoid_lines}"
+        if not profile.get("steps"):
+            return self._benchmark_render_generic_handoff_subtasks(
+                current=current,
+                addr_text=addr_text,
+                context=service_context,
+                fingerprint=fingerprint,
+                profile=profile,
+            )
         return [
             {
                 "role": "runner",
@@ -5983,6 +6010,68 @@ class FourPillarPipeline:
                 "parallel": False,
             }
             for step in profile.get("steps", [])
+        ]
+
+    def _benchmark_render_generic_handoff_subtasks(
+        self,
+        *,
+        current: str,
+        addr_text: str,
+        context: str,
+        fingerprint: Any,
+        profile: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        focus = []
+        avoid = []
+        if isinstance(profile, dict):
+            focus = [str(item) for item in profile.get("evidence_focus") or []]
+            avoid = [str(item) for item in profile.get("avoid_focus") or []]
+        focus_text = "、".join(focus[:6]) if focus else "状态码、响应头、标题、表单、脚本/chunk、OpenAPI/Swagger、错误栈、参数名、cookie、重定向、暴露端点和服务标识"
+        avoid_text = "、".join(avoid[:6]) if avoid else "固定题号、固定技术栈和无响应差异的泛化扫描"
+        fingerprint_note = (
+            f"已识别服务指纹为 {fingerprint}；"
+            if isinstance(fingerprint, str) and fingerprint
+            else "未识别到可套用的服务专项数据；"
+        )
+        return [
+            {
+                "role": "runner",
+                "task_description": (
+                    f"Benchmark handoff step 1：只深挖当前 active 题 {current} "
+                    f"({addr_text})，禁止 setup/VPN/toolchain/list/start。所有 10.x 请求必须 "
+                    "curl --interface tun0。先复核 fast path 的真实证据，重点关注："
+                    f"{focus_text}。不要套用固定题号或固定技术栈；避免：{avoid_text}。"
+                    "发现 flag{...} 立即 submit。"
+                ),
+                "context": f"{context}\n\n## 通用 handoff 约束\n{fingerprint_note}"
+                "围绕真实响应建立一个主假设和一个备选假设；"
+                "优先验证已暴露的 API、认证/权限边界、配置/源码/静态资源泄漏、"
+                "文件/路径/URL/模板/查询参数行为和默认凭据。无响应差异就停止该方向。",
+                "parallel": False,
+            },
+            {
+                "role": "runner",
+                "task_description": (
+                    f"Benchmark handoff step 2：继续当前题 {current} 的一个最高置信后续假设，"
+                    "必须由真实响应驱动：只验证上一轮已经暴露的端点、参数、认证状态、"
+                    f"静态资源、错误信息、服务标识或协议特征。重点关注：{focus_text}。"
+                    f"禁止继续：{avoid_text}。"
+                    "最多验证一个主假设和一个备选假设；无新响应差异就停止。"
+                    "发现 flag/secret/候选答案立即 submit。"
+                ),
+                "context": context,
+                "parallel": False,
+            },
+            {
+                "role": "runner",
+                "task_description": (
+                    f"Benchmark handoff step 3：如果 {current} 仍无 flag、无新线索且已验证"
+                    "主要源码/API/文件路径，调用平台 close?unique_code="
+                    f"{current} 释放容器，然后返回 close 结果；不要 start 新题。"
+                ),
+                "context": context,
+                "parallel": False,
+            },
         ]
 
     def _benchmark_reasoning_handoff_subtasks(self) -> list[dict[str, Any]]:
@@ -6013,49 +6102,15 @@ class FourPillarPipeline:
         fingerprint_note = (
             f"已识别服务指纹为 {fingerprint}；"
             if isinstance(fingerprint, str) and fingerprint
-            else "未识别到可套用的服务专项 profile；"
+            else "未识别到可套用的服务专项数据；"
         )
-        return [
-            {
-                "role": "runner",
-                "task_description": (
-                    f"Benchmark handoff step 1：只深挖当前 active 题 {current} "
-                    f"({addr_text})，禁止 setup/VPN/toolchain/list/start。所有 10.x 请求必须 "
-                    "curl --interface tun0。先复核 fast path 的真实证据：状态码、响应头、"
-                    "标题、表单、脚本/chunk、OpenAPI/Swagger、错误栈、参数名、cookie、"
-                    "重定向、暴露端点和服务 banner。不要套用固定题号或固定技术栈；"
-                    "只从已观察到的响应差异中选择下一步。"
-                    "发现 flag{...} 立即 submit。"
-                ),
-                "context": f"{context}\n\n## 通用 handoff 约束\n{fingerprint_note}"
-                "没有专属 profile 时，围绕真实响应建立一个主假设和一个备选假设；"
-                "优先验证已暴露的 API、认证/权限边界、配置/源码/静态资源泄漏、"
-                "文件/路径/URL/模板/查询参数行为和默认凭据。无响应差异就停止该方向。",
-                "parallel": False,
-            },
-            {
-                "role": "runner",
-                "task_description": (
-                    f"Benchmark handoff step 2：继续当前题 {current} 的一个最高置信后续假设，"
-                    "必须由真实响应驱动：只验证上一轮已经暴露的端点、参数、认证状态、"
-                    "静态资源、错误信息、服务 banner 或协议特征。最多验证一个主假设和一个"
-                    "备选假设；无新响应差异就停止。"
-                    "发现 flag/secret/候选答案立即 submit。"
-                ),
-                "context": context,
-                "parallel": False,
-            },
-            {
-                "role": "runner",
-                "task_description": (
-                    f"Benchmark handoff step 3：如果 {current} 仍无 flag、无新线索且已验证"
-                    "主要源码/API/文件路径，调用平台 close?unique_code="
-                    f"{current} 释放容器，然后返回 close 结果；不要 start 新题。"
-                ),
-                "context": context,
-                "parallel": False,
-            },
-        ]
+        generic_context = f"{context}\n\n## 通用 handoff 约束\n{fingerprint_note}"
+        return self._benchmark_render_generic_handoff_subtasks(
+            current=current,
+            addr_text=addr_text,
+            context=generic_context,
+            fingerprint=fingerprint,
+        )
 
     def _benchmark_plan_is_setup_like(self, subtasks: list[dict[str, Any]]) -> bool:
         if not subtasks:

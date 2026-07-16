@@ -181,10 +181,16 @@
         8562
       ],
       "handoff_context": "## CustomSvc generic handoff\nUse only observed response headers, exposed RPC methods, OpenAPI/RPC metadata, cookies, redirects, and error messages. Do not assume a fixed challenge ID or fixed exploit path.",
-      "handoff_steps": [
-        "Benchmark customsvc handoff step 1: re-check current active challenge {current} ({addr_text}) for service headers, exposed RPC/OpenAPI metadata, auth cookies, redirects, and error messages; submit immediately if a flag appears.",
-        "Benchmark customsvc exploit step 2: choose one primary hypothesis and one fallback from observed CustomSvc evidence only, such as unauthenticated export, debug config, or token leakage; stop if responses do not differ.",
-        "Benchmark customsvc close step 3: only close?unique_code={current} after exposed RPC/API/config paths produce no new signal and no candidate flag."
+      "evidence_focus": [
+        "service headers",
+        "exposed RPC/OpenAPI metadata",
+        "auth cookies and redirects",
+        "debug config or token leakage"
+      ],
+      "avoid_focus": [
+        "fixed challenge IDs",
+        "fixed exploit paths",
+        "broad brute force without response differences"
       ]
     }
   ],
@@ -192,10 +198,16 @@
     {
       "fingerprint": "artifactstore",
       "context": "## ArtifactStore generic handoff\nThe service behaves like an artifact/object index. Prefer listed keys, bucket names, signed URL mistakes, directory listings, and metadata endpoints observed in responses.",
-      "steps": [
-        "Benchmark artifactstore handoff step 1: inspect only current active challenge {current} ({addr_text}) for object listings, metadata, bucket names, and signed URL parameters; submit immediately if a flag appears.",
-        "Benchmark artifactstore exploit step 2: try one highest-confidence artifact/key traversal or unsigned download hypothesis derived from the observed listing; stop without broad brute force if responses do not differ.",
-        "Benchmark artifactstore close step 3: close?unique_code={current} only after observed artifact and metadata paths are exhausted without a flag."
+      "evidence_focus": [
+        "object listings",
+        "metadata endpoints",
+        "bucket names",
+        "signed URL parameters"
+      ],
+      "avoid_focus": [
+        "broad brute force",
+        "unobserved bucket names",
+        "fixed exploit paths"
       ]
     }
   ],

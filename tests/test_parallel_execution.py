@@ -4243,8 +4243,10 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertEqual(len(handoff), 3)
         self.assertIn("HugeGraph 指纹和关键端口", handoff[0]["task_description"])
-        self.assertIn("Benchmark hugegraph exploit step 2", handoff[1]["task_description"])
-        self.assertIn("禁止继续普通 HTTP 目录枚举", handoff[1]["task_description"])
+        self.assertIn("Benchmark handoff step 2", handoff[1]["task_description"])
+        self.assertIn("JDWP 5005", handoff[1]["task_description"])
+        self.assertIn("禁止继续", handoff[1]["task_description"])
+        self.assertIn("普通 HTTP 目录枚举", handoff[1]["task_description"])
         self.assertIn("nmap jdwp-exec", handoff[1]["context"])
 
     def test_benchmark_service_handoff_profiles_are_fingerprint_driven(self):
@@ -4332,6 +4334,40 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
         self.assertEqual(len(rendered), 2)
         self.assertIn("custom-02", rendered[0]["task_description"])
         self.assertIn("10.0.1.2:9000", rendered[0]["task_description"])
+        self.assertIn("CustomSvc", rendered[0]["context"])
+
+    def test_benchmark_service_probe_profile_can_define_evidence_driven_handoff(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "benchmark-profiles.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "service_probe_profiles": [
+                            {
+                                "fingerprint": "customsvc",
+                                "match_any": ["customsvc banner"],
+                                "handoff_context": "## CustomSvc\nUse observed RPC methods only.",
+                                "evidence_focus": ["RPC metadata", "export endpoint"],
+                                "avoid_focus": ["fixed exploit path"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.pipeline._runtime_context["benchmark_profiles_path"] = str(profile_path)
+
+            rendered = self.pipeline._benchmark_render_service_handoff_subtasks(
+                current="custom-03",
+                addr_text="10.0.1.2:9000",
+                context="state context",
+                fingerprint="customsvc",
+            )
+
+        self.assertEqual(len(rendered), 3)
+        self.assertIn("custom-03", rendered[0]["task_description"])
+        self.assertIn("RPC metadata", rendered[0]["task_description"])
+        self.assertIn("fixed exploit path", rendered[0]["task_description"])
         self.assertIn("CustomSvc", rendered[0]["context"])
 
     def test_benchmark_example_profile_is_loadable_and_drives_generic_handoff(self):
@@ -4572,8 +4608,9 @@ class SubtaskSchedulerTestCase(unittest.TestCase):
 
         self.assertEqual(len(handoff), 3)
         self.assertIn("Dify/Next.js 指纹", handoff[0]["task_description"])
-        self.assertIn("Benchmark dify exploit step 2", handoff[1]["task_description"])
-        self.assertIn("禁止继续泛化目录枚举", handoff[1]["task_description"])
+        self.assertIn("Benchmark handoff step 2", handoff[1]["task_description"])
+        self.assertIn("Dify public/console API", handoff[1]["task_description"])
+        self.assertIn("泛化目录枚举", handoff[0]["task_description"])
         self.assertIn("127.0.0.1:5001", handoff[1]["context"])
 
     def test_benchmark_dify_handoff_step1_runs_deterministic_probe(self):
