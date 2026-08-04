@@ -126,7 +126,7 @@ class FeishuTraceCollector:
         event_type: str,
         payload: Mapping[str, object],
     ) -> list[FeishuTraceStep]:
-        """把四柱管线事件转换成飞书进度步骤。"""
+        """把管线事件（四柱/原语工作流）转换成飞书进度步骤。"""
         event_name = event_type.removeprefix("pipeline.")
         detail = str(payload.get("detail", "")).strip()
         raw_metadata = payload.get("metadata", {})
@@ -136,8 +136,8 @@ class FeishuTraceCollector:
             return [
                 FeishuTraceStep(
                     kind="pipeline_start",
-                    title="启动四柱 Agent 管线",
-                    detail="- 阶段：`分析为底 → 扩展为路 → 迁跃为辅 → 反思为主`",
+                    title="启动 Agent 管线",
+                    detail="- 阶段：`原语解析 → 攻击面扩散 → 链跃迁 → 链裁决` 或 `分析→扩散→迁跃→反思`",
                 )
             ]
 
@@ -145,7 +145,7 @@ class FeishuTraceCollector:
             return [
                 FeishuTraceStep(
                     kind="pipeline_done",
-                    title="四柱管线执行完成",
+                    title="Agent 管线执行完成",
                     detail="",
                 )
             ]
@@ -154,7 +154,7 @@ class FeishuTraceCollector:
             return [
                 FeishuTraceStep(
                     kind="pipeline_error",
-                    title="四柱管线中止",
+                    title="Agent 管线中止",
                     detail=f"- 原因：{cls._truncate_text(detail, max_chars=240)}",
                 )
             ]

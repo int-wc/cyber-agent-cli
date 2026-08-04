@@ -1,4 +1,4 @@
-"""多 Agent 编排相关逻辑：复杂度检测与四柱管线执行。"""
+"""多 Agent 编排相关逻辑：复杂度检测与四柱/原语管线执行。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,44 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..agent.runner import AgentRunner
+
+
+# ── 管线选择 ──
+# runtime_context 可用键：pipeline_mode = "primitive" | "four_pillar" | "auto"
+PIPELINE_MODE_KEY = "pipeline_mode"
+
+# SRC/渗透/挖洞类任务关键词 → 自动走原语工作流管线
+_PRIMITIVE_WORKFLOW_KEYWORDS = (
+    "SRC", "挖洞", "渗透", "漏洞挖掘", "渗透测试", "越权", "SSRF", "RCE",
+    "IDOR", "未授权", "business_attr", "业务原语", "原语", "原语链",
+    "攻击面", "API端点", "隐藏API", "路径遍历", "任意文件读取", "JWT",
+    "鉴权绕过", "认证绕过", "webshell", "反序列化", "SSTI", "token签发",
+    "测试端点", "漏洞复现", "POC", "exp", "猎洞", "资产分析",
+)
+
+
+def _detect_primitive_workflow(user_input: str) -> bool:
+    """基于任务语义判断是否需要走原语工作流管线。
+
+    当任务涉及漏洞挖掘/渗透/原语判定/攻击面分析时，使用 workflow 的
+    业务原语解析 + 原语链利用管线；否则退回通用四柱管线。
+    """
+    text = user_input.strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    for kw in _PRIMITIVE_WORKFLOW_KEYWORDS:
+        if kw.lower() in lowered:
+            return True
+    return False
+
+
+def _select_pipeline_mode(runtime_context: dict[str, object], user_input: str) -> str:
+    """解析管线模式：显式配置优先，其次自动判定。"""
+    configured = str(runtime_context.get(PIPELINE_MODE_KEY, "auto")).strip().lower()
+    if configured in {"primitive", "four_pillar"}:
+        return configured
+    return "primitive" if _detect_primitive_workflow(user_input) else "four_pillar"
 
 
 def _detect_task_complexity(user_input: str) -> bool:
@@ -76,27 +114,42 @@ def _run_multi_agent_turn(
     runtime_context: dict[str, object],
     event_handler: Callable[[str, object], None] | None = None,
 ) -> None:
-    """四柱管线：分析→扩散→迁跃→反思→执行→审计→反思闭环。
+    """管线执行：原语工作流（业务原语解析 + 原语链利用）或四柱管线。
 
-    所有 10 个角色各司其职：
-    - 四柱核心：ANALYST(底) → DIFFUSER(路) → JUMPER(辅) → REFLECTOR(主)
-    - 执行服务：DECISION_MAKER → THINKER/用户 → RUNNER/READER/BUILDER → CHECKER → REFLECTOR(闭环)
+    - 原语工作流：ANALYST→原语解析、DIFFUSER→攻击面扩散、JUMPER→链跃迁、
+      REFLECTOR→链裁决，再进入链执行闭环。
+    - 四柱管线：分析→扩散→迁跃→反思→执行→审计→反思闭环。
+    - 选择逻辑：runtime_context["pipeline_mode"] 显式指定，或按任务语义自动判定。
     """
-    from ..agent.pipeline import FourPillarPipeline
+    mode = _select_pipeline_mode(runtime_context, user_input)
+    if mode == "primitive":
+        from ..agent.primitive_pipeline import PrimitiveWorkflowPipeline
+        pipeline_cls = PrimitiveWorkflowPipeline
+        banner = "🧬 正在启动原语工作流管线（业务原语解析 → 原语链利用）..."
+    else:
+        from ..agent.pipeline import FourPillarPipeline
+        pipeline_cls = FourPillarPipeline
+        banner = "🚀 正在启动四柱 Agent 管线..."
+
     from .app import ensure_runtime_capabilities, renderer
 
     ensure_runtime_capabilities(runtime_context, runner)
 
     renderer.print_turn_start()
     renderer.console.print()
-    renderer.console.print("[bold cyan]🚀 正在启动四柱 Agent 管线...[/]")
-    renderer.console.print(
-        "[dim]分析为底 → 扩展为路 → 迁跃为辅 → 反思为主[/]"
-    )
+    renderer.console.print(f"[bold cyan]{banner}[/]")
+    if mode == "primitive":
+        renderer.console.print(
+            "[dim]原语解析 → 攻击面扩散 → 链跃迁 → 链裁决[/]"
+        )
+    else:
+        renderer.console.print(
+            "[dim]分析为底 → 扩展为路 → 迁跃为辅 → 反思为主[/]"
+        )
 
     auto_decision = bool(runtime_context.get("auto_decision", False))
 
-    pipeline = FourPillarPipeline(
+    pipeline = pipeline_cls(
         runner=runner,
         runtime_context=runtime_context,
         renderer=renderer,

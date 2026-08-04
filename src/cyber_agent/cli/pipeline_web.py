@@ -1,4 +1,4 @@
-"""四柱管线 Web 仪表盘：FastAPI + SSE 实时可视化。
+"""Agent 管线 Web 仪表盘：FastAPI + SSE 实时可视化。
 
 提供 REST API 和 SSE 实时事件推送，前端用嵌入式单页 HTML
 以「机器人领任务→思考→接取→传递」的生动形象展示 10 个角色的
@@ -133,7 +133,7 @@ def clear_sse_clients() -> None:
 # ═══════════════════════════════════════════════════════════════
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="四柱管线仪表盘", version="0.1.0")
+    app = FastAPI(title="Agent 管线仪表盘", version="0.1.0")
 
     app.add_middleware(
         CORSMiddleware,
@@ -270,7 +270,7 @@ def run_pipeline_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> N
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind((host, 0))
             port = s.getsockname()[1]
-    print(f"🌐 四柱管线仪表盘 → http://{host}:{port}")
+    print(f"🌐 Agent 管线仪表盘 → http://{host}:{port}")
     print(f"   SSE 实时事件 → http://{host}:{port}/api/events")
     print(f"   REST API     → http://{host}:{port}/api/health")
     print(f"   轨迹目录     → {PIPELINE_TRACE_DIR}")
@@ -664,7 +664,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   <div class="header-left">
     <div class="header-logo">🤖</div>
     <div>
-      <h1><span>四柱</span><span>管线</span><span> · Agent Flow</span></h1>
+      <h1><span>Agent</span><span>管线</span><span> · Flow</span></h1>
       <div class="subtitle">智能体任务分配 · 领取 → 思考 → 接取 → 传递 · 全流程可视化</div>
     </div>
   </div>
@@ -696,8 +696,8 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   <!-- ▸ Phase 1 -->
   <div class="section-head">
     <span class="badge p1">Phase 1</span>
-    <h2>🧠 四柱思考</h2>
-    <span class="hint">纯 LLM 推演 · 按序传递上下文</span>
+    <h2>🧠 思考阶段</h2>
+    <span class="hint">四柱 / 原语解析 · 按序传递上下文</span>
     <span class="line"></span>
   </div>
   <div class="pipeline-track" id="trackP1"></div>
@@ -705,7 +705,7 @@ HTML_DASHBOARD = r"""<!DOCTYPE html>
   <!-- 过渡 -->
   <div style="text-align:center;margin:4px 0 10px;">
     <span style="font-size:20px;">⬇</span>
-    <div style="font-size:10px;color:var(--text-dim);">四柱思考完成 → 进入执行循环</div>
+    <div style="font-size:10px;color:var(--text-dim);">思考阶段完成 → 进入执行循环</div>
   </div>
 
   <!-- ▸ Phase 2 -->

@@ -478,7 +478,11 @@ def ensure_runtime_capabilities(
         )
 
 
-from .app_multi_agent import _detect_task_complexity, _run_multi_agent_turn  # noqa: E402
+from .app_multi_agent import (  # noqa: E402
+    PIPELINE_MODE_KEY,
+    _detect_task_complexity,
+    _run_multi_agent_turn,
+)
 
 
 def create_runner(runtime_context: dict[str, object]) -> AgentRunner:
@@ -1951,6 +1955,12 @@ def hub_serve(
         "--multi-agent",
         help="Hub 多 Agent 编排策略，可选 off、auto、on；默认 off 以保持唯一 runner。",
     ),
+    pipeline_mode: str = typer.Option(
+        "auto",
+        "--pipeline-mode",
+        help="多 Agent 管线模式，可选 auto、primitive、four_pillar；"
+        "primitive=原语工作流(原语解析+链利用)，four_pillar=四柱管线，auto=按任务语义判定。",
+    ),
     subtask_concurrency: str = typer.Option(
         "auto",
         "--subtask-concurrency",
@@ -2020,6 +2030,10 @@ def hub_serve(
     if normalized_benchmark_profile not in {"off", "auto", "aggressive"}:
         renderer.print_error("--benchmark-profile 仅支持 off、auto、aggressive。")
         raise typer.Exit(code=1)
+    normalized_pipeline_mode = pipeline_mode.strip().lower()
+    if normalized_pipeline_mode not in {"auto", "primitive", "four_pillar"}:
+        renderer.print_error("--pipeline-mode 仅支持 auto、primitive、four_pillar。")
+        raise typer.Exit(code=1)
     if benchmark_target_score < 0:
         renderer.print_error("--benchmark-target-score 必须大于等于 0。")
         raise typer.Exit(code=1)
@@ -2028,6 +2042,7 @@ def hub_serve(
         "auto": "auto",
         "on": True,
     }[normalized_multi_agent]
+    runtime_context[PIPELINE_MODE_KEY] = normalized_pipeline_mode
     runtime_context["subtask_concurrency"] = normalized_subtask_concurrency
     runtime_context["max_subagents"] = max_subagents
     runtime_context["execution_profile"] = normalized_execution_profile

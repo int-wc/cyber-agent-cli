@@ -16,6 +16,10 @@
 - 支持在授权模式下注册外部工具，并限制为显式声明的绝对路径。
 - 支持工作目录级本地配置文件 `.cyber-agent-cli.json` 持久化允许访问目录。
 - 提供 `/help`、`/tools`、`/status`、`/mode`、`/approval` 等交互命令。
+- 支持**原语工作流管线**：继承四柱骨架，把思考阶段替换为"业务原语解析 + 攻击面扩散 +
+  原语链跃迁 + 链裁决"，用 workflow 的原语链利用驱动执行闭环。详见
+  [docs/primitive-workflow-pipeline.md](docs/primitive-workflow-pipeline.md)，可用
+  `--pipeline-mode auto|primitive|four_pillar` 选择。
 
 ## 适用场景
 

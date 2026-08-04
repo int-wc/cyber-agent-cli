@@ -28,3 +28,6 @@ desktop/package-lock.json
 # .cyber/ 项目数据目录（类似 .claude/）
 .cyber/
 !.cyber/settings.json
+
+# 单轮挖洞驱动脚本的运行时日志
+scripts/logs/

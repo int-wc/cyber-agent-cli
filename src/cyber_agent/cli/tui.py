@@ -797,18 +797,27 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.call_from_thread(self._finish_request)
 
         def _run_multi_agent_turn(self, user_input: str) -> None:
-            """使用四柱管线（FourPillarPipeline）替代旧的多 Agent 编排器。"""
+            """运行 Agent 管线：原语工作流（原语解析+链利用）或四柱管线。"""
             import re as _re
-            from ..agent.pipeline import FourPillarPipeline
+            from .app_multi_agent import _select_pipeline_mode
             from .app import ensure_runtime_capabilities
             from .render import CliRenderer
             from rich.console import Console
+
+            mode = _select_pipeline_mode(self.runtime_context, user_input)
+            if mode == "primitive":
+                from ..agent.primitive_pipeline import PrimitiveWorkflowPipeline
+                pipeline_cls = PrimitiveWorkflowPipeline
+            else:
+                from ..agent.pipeline import FourPillarPipeline
+                pipeline_cls = FourPillarPipeline
 
             ensure_runtime_capabilities(self.runtime_context, self.runner)
 
             self.call_from_thread(
                 self._set_assistant_content,
-                "🚀 正在启动四柱 Agent 管线...",
+                "🧬 正在启动原语工作流管线..." if mode == "primitive"
+                else "🚀 正在启动四柱 Agent 管线...",
             )
 
             auto_decision = bool(self.runtime_context.get("auto_decision", False))
@@ -870,7 +879,7 @@ if TEXTUAL_IMPORT_ERROR is None:
                 self.call_from_thread(self._update_token_status)
             tui_renderer.add_token_usage = _tui_add_token_usage  # type: ignore[method-assign]
 
-            pipeline = FourPillarPipeline(
+            pipeline = pipeline_cls(
                 runner=self.runner,
                 runtime_context=self.runtime_context,
                 renderer=tui_renderer,
@@ -881,7 +890,7 @@ if TEXTUAL_IMPORT_ERROR is None:
             except Exception as exc:
                 self.call_from_thread(
                     self._replace_assistant_with_error,
-                    f"四柱管线执行失败：{exc}",
+                    f"Agent 管线执行失败：{exc}",
                 )
                 self.call_from_thread(self._finish_request)
 
