@@ -42,10 +42,18 @@ def _proxy_reachable(proxy_url: str | None, timeout: float = 3.0) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="原语工作流单轮挖洞")
-    ap.add_argument("task", help="挖洞任务描述（含厂商与目标）")
+    ap.add_argument("task", nargs="?", default="", help="挖洞任务描述（含厂商与目标）")
+    ap.add_argument("--task-file", help="从文件读取任务描述（避免 shell 转义问题）")
     ap.add_argument("--max-iterations", type=int, default=2, help="执行闭环最大轮数，默认 2")
     ap.add_argument("--no-save", action="store_true", help="不保存日志，直接打印")
     args = ap.parse_args()
+
+    if args.task_file:
+        task = Path(args.task_file).read_text(encoding="utf-8").strip()
+    else:
+        task = args.task
+    if not task:
+        ap.error("必须提供任务描述（task 或 --task-file）")
 
     from cyber_agent.agent.mode import AgentMode
     from cyber_agent.agent.approval import ApprovalPolicy
@@ -87,16 +95,16 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = logs_dir / f"primitive_hunt_{ts}.log"
 
-    print(f"🧬 原语工作流挖洞开始: {args.task}")
+    print(f"🧬 原语工作流挖洞开始: {task[:120]}...")
     print(f"   max_iterations={args.max_iterations}, 日志={log_file}")
     try:
-        _run_multi_agent_turn(args.task, runner, runtime_context)
+        _run_multi_agent_turn(task, runner, runtime_context)
     except KeyboardInterrupt:
         print("\n⏹ 用户中断")
     finally:
         if not args.no_save:
             log_file.write_text(
-                f"# 任务: {args.task}\n\n",
+                f"# 任务: {task}\n\n",
                 encoding="utf-8",
             )
     print(f"\n✅ 完成。日志: {log_file}")
