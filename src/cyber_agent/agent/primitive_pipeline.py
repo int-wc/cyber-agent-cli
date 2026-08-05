@@ -124,10 +124,10 @@ PRIMITIVE_ROLE_PROMPTS: dict[AgentRole, str] = {
 
 你会收到：链执行计划（含候选链的 exploitation_plan）与攻击面扩散的 test_vectors。
 你的职责：
-- 把每条 execute 链分解为 2-6 个**含具体 curl 命令**的子任务（必须写明目标 URL、请求头/参数、预期观察点）
-- 复用攻击面扩散给出的 test_vectors；不足的自行补充具体 curl 命令
+- 把每条 execute 链分解为**最多 4 个**子任务（高优先级链优先），每个子任务**一句话**，只含一条 curl 命令 + 观察点
+- 严格避免长文本：若一个子任务描述超 200 字符就拆成更简单的命令或砍掉次要向量
 - 红线：只读验证优先，越权尝试总计≤5组，写原语只记录不验证，禁止破坏性利用，禁止深入内网
-- 每个子任务：{"role": "runner", "task_description": "明确到可直接执行的curl命令+观察什么"}
+- 每个子任务：{"role": "runner", "task_description": "一句 curl 命令+观察什么"}
 
 输出必须是 JSON：
 {"reasoning": "分解思路", "subtasks": [
@@ -219,6 +219,37 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         if isinstance(items, list):
             return [it for it in items if isinstance(it, dict)]
         return []
+
+    @staticmethod
+    def _extract_subtasks(plan_json: str) -> list[dict[str, Any]]:
+        """从决策者 JSON 输出中提取子任务（容错模型长输出截断）。
+
+        模型一次输出较多 curl 子任务时常触发输出截断，导致 JSON 数组不完整、
+        _parse_json 整体失败。本方法优先完整解析，失败则用正则逐个提取
+        完整成对的 {"role":..,"task_description":..} 对象，最大程度保真。
+        """
+        import re as _re
+
+        data = PrimitiveWorkflowPipeline._parse_json(plan_json)
+        raw = data.get("subtasks", [])
+        if raw and isinstance(raw, list):
+            return [t for t in raw if isinstance(t, dict)]
+
+        out: list[dict[str, Any]] = []
+        # 宽松匹配每个子任务对象（容忍截断、无闭合括号、字段顺序任意）
+        for m in _re.finditer(
+            r'\{\s*"role"\s*:\s*"([^"]*)"\s*,\s*"task_description"\s*:\s*"'
+            r'((?:[^"\\]|\\.)*)"',
+            plan_json,
+        ):
+            desc = m.group(2).encode().decode("unicode_escape", errors="ignore")
+            out.append({"role": m.group(1), "task_description": desc})
+        if out:
+            return out
+        # 最后兜底：匹配 {"role":"x","task_description":"y"} 反序或通用结构
+        for m in _re.finditer(r'"task_description"\s*:\s*"((?:[^"\\]|\\.)*)"', plan_json):
+            out.append({"role": "runner", "task_description": m.group(1)})
+        return out
 
     # ═══ 主流程：原语思考 → 链执行闭环 → 聚合 ═══
     def _run_phases(self, user_input: str, auto_decision: bool) -> None:
@@ -368,19 +399,21 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
                 AgentRole.DECISION_MAKER, user_input,
                 context=f"## 链执行计划\n{chain_plan_hint}\n\n{iter_context}",
                 extra_instruction=(
-                    "请把链验证/利用分解为可直接执行的工具子任务，每个子任务围绕一条原语或一段链。"
+                    "请把链验证/利用分解为可直接执行的工具子任务（最多4个，每个一句话）。"
                     "输出必须是 JSON："
                     '{"reasoning": "...", "subtasks": ['
                     '{"role": "runner", "task_description": "..."}]}'
                 ),
+                timeout=240,
             )
             self._record_role_progress(
                 "decision_maker", "决策者", "done",
                 detail=plan_json[:500], phase="execution",
             )
             plan = self._parse_json(plan_json)
-            raw_subtasks = plan.get("subtasks", [])
             reasoning = plan.get("reasoning", "")
+            # 容错提取子任务：模型长输出截断时也能恢复完整子任务（_extract_subtasks）
+            raw_subtasks = self._extract_subtasks(plan_json)
             # 注意：继承的 _auto_select/_user_select 读 task_description 字段，
             # 不能改名成 desc，否则思考者看到空壳子任务
             subtasks = [
@@ -425,6 +458,11 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
                     )
                 except TimeoutError as exc:
                     result = f"❌ 失败: {exc}"
+                except Exception as exc:
+                    # 子任务执行异常（如模型流式瞬断）不应中断整条管线
+                    from ..logging import log_error
+                    log_error("pipeline", f"子任务执行异常：{exc}")
+                    result = f"❌ 失败: 子任务执行异常 {exc}"
                 round_results.append(f"## {task_desc[:200]}\n{result}")
             all_results.append(round_results)
 

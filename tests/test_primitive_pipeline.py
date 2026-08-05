@@ -158,6 +158,30 @@ class ParseHelpersTestCase(unittest.TestCase):
     def test_extract_json_list_missing_key(self) -> None:
         self.assertEqual(PrimitiveWorkflowPipeline._extract_json_list("{}", "nope"), [])
 
+    def test_extract_subtasks_from_truncated_json(self) -> None:
+        """回归：模型长输出截断时，_extract_subtasks 仍能恢复完整子任务。
+
+        复现真实场景：决策者一次输出多个带 curl 的子任务，末尾 JSON 数组被截断，
+        _parse_json 整体失败返回 {}，旧逻辑误判"未产出子任务"。
+        """
+        truncated = (
+            '{"reasoning":"分解为2个子任务","subtasks":['
+            '{"role":"runner","task_description":"curl -s https://a/b"},'
+            '{"role":"runner","task_description":"curl -s https://a/c"}'
+            # 末尾被截断，无 ] 闭合
+        )
+        raw = PrimitiveWorkflowPipeline._extract_subtasks(truncated)
+        self.assertEqual(len(raw), 2)
+        self.assertEqual(raw[0]["task_description"], "curl -s https://a/b")
+        self.assertEqual(raw[1]["task_description"], "curl -s https://a/c")
+
+    def test_extract_subtasks_full_json(self) -> None:
+        raw = PrimitiveWorkflowPipeline._extract_subtasks(
+            '{"subtasks":[{"role":"runner","task_description":"测A"}]}'
+        )
+        self.assertEqual(len(raw), 1)
+        self.assertEqual(raw[0]["task_description"], "测A")
+
 
 # ═══ 全流程（fake LLM 驱动）═══
 
