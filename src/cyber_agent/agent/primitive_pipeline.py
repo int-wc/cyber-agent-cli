@@ -166,7 +166,11 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         *,
         context: str = "",
         extra_instruction: str = "",
+        retries: int = 2,
     ) -> str:
+        """调用单个角色 LLM。对瞬态网关错误（500/流式失败）自动重试。"""
+        import time as _time
+
         label = get_role_label(role)
         system_prompt = PRIMITIVE_ROLE_PROMPTS.get(role, get_role_prompt(role))
         system_context = self._build_system_context()
@@ -178,17 +182,34 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         if extra_instruction:
             user_content += f"\n\n{extra_instruction}"
 
-        try:
-            response = self._get_llm().invoke([
-                SystemMessage(content=full_system),
-                HumanMessage(content=user_content),
-            ])
-            self._track_llm_usage(response)
-            return self._extract_text(response)
-        except Exception as exc:
-            from ..logging import log_error
-            log_error("pipeline", f"{label} 调用失败：{exc}")
-            return f"[{label} 调用失败: {exc}]"
+        last_exc: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                response = self._get_llm().invoke([
+                    SystemMessage(content=full_system),
+                    HumanMessage(content=user_content),
+                ])
+                self._track_llm_usage(response)
+                return self._extract_text(response)
+            except Exception as exc:
+                last_exc = exc
+                err = str(exc)
+                # 仅对瞬态错误重试：网关 5xx / 流式无 chunk / 连接类
+                transient = (
+                    "500" in err or "5 " in err and "Internal server" in err
+                    or "No generation chunks" in err
+                    or "Connection" in err or "Read timed out" in err
+                    or "429" in err or "rate limit" in err.lower()
+                )
+                if attempt >= retries or not transient:
+                    break
+                from ..logging import log_warning
+                log_warning("pipeline", f"{label} 调用瞬态失败({attempt+1}/{retries})：{err}，重试...")
+                _time.sleep(3 + attempt * 3)
+
+        from ..logging import log_error
+        log_error("pipeline", f"{label} 调用失败：{last_exc}")
+        return f"[{label} 调用失败: {last_exc}]"
 
     # ═══ 工具：原语阶段输出解析 ═══
     @staticmethod
