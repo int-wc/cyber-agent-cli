@@ -480,6 +480,7 @@ def ensure_runtime_capabilities(
 
 from .app_multi_agent import (  # noqa: E402
     PIPELINE_MODE_KEY,
+    _detect_primitive_workflow,
     _detect_task_complexity,
     _run_multi_agent_turn,
 )
@@ -1302,7 +1303,12 @@ def run_chat_loop(
             # 判断是否使用多 Agent 编排
             multi_setting = runtime_context.get("multi_agent_enabled", "auto")
             if multi_setting is True or (
-                multi_setting == "auto" and _detect_task_complexity(user_input)
+                multi_setting == "auto"
+                and (
+                    _detect_task_complexity(user_input)
+                    # SRC/漏洞挖掘类任务默认激活多 Agent 原语管线
+                    or _detect_primitive_workflow(user_input)
+                )
             ):
                 _run_multi_agent_turn(user_input, runner, runtime_context)
             elif sys.stdin.isatty() and sys.stdout.isatty():

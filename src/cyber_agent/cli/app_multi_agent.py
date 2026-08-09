@@ -56,6 +56,7 @@ def _detect_task_complexity(user_input: str) -> bool:
     - 并列连接词 → 多项独立操作
     - 序号/步骤标记 → 多阶段任务
     - 高信息密度 → 复杂需求
+    - 指令 + 明确目标 → 单句但高密度的任务指令
     """
     text = user_input.strip()
 
@@ -104,6 +105,17 @@ def _detect_task_complexity(user_input: str) -> bool:
     comma_clauses = len(re.findall(r"[，,]", text))
     if len(text) > 60 and comma_clauses >= 3:
         return True
+
+    # 指令 + 明确目标：单句但高密度的任务指令（如"对 X 做审计/挖掘/分析"）
+    directive_patterns = [
+        r"对[^\n]{1,60}?(做|进行|执行|实施|发起)",
+        r"针对[^\n]{1,60}?(做|进行|执行|实施)",
+        r"(?:请|帮我)\S{0,15}(分析|审计|检测|测试|扫描|检查|评估|排查|挖掘|审查)\S{0,8}",
+        r"(审计|检测|测试|扫描|评估|排查|挖掘|分析)一下\S{0,30}",
+    ]
+    for pat in directive_patterns:
+        if re.search(pat, text):
+            return True
 
     return False
 
