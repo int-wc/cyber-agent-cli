@@ -470,11 +470,9 @@ class Settings(BaseSettings):
             "temperature": 0.7,
             "extra_body": extra_body,
         }
-        resolved_proxy_url = (
-            self.require_proxy_url(resolved_service_name)
-            if resolved_service_name == "opencode"
-            else self.resolve_proxy_url(resolved_service_name)
-        )
+        # 代理可选：与当前 claude code 一致，未配置代理时直连；
+        # 已配置且可达时走代理，不再强制要求 opencode 必须配置代理。
+        resolved_proxy_url = self.resolve_proxy_url(resolved_service_name)
         if resolved_proxy_url:
             kwargs["openai_proxy"] = resolved_proxy_url
         default_headers = self.get_default_headers(
@@ -551,7 +549,7 @@ class Settings(BaseSettings):
                     "temperature": 0.7,
                     "extra_body": {"provider": "opencode"},
                 }
-                candidate["openai_proxy"] = self.require_proxy_url("opencode")
+                candidate["openai_proxy"] = self.resolve_proxy_url("opencode")
                 fallback_kwargs.append(
                     {item_key: value for item_key, value in candidate.items() if value is not None}
                 )
@@ -588,7 +586,7 @@ class Settings(BaseSettings):
                     "temperature": 0.7,
                     "extra_body": {"provider": "opencode"},
                 }
-                candidate["openai_proxy"] = self.require_proxy_url("opencode")
+                candidate["openai_proxy"] = self.resolve_proxy_url("opencode")
                 fallback_kwargs.append(
                     {item_key: value for item_key, value in candidate.items() if value is not None}
                 )

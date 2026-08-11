@@ -25,21 +25,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
-def _proxy_reachable(proxy_url: str | None, timeout: float = 3.0) -> bool:
-    """检查代理端口是否可达，不可达则返回 False（用于决定是否切直连）。"""
-    if not proxy_url:
-        return False
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(proxy_url).hostname
-        port = urlparse(proxy_url).port or 7892
-        import socket
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (OSError, ValueError, TypeError):
-        return False
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="原语工作流单轮挖洞")
     ap.add_argument("task", nargs="?", default="", help="挖洞任务描述（含厂商与目标）")
@@ -70,11 +55,9 @@ def main() -> int:
         max(1, min(args.max_iterations, 20)),
     )
 
-    # 代理不可达时自动走直连（opencode 强制 require_proxy_url，需绕过）
-    # 例如本地代理 192.168.31.47:7892 未启动时，直连 opencode.ai 仍可用
-    if not _proxy_reachable(settings.resolve_proxy_url("opencode")):
-        object.__setattr__(settings, "require_proxy_url", lambda service_name=None: None)
-        print("  ⚠️ 配置的代理不可达，已切换到直连模式（openai_proxy=None）")
+    # 代理可选（与当前 claude code 一致，默认直连）；
+    # 旧版 require_proxy_url 强制 opencode 必须配代理，现已在 config 中放宽为 resolve_proxy_url。
+    # 如需走代理，在 .env 中配置 OPENCODE_PROXY_URL / MODEL_PROXY_URL 即可，无需在此绕行。
 
     runtime_context = build_runtime_context(
         mode=AgentMode.AUTHORIZED,

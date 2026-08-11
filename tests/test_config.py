@@ -223,9 +223,9 @@ class SettingsTestCase(unittest.TestCase):
 
         self.assertEqual(kwargs["openai_proxy"], "socks5://proxy.example:7892")
 
-    def test_opencode_requires_proxy(self) -> None:
+    def test_opencode_can_direct_connect_without_proxy(self) -> None:
         """
-        测试：OpenCode 必须显式配置代理，避免运行时静默直连。
+        测试：OpenCode 未配置代理时可直连（与当前 claude code 一致），不再强制要求代理。
         """
         with temporary_config_env(
             GATEWAY_DEFAULT_SERVICE="opencode",
@@ -234,8 +234,9 @@ class SettingsTestCase(unittest.TestCase):
             config_module = import_config_module()
             settings = config_module.Settings(_env_file=None)
 
-        with self.assertRaisesRegex(ValueError, "必须配置代理"):
-            settings.get_chat_openai_kwargs(settings.get_service())
+        kwargs = settings.get_chat_openai_kwargs(settings.get_service())
+        self.assertNotIn("openai_proxy", kwargs)
+        self.assertEqual(kwargs["api_key"], "opencode-key")
 
     def test_opencode_proxy_does_not_leak_to_other_services(self) -> None:
         """
