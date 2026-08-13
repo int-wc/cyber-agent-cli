@@ -341,6 +341,25 @@ class ExpandedLibraryTestCase(unittest.TestCase):
         self.assertGreater(len(matches), 0)
         self.assertEqual(matches[0].surface.surface_id, "sf_component_admin")
 
+    def test_component_surface_matches_extended_signals(self) -> None:
+        """批次D：扩充的组件信号（hadoop/sangfor/ruoyi 等）能命中组件攻击面。"""
+        for signal in ("hadoop", "sangfor", "webvpn", "ruoyi", "kkfileview", "casdoor"):
+            ep = parse_line(
+                f"- /{signal}/admin GET business_attr=query_data attr_target=db"
+            )
+            assert ep is not None
+            matches = match_surfaces(ep, load_surfaces())
+            ids = {m.surface.surface_id for m in matches}
+            self.assertIn("sf_component_admin", ids, f"{signal} 应命中组件控制面")
+
+    def test_error_enum_chain_loaded(self) -> None:
+        """批次D：错误码枚举→越权链应可加载并成为候选。"""
+        ids = {c.chain_id for c in load_chains()}
+        self.assertIn("ch_error_enum_to_idor", ids)
+        eps = parse_text("- /api/user/info GET business_attr=query_data attr_target=db")
+        cands = link(eps, load_chains())
+        self.assertIn("ch_error_enum_to_idor", {c.chain_id for c in cands})
+
     def test_component_chain_candidate_on_admin_endpoint(self) -> None:
         """组件控制面端点（query_data）应让组件控制面链成为候选。"""
         eps = parse_text(

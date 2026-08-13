@@ -86,7 +86,7 @@
     {
       "id": "sf_component_admin",
       "name": "组件控制面未授权",
-      "signals": ["apisix", "jumpserver", "keycloak", "actuator", "swagger", "api-docs", "openapi", "admin/routes", "admin/services", "admin/consumers", "terminal/status", "metrics", "grafana", "nacos", "consul"],
+      "signals": ["apisix", "jumpserver", "keycloak", "actuator", "swagger", "api-docs", "openapi", "admin/routes", "admin/services", "admin/consumers", "terminal/status", "metrics", "grafana", "nacos", "consul", "hadoop", "namenode", "sangfor", "webvpn", "casdoor", "superset", "prefect", "em7", "harbor", "jenkins", "kkfileview", "ruoyi", "若依", "hdfs", "yarn", "zookeeper"],
       "primitives": ["query_data", "modify_state"],
       "targets": ["db"],
       "base_primitives": ["未授权读取组件配置/路由/用户", "组件版本指纹→已知CVE", "未授权改路由/状态→服务接管"],

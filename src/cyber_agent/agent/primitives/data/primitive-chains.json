@@ -98,6 +98,14 @@
       "logic": "SSRF打内部认证服务(云元数据/Keycloak/token服务)或管理接口 → 窃取/篡改token → 认证绕过/内网控制",
       "gain": "SSRF(低危) → 认证绕过/内网接管",
       "instances": []
+    },
+    {
+      "id": "ch_error_enum_to_idor",
+      "name": "错误码差异枚举→越权",
+      "primitives": ["query_data"],
+      "logic": "利用网关/接口错误码差异(如 100012 vs 200)枚举未授权接口 → 对未授权接口换ID/遍历 → 越权读取",
+      "gain": "接口枚举(信息) → IDOR越权读取",
+      "instances": []
     }
   ]
 }
