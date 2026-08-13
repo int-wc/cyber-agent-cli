@@ -22,6 +22,7 @@ from cyber_agent.agent.primitives import (
     match_surfaces,
     parse_line,
     parse_text,
+    promote_chain_candidates,
     record_chain_instance,
     record_surface_instance,
     serialize_endpoints,
@@ -424,6 +425,116 @@ class ExpandedLibraryTestCase(unittest.TestCase):
         by_id = {c["chain_id"]: c for c in report["candidates"]}
         self.assertEqual(by_id["ch_ssrf_to_auth"]["instance_count"], 1)
         self.assertEqual(by_id["ch_auth_bypass_matrix"]["instance_count"], 0)
+
+
+class CandidatePromoteTestCase(unittest.TestCase):
+    """候选链自动提炼入库（--promote 的核心逻辑）。"""
+
+    def setUp(self) -> None:
+        """准备临时链库 + 候选文件，均复制真实数据避免污染。"""
+        import os as _os
+        import tempfile as _tf
+
+        chains_raw = json.loads(
+            Path("src/cyber_agent/agent/primitives/data/primitive-chains.json")
+            .read_text(encoding="utf-8")
+        )
+        fd1, t1 = _tf.mkstemp(suffix=".json", prefix="promote-chains-")
+        _os.close(fd1)
+        self.chains_path = Path(t1)
+        self.chains_path.write_text(json.dumps(chains_raw, ensure_ascii=False), encoding="utf-8")
+        self.addCleanup(lambda: self.chains_path.unlink(missing_ok=True))
+
+        # 空候选文件
+        fd2, t2 = _tf.mkstemp(suffix=".json", prefix="promote-cand-")
+        _os.close(fd2)
+        self.cand_path = Path(t2)
+        self.cand_path.write_text(
+            json.dumps({"version": 1, "candidates": []}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: self.cand_path.unlink(missing_ok=True))
+
+    def _append_candidate(self, chain_id: str, *, seen: int = 1, primitives: list[str] | None = None) -> None:
+        """直接向候选文件写入一条候选（含 seen_count）。"""
+        from cyber_agent.agent.primitives import append_chain_candidate
+        ok = append_chain_candidate(
+            {
+                "id": chain_id,
+                "name": chain_id,
+                "primitives": primitives or [],
+                "logic": "测试链逻辑",
+                "gain": "测试",
+                "instances": [{"target": f"目标{seen}", "endpoint": "/x", "method": "GET", "finding": "发现"}],
+            },
+            path=self.cand_path,
+        )
+        self.assertTrue(ok)
+        # 手动调高 seen_count 模拟多次出现
+        if seen > 1:
+            data = json.loads(self.cand_path.read_text(encoding="utf-8"))
+            for c in data["candidates"]:
+                if c["id"] == chain_id:
+                    c["seen_count"] = seen
+            self.cand_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_promote_high_seen_chain(self) -> None:
+        """频次足够的候选链自动入库，实例随迁。"""
+        self._append_candidate("ch_test_common", seen=3, primitives=["query_data"])
+        promoted, skipped = promote_chain_candidates(
+            chains_path=self.chains_path,
+            candidates_path=self.cand_path,
+            min_seen=2,
+        )
+        self.assertIn("ch_test_common", promoted)
+        # 已入库且实例迁移
+        chains = load_chains(self.chains_path)
+        by_id = {c.chain_id: c for c in chains}
+        self.assertIn("ch_test_common", by_id)
+        self.assertEqual(len(by_id["ch_test_common"].instances), 1)
+        # 候选区已移除
+        remaining = json.loads(self.cand_path.read_text(encoding="utf-8"))["candidates"]
+        self.assertEqual(remaining, [])
+
+    def test_promote_low_seen_kept(self) -> None:
+        """频次不足的候选保留在候选区，不入库。"""
+        self._append_candidate("ch_test_rare", seen=1, primitives=["query_data"])
+        promoted, skipped = promote_chain_candidates(
+            chains_path=self.chains_path,
+            candidates_path=self.cand_path,
+            min_seen=2,
+        )
+        self.assertNotIn("ch_test_rare", promoted)
+        self.assertIn("ch_test_rare", skipped)
+        remaining = json.loads(self.cand_path.read_text(encoding="utf-8"))["candidates"]
+        self.assertEqual(len(remaining), 1)
+
+    def test_promote_skips_missing_primitives(self) -> None:
+        """无原语信息的候选无法自动归类，保留待人工。"""
+        self._append_candidate("ch_test_noprim", seen=3, primitives=[])
+        promoted, skipped = promote_chain_candidates(
+            chains_path=self.chains_path,
+            candidates_path=self.cand_path,
+            min_seen=2,
+        )
+        self.assertNotIn("ch_test_noprim", promoted)
+        self.assertIn("ch_test_noprim", skipped)
+
+    def test_append_candidate_merges_instances(self) -> None:
+        """同 id 候选再次出现时合并实例并累计频次。"""
+        from cyber_agent.agent.primitives import append_chain_candidate
+        append_chain_candidate(
+            {"id": "ch_test_merge", "primitives": [], "instances": [{"target": "A", "endpoint": "/1", "method": "GET"}]},
+            path=self.cand_path,
+        )
+        append_chain_candidate(
+            {"id": "ch_test_merge", "primitives": [], "instances": [{"target": "B", "endpoint": "/2", "method": "GET"}]},
+            path=self.cand_path,
+        )
+        data = json.loads(self.cand_path.read_text(encoding="utf-8"))
+        item = next(c for c in data["candidates"] if c["id"] == "ch_test_merge")
+        self.assertEqual(item["seen_count"], 2)
+        self.assertEqual(len(item["instances"]), 2)
 
 
 if __name__ == "__main__":

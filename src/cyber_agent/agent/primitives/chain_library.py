@@ -243,10 +243,10 @@ def append_chain_candidate(
     new_chain: dict[str, Any],
     path: str | Path | None = None,
 ) -> bool:
-    """把模型自创的链追加到链候选文件（按 id 去重，保留首次来源时间）。
+    """把模型自创的链追加到链候选文件。
 
-    候选链不会自动进入正式链库；由人工或沉淀脚本确认后调用
-    upsert_chain 合并。返回是否追加成功。
+    同 id 候选再次出现时（不同目标的真实运行），合并实例并累计
+    seen_count（promote 提炼的频次依据），而不是丢弃。返回是否追加成功。
     """
     chain_id = str(new_chain.get("id", "")).strip()
     if not chain_id:
@@ -262,20 +262,100 @@ def append_chain_candidate(
         if not isinstance(data, dict):
             data = {}
         candidates = data.setdefault("candidates", [])
-        if any(str(c.get("id", "")) == chain_id for c in candidates):
-            return False
+        new_instances = list(new_chain.get("instances", []) or [])
+        for item in candidates:
+            if str(item.get("id", "")) == chain_id:
+                # 已有候选：合并实例（去重）+ 累计频次
+                existing = item.setdefault("instances", [])
+                existing_keys = {
+                    f"{i.get('target','')}|{i.get('method','')}|{i.get('endpoint','')}"
+                    for i in existing
+                }
+                for inst in new_instances:
+                    key = f"{inst.get('target','')}|{inst.get('method','')}|{inst.get('endpoint','')}"
+                    if key and key not in existing_keys:
+                        existing.append(inst)
+                        existing_keys.add(key)
+                item["seen_count"] = int(item.get("seen_count", 1)) + 1
+                data["updated"] = date.today().isoformat()
+                return _write_chains_file(p, data)
         entry = dict(new_chain)
         entry.setdefault("instances", [])
         entry.setdefault("first_seen", date.today().isoformat())
+        entry["seen_count"] = 1
         candidates.append(entry)
         data["updated"] = date.today().isoformat()
-        try:
-            tmp_path = p.with_suffix(p.suffix + ".tmp")
-            tmp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=1) + "\n",
-                encoding="utf-8",
-            )
-            tmp_path.replace(p)
-            return True
-        except OSError:
-            return False
+        return _write_chains_file(p, data)
+
+
+def promote_chain_candidates(
+    chains_path: str | Path | None = None,
+    candidates_path: str | Path | None = None,
+    *,
+    min_seen: int = 2,
+) -> tuple[list[str], list[str]]:
+    """把出现频次足够的候选链提炼进正式链库，返回 (已入库 id 列表, 跳过 id 列表)。
+
+    候选链在多个目标的真实运行中反复出现（seen_count ≥ min_seen），
+    说明它是可复用的通用链型，自动 upsert 进正式链库；候选链的实例
+    一并迁移（实例是跨目标验证证据）。已存在同 id 的候选跳过。
+
+    - min_seen=2：至少 2 次独立运行出现才提炼，避免单次噪声入库。
+    - 提炼后候选条目从候选文件移除。
+    """
+    cp = Path(candidates_path) if candidates_path else DEFAULT_CHAIN_CANDIDATES_PATH
+    chains_p = Path(chains_path) if chains_path else DEFAULT_CHAINS_PATH
+    promoted: list[str] = []
+    skipped: list[str] = []
+    if not cp.exists():
+        return promoted, skipped
+    try:
+        cand_data = json.loads(cp.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return promoted, skipped
+    if not isinstance(cand_data, dict):
+        return promoted, skipped
+    candidates = cand_data.get("candidates", [])
+    if not candidates:
+        return promoted, skipped
+
+    existing_ids = load_chain_ids(chains_p)
+    remaining: list[dict[str, Any]] = []
+    with _chains_write_lock:
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            chain_id = str(item.get("id", "")).strip()
+            if not chain_id:
+                continue
+            seen = int(item.get("seen_count", 1))
+            if seen < min_seen or chain_id in existing_ids:
+                # 频次不足或已入库：保留在候选区，等待继续积累
+                skipped.append(chain_id)
+                remaining.append(item)
+                continue
+            # 提炼：实例迁移进正式链库（保留 target/endpoint/finding 证据）
+            entry = {
+                "id": chain_id,
+                "name": str(item.get("name", chain_id)),
+                "primitives": [str(p) for p in item.get("primitives", []) if p],
+                "logic": str(item.get("logic", ""))[:500],
+                "gain": str(item.get("gain", "候选链自动提炼"))[:300],
+                "instances": list(item.get("instances", []) or []),
+            }
+            if not entry["primitives"]:
+                # 无原语信息时无法自动归入链库分类，保留候选等待人工
+                skipped.append(chain_id)
+                remaining.append(item)
+                continue
+            added, _ = upsert_chain(entry, chains_p)
+            if added:
+                promoted.append(chain_id)
+            else:
+                skipped.append(chain_id)
+                remaining.append(item)
+        # 写回候选文件：移除已提炼条目
+        cand_data["candidates"] = remaining
+        cand_data["updated"] = date.today().isoformat()
+        _write_chains_file(cp, cand_data)
+    return promoted, skipped

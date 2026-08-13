@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from cyber_agent.agent.primitives import (  # noqa: E402
     DEFAULT_CHAINS_PATH,
     load_chain_ids,
+    promote_chain_candidates,
     record_chain_instance,
 )
 
@@ -197,6 +198,8 @@ def main() -> int:
     ap.add_argument("--traces-dir", default=str(DEFAULT_TRACES_DIR), help="轨迹目录，默认 ~/.cyber-agent-cli-traces")
     ap.add_argument("--dry-run", action="store_true", help="只报告不写入链库")
     ap.add_argument("--chain-id", default="", help="只沉淀指定链 id")
+    ap.add_argument("--promote", action="store_true", help="沉淀后把频次足够的候选链自动提炼入库")
+    ap.add_argument("--min-seen", type=int, default=2, help="候选链提炼的最低出现频次，默认 2")
     args = ap.parse_args()
 
     traces_dir = Path(args.traces_dir).expanduser()
@@ -240,7 +243,7 @@ def main() -> int:
         for s in all_sedimented:
             print(f"   - {s['chain_id']} [{s['priority']}] target={s['target'][:50]}")
     if all_candidates:
-        print("\n🔶 候选链（不在正式链库，模型自创，需人工确认后合并）:")
+        print("\n🔶 候选链（不在正式链库，模型自创）:")
         seen: set[str] = set()
         for c in all_candidates:
             if c["chain_id"] in seen:
@@ -248,7 +251,25 @@ def main() -> int:
             seen.add(c["chain_id"])
             print(f"   - {c['chain_id']} [{c['priority']}] target={c['target'][:50]}")
             print(f"     plan: {c['plan'][:120]}")
-        print("\n   确认后可用 upsert_chain 合并，或编辑 primitive-chains.json 追加。")
+        if not args.promote:
+            print("\n   用 --promote 自动提炼频次足够的候选链入库。")
+
+    # 候选链自动提炼入库（频次足够、有原语信息的通用链型）
+    if args.promote:
+        if args.dry_run:
+            print("\n⚠️ --promote 与 --dry-run 冲突：dry-run 不执行提炼。")
+        else:
+            promoted, skipped = promote_chain_candidates(min_seen=args.min_seen)
+            if promoted:
+                print(f"\n✅ 自动提炼 {len(promoted)} 条候选链入库:")
+                for cid in promoted:
+                    print(f"   - {cid}")
+            if skipped:
+                print(f"\n⏳ 跳过 {len(skipped)} 条候选（频次不足/无原语信息/已存在，保留在候选区）:")
+                for cid in skipped:
+                    print(f"   - {cid}")
+            if not promoted and not skipped:
+                print("\nℹ️ 候选区为空，无可提炼。")
     return 0
 
 

@@ -39,6 +39,7 @@ from .chain_library import (
     load_chain_ids,
     link,
     build_link_report,
+    promote_chain_candidates,
     record_chain_instance,
     upsert_chain,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "load_chain_ids",
     "link",
     "build_link_report",
+    "promote_chain_candidates",
     "record_chain_instance",
     "upsert_chain",
     "DEFAULT_SURFACES_PATH",

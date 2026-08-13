@@ -606,6 +606,7 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
             if chain_id in known_ids:
                 ok = record_chain_instance(chain_id, instance)
             else:
+                # 自创链落候选文件：携带本次实例证据，供 promote 提炼时复用
                 ok = append_chain_candidate(
                     {
                         "id": chain_id,
@@ -614,6 +615,7 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
                         "logic": str(verdict_item.get("escalation", ""))[:300],
                         "gain": "候选链（模型自创，待确认）",
                         "source_plan": str(verdict_item.get("exploitation_plan", ""))[:500],
+                        "instances": [instance],
                     }
                 )
             if ok:

@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -72,7 +74,8 @@ def main() -> int:
 
     runner = create_runner(runtime_context)
 
-    # 日志落盘
+    # 日志落盘：捕获运行输出（管线 console 输出 + 任务头），
+    # 完整结构化轨迹由管线自行写入 ~/.cyber-agent-cli-traces/<sid>.trace.json
     logs_dir = Path(__file__).resolve().parent / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -80,14 +83,21 @@ def main() -> int:
 
     print(f"🧬 原语工作流挖洞开始: {task[:120]}...")
     print(f"   max_iterations={args.max_iterations}, 日志={log_file}")
+    captured = io.StringIO()
     try:
-        _run_multi_agent_turn(task, runner, runtime_context)
+        with contextlib.redirect_stdout(captured):
+            _run_multi_agent_turn(task, runner, runtime_context)
     except KeyboardInterrupt:
         print("\n⏹ 用户中断")
+        captured.write("\n[用户中断]\n")
     finally:
         if not args.no_save:
             log_file.write_text(
-                f"# 任务: {task}\n\n",
+                f"# 任务: {task}\n\n"
+                f"# 运行时间: {datetime.now().isoformat(timespec='seconds')}\n"
+                f"# 完整结构化轨迹: ~/.cyber-agent-cli-traces/<session_id>.trace.json\n"
+                f"{'-' * 60}\n\n"
+                f"{captured.getvalue()}",
                 encoding="utf-8",
             )
     print(f"\n✅ 完成。日志: {log_file}")
