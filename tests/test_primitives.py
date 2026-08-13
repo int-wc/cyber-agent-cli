@@ -297,20 +297,68 @@ class SurfaceWritebackTestCase(unittest.TestCase):
     def test_upsert_new_surface(self) -> None:
         added, sid = upsert_surface(
             {
-                "id": "sf_component_admin",
-                "name": "组件控制面未授权",
-                "signals": ["apisix", "jumpserver", "keycloak", "admin/routes"],
+                "id": "sf_test_fake_component",
+                "name": "测试用组件控制面",
+                "signals": ["testfake"],
                 "primitives": ["query_data"],
                 "targets": ["db"],
-                "base_primitives": ["未授权读取配置", "组件版本指纹"],
-                "risk": "未授权访问统一高危",
+                "base_primitives": ["未授权读取配置"],
+                "risk": "",
             },
             path=self.path,
         )
         self.assertTrue(added)
-        self.assertEqual(sid, "sf_component_admin")
+        self.assertEqual(sid, "sf_test_fake_component")
         surfaces = load_surfaces(self.path)
-        self.assertIn("sf_component_admin", {s.surface_id for s in surfaces})
+        self.assertIn("sf_test_fake_component", {s.surface_id for s in surfaces})
+
+
+class ExpandedLibraryTestCase(unittest.TestCase):
+    """批次C扩充：组件控制面/认证绕过/API文档链与攻击面可加载、可匹配。"""
+
+    def test_new_chains_loaded(self) -> None:
+        ids = {c.chain_id for c in load_chains()}
+        for expect in (
+            "ch_component_admin_unauth",
+            "ch_auth_bypass_matrix",
+            "ch_api_docs_exposure",
+            "ch_ssrf_to_internal_admin",
+        ):
+            self.assertIn(expect, ids)
+
+    def test_new_surfaces_loaded(self) -> None:
+        ids = {s.surface_id for s in load_surfaces()}
+        self.assertIn("sf_component_admin", ids)
+        self.assertIn("sf_auth_bypass", ids)
+
+    def test_component_surface_matches_apisix_signal(self) -> None:
+        """APISIX admin 端点应命中组件控制面攻击面。"""
+        ep = parse_line(
+            "- /apisix/admin/routes GET business_attr=query_data attr_target=db attr_reason=组件控制面风险=未授权"
+        )
+        assert ep is not None
+        matches = match_surfaces(ep, load_surfaces())
+        self.assertGreater(len(matches), 0)
+        self.assertEqual(matches[0].surface.surface_id, "sf_component_admin")
+
+    def test_component_chain_candidate_on_admin_endpoint(self) -> None:
+        """组件控制面端点（query_data）应让组件控制面链成为候选。"""
+        eps = parse_text(
+            "- /apisix/admin/routes GET business_attr=query_data attr_target=db\n"
+            "- /apisix/admin/upstreams PUT business_attr=modify_state attr_target=db"
+        )
+        cands = link(eps, load_chains())
+        ids = {c.chain_id for c in cands}
+        self.assertIn("ch_component_admin_unauth", ids)
+
+    def test_auth_bypass_surface_matches_bearer_signal(self) -> None:
+        ep = parse_line(
+            "- /api/user/info GET business_attr=auth attr_target=user_input attr_reason=需要Bearer鉴权"
+        )
+        assert ep is not None
+        matches = match_surfaces(ep, load_surfaces())
+        ids = {m.surface.surface_id for m in matches}
+        self.assertIn("sf_auth_bypass", ids)
 
 
 if __name__ == "__main__":

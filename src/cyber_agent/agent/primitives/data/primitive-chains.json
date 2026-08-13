@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-08-04",
+  "updated": "2026-08-13",
   "description": "业务原语链库：单个业务原语(能力点)单独可能无法构成有效危害，多个原语通过业务信任串联成可利用链达成有效漏洞。Phase3 联动推理 + Phase4 验证 + 实例积累，跨SRC共享。",
   "chains": [
     {
@@ -65,6 +65,38 @@
       "primitives": ["transfer", "modify_state"],
       "logic": "SSRF打内部管理接口(改配置/任务/状态) → 内网设备/服务控制",
       "gain": "SSRF → 内网状态篡改",
+      "instances": []
+    },
+    {
+      "id": "ch_component_admin_unauth",
+      "name": "组件控制面未授权",
+      "primitives": ["query_data", "modify_state"],
+      "logic": "常见组件控制面(APISIX admin/Jumpserver/Keycloak metrics/actuator/Swagger)未鉴权 → 读取路由/用户/配置或直接改状态",
+      "gain": "未授权读取 → 配置泄露/服务接管",
+      "instances": []
+    },
+    {
+      "id": "ch_auth_bypass_matrix",
+      "name": "认证绕过矩阵",
+      "primitives": ["auth"],
+      "logic": "对受保护接口跑认证绕过矩阵：空Authorization/空自定义头/Bearer null/方法切换/路径变体(//、%2e、%2f) → 绕过认证访问数据",
+      "gain": "认证保护失效 → 未授权数据访问",
+      "instances": []
+    },
+    {
+      "id": "ch_api_docs_exposure",
+      "name": "API文档暴露→未授权接口",
+      "primitives": ["query_data"],
+      "logic": "Swagger/api-docs/OpenAPI 文档泄露 → 枚举未授权接口与参数 → 直接调用敏感数据接口",
+      "gain": "文档泄露(信息) → 未授权数据访问",
+      "instances": []
+    },
+    {
+      "id": "ch_ssrf_to_internal_admin",
+      "name": "SSRF→内部认证/管理面",
+      "primitives": ["transfer", "auth", "modify_state"],
+      "logic": "SSRF打内部认证服务(云元数据/Keycloak/token服务)或管理接口 → 窃取/篡改token → 认证绕过/内网控制",
+      "gain": "SSRF(低危) → 认证绕过/内网接管",
       "instances": []
     }
   ]

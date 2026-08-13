@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-08-04",
+  "updated": "2026-08-13",
   "description": "攻击面模式库：可前匹配、可积累。Phase2 判定端点原语后，按 signals 匹配此处攻击面，将其 base_primitives 注入 Phase3；挖洞后在 instances 追加真实案例。跨SRC共享（同 api_patterns.json）。",
   "surfaces": [
     {
@@ -81,6 +81,26 @@
       "targets": ["db"],
       "base_primitives": ["分页遍历泄露", "无鉴权列表", "越权过滤缺失"],
       "risk": "越权读取证明≤5个，严禁批量",
+      "instances": []
+    },
+    {
+      "id": "sf_component_admin",
+      "name": "组件控制面未授权",
+      "signals": ["apisix", "jumpserver", "keycloak", "actuator", "swagger", "api-docs", "openapi", "admin/routes", "admin/services", "admin/consumers", "terminal/status", "metrics", "grafana", "nacos", "consul"],
+      "primitives": ["query_data", "modify_state"],
+      "targets": ["db"],
+      "base_primitives": ["未授权读取组件配置/路由/用户", "组件版本指纹→已知CVE", "未授权改路由/状态→服务接管"],
+      "risk": "组件控制面未授权统一高危，只读验证优先",
+      "instances": []
+    },
+    {
+      "id": "sf_auth_bypass",
+      "name": "认证绕过(头/方法/路径变体)",
+      "signals": ["bearer", "authorization", "x-auth", "x-token", "x-api-key", "cookie", "session", "jwt", "auth", "登录", "鉴权"],
+      "primitives": ["auth"],
+      "targets": ["user_input"],
+      "base_primitives": ["空Authorization/Bearer null", "空自定义头(如xCjia)", "方法切换(GET→POST/PUT/OPTIONS)", "路径变体(//、./、%2e、%2f)"],
+      "risk": "认证绕过统一高危，只读验证优先",
       "instances": []
     }
   ]
