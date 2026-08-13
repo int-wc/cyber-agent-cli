@@ -31,16 +31,22 @@ from .parser import (
 )
 from .chain_library import (
     DEFAULT_CHAINS_PATH,
+    MAX_CHAIN_INSTANCES,
     load_chains,
     load_chain_ids,
     link,
     build_link_report,
+    record_chain_instance,
+    upsert_chain,
 )
 from .surface_matcher import (
     DEFAULT_SURFACES_PATH,
+    MAX_SURFACE_INSTANCES,
     load_surfaces,
     match_surfaces,
     build_hint_report,
+    record_surface_instance,
+    upsert_surface,
 )
 
 __all__ = [
@@ -58,12 +64,18 @@ __all__ = [
     "serialize_endpoints",
     "endpoints_to_line",
     "DEFAULT_CHAINS_PATH",
+    "MAX_CHAIN_INSTANCES",
     "load_chains",
     "load_chain_ids",
     "link",
     "build_link_report",
+    "record_chain_instance",
+    "upsert_chain",
     "DEFAULT_SURFACES_PATH",
+    "MAX_SURFACE_INSTANCES",
     "load_surfaces",
     "match_surfaces",
     "build_hint_report",
+    "record_surface_instance",
+    "upsert_surface",
 ]

@@ -1,11 +1,14 @@
 """业务原语解析与原语链利用核心库测试。
 
-覆盖：原语行解析、攻击面前匹配、原语链联动推理、数据模型枚举。
+覆盖：原语行解析、攻击面前匹配、原语链联动推理、数据模型枚举、库文件回写。
 """
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from cyber_agent.agent.primitives import (
     AttrTarget,
@@ -18,7 +21,11 @@ from cyber_agent.agent.primitives import (
     match_surfaces,
     parse_line,
     parse_text,
+    record_chain_instance,
+    record_surface_instance,
     serialize_endpoints,
+    upsert_chain,
+    upsert_surface,
 )
 
 # 样例：原语判定行（模拟 Phase2 深度分析输出）
@@ -153,6 +160,157 @@ class EnumTestCase(unittest.TestCase):
         d = ep.to_dict()
         self.assertEqual(d["business_attr"], "write_file")
         self.assertEqual(d["attr_target"], "local_fs")
+
+
+# ── 库文件回写（实例积累回路）──
+
+def _make_temp_chains_file() -> Path:
+    """创建一份临时的链库文件（复制真实数据，避免污染仓库数据）。"""
+    raw = json.loads(
+        Path("src/cyber_agent/agent/primitives/data/primitive-chains.json")
+        .read_text(encoding="utf-8")
+    )
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="chains-test-")
+    import os
+    os.close(fd)
+    Path(tmp).write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return Path(tmp)
+
+
+def _make_temp_surfaces_file() -> Path:
+    """创建一份临时的攻击面库文件（复制真实数据，避免污染仓库数据）。"""
+    raw = json.loads(
+        Path("src/cyber_agent/agent/primitives/data/attack_surfaces.json")
+        .read_text(encoding="utf-8")
+    )
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="surfaces-test-")
+    import os
+    os.close(fd)
+    Path(tmp).write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return Path(tmp)
+
+
+class ChainWritebackTestCase(unittest.TestCase):
+    """链库实例回写：追加、去重、限容、新增链。"""
+
+    def setUp(self) -> None:
+        self.path = _make_temp_chains_file()
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+
+    def _instance(self, target: str, endpoint: str) -> dict:
+        return {
+            "target": target,
+            "endpoint": endpoint,
+            "method": "GET",
+            "verdict": "execute",
+            "priority": "high",
+            "finding": "未授权访问确认",
+            "date": "2026-08-05",
+        }
+
+    def test_record_appends_instance(self) -> None:
+        ok = record_chain_instance("ch_ssrf_to_auth", self._instance("厂商A", "/api/t"), path=self.path)
+        self.assertTrue(ok)
+        chains = load_chains(self.path)
+        by_id = {c.chain_id: c for c in chains}
+        self.assertEqual(len(by_id["ch_ssrf_to_auth"].instances), 1)
+
+    def test_record_dedup_same_target_endpoint(self) -> None:
+        record_chain_instance("ch_ssrf_to_auth", self._instance("厂商A", "/api/t"), path=self.path)
+        record_chain_instance("ch_ssrf_to_auth", self._instance("厂商A", "/api/t"), path=self.path)
+        chains = load_chains(self.path)
+        by_id = {c.chain_id: c for c in chains}
+        self.assertEqual(len(by_id["ch_ssrf_to_auth"].instances), 1)
+
+    def test_record_unknown_chain_false(self) -> None:
+        self.assertFalse(record_chain_instance("ch_does_not_exist", self._instance("A", "/x"), path=self.path))
+
+    def test_record_cap_instances(self) -> None:
+        from cyber_agent.agent.primitives import MAX_CHAIN_INSTANCES
+        for i in range(MAX_CHAIN_INSTANCES + 10):
+            inst = self._instance(f"厂商{i}", f"/api/{i}")
+            self.assertTrue(record_chain_instance("ch_ssrf_to_auth", inst, path=self.path))
+        chains = load_chains(self.path)
+        by_id = {c.chain_id: c for c in chains}
+        self.assertLessEqual(len(by_id["ch_ssrf_to_auth"].instances), MAX_CHAIN_INSTANCES)
+
+    def test_upsert_new_chain(self) -> None:
+        added, chain_id = upsert_chain(
+            {
+                "id": "ch_apisix_unauth",
+                "name": "APISIX admin 未授权",
+                "primitives": ["query_data"],
+                "logic": "APISIX 控制面 admin API 未鉴权 → 读取路由/上游/消费者配置",
+                "gain": "未授权读取 → 配置泄露/服务接管",
+            },
+            path=self.path,
+        )
+        self.assertTrue(added)
+        self.assertEqual(chain_id, "ch_apisix_unauth")
+        chains = load_chains(self.path)
+        self.assertIn("ch_apisix_unauth", {c.chain_id for c in chains})
+
+    def test_upsert_existing_keeps_instances(self) -> None:
+        record_chain_instance("ch_ssrf_to_auth", self._instance("厂商A", "/api/t"), path=self.path)
+        added, _ = upsert_chain(
+            {"id": "ch_ssrf_to_auth", "name": "改名", "primitives": ["transfer", "auth"], "logic": "新逻辑", "gain": "新增益"},
+            path=self.path,
+        )
+        self.assertFalse(added)
+        chains = load_chains(self.path)
+        by_id = {c.chain_id: c for c in chains}
+        self.assertEqual(by_id["ch_ssrf_to_auth"].name, "改名")
+        self.assertEqual(len(by_id["ch_ssrf_to_auth"].instances), 1)
+
+
+class SurfaceWritebackTestCase(unittest.TestCase):
+    """攻击面库实例回写：追加、去重、新增条目。"""
+
+    def setUp(self) -> None:
+        self.path = _make_temp_surfaces_file()
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+
+    def test_record_appends_instance(self) -> None:
+        ok = record_surface_instance(
+            "sf_url_fetch_echo",
+            {"target": "厂商A", "endpoint": "/fetch", "method": "POST", "finding": "回显SSRF"},
+            path=self.path,
+        )
+        self.assertTrue(ok)
+        surfaces = load_surfaces(self.path)
+        by_id = {s.surface_id: s for s in surfaces}
+        self.assertEqual(len(by_id["sf_url_fetch_echo"].instances), 1)
+
+    def test_record_dedup(self) -> None:
+        inst = {"target": "厂商A", "endpoint": "/fetch", "method": "POST", "finding": "回显SSRF"}
+        record_surface_instance("sf_url_fetch_echo", inst, path=self.path)
+        record_surface_instance("sf_url_fetch_echo", inst, path=self.path)
+        surfaces = load_surfaces(self.path)
+        by_id = {s.surface_id: s for s in surfaces}
+        self.assertEqual(len(by_id["sf_url_fetch_echo"].instances), 1)
+
+    def test_record_unknown_surface_false(self) -> None:
+        self.assertFalse(
+            record_surface_instance("sf_missing", {"target": "A", "endpoint": "/x"}, path=self.path)
+        )
+
+    def test_upsert_new_surface(self) -> None:
+        added, sid = upsert_surface(
+            {
+                "id": "sf_component_admin",
+                "name": "组件控制面未授权",
+                "signals": ["apisix", "jumpserver", "keycloak", "admin/routes"],
+                "primitives": ["query_data"],
+                "targets": ["db"],
+                "base_primitives": ["未授权读取配置", "组件版本指纹"],
+                "risk": "未授权访问统一高危",
+            },
+            path=self.path,
+        )
+        self.assertTrue(added)
+        self.assertEqual(sid, "sf_component_admin")
+        surfaces = load_surfaces(self.path)
+        self.assertIn("sf_component_admin", {s.surface_id for s in surfaces})
 
 
 if __name__ == "__main__":

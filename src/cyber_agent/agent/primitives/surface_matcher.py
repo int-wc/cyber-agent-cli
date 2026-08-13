@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,12 @@ DEFAULT_SURFACES_PATH = Path(__file__).resolve().parent / "data" / "attack_surfa
 
 # 原语命中权重：端点原语出现在攻击面 primitives 中时额外加分
 _PRIMITIVE_HIT_WEIGHT = 2
+
+# 单个攻击面的实例上限：超过后丢弃最旧实例，避免库文件无限膨胀
+MAX_SURFACE_INSTANCES = 50
+
+# 回写操作使用模块级锁，避免多线程并发写坏库文件
+_surfaces_write_lock = threading.RLock()
 
 
 def load_surfaces(path: str | Path | None = None) -> list[AttackSurface]:
@@ -102,3 +110,131 @@ def build_hint_report(
         "matched_count": matched_count,
         "hints": hints,
     }
+
+
+# ═══ 攻击面库回写（实例积累回路）═══
+
+def _read_surfaces_file(path: Path) -> dict[str, Any] | None:
+    """读取攻击面库原始 JSON 结构；文件缺失/损坏返回 None。
+
+    直接操作原始 dict 而非 AttackSurface 模型，是为了保留
+    version/updated/description 等顶层元数据不被模型序列化丢弃。
+    """
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_surfaces_file(path: Path, data: dict[str, Any]) -> bool:
+    """原子写攻击面库文件：先写 .tmp 再 replace，避免崩溃导致文件损坏。
+
+    与 session_store.py 的原子写模式保持一致。
+    """
+    try:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def _surface_instance_dedup_key(instance: dict[str, Any]) -> str:
+    """实例去重键：目标 + 端点 + 方法（同一目标同一端点的重复案例只保留一条）。"""
+    target = str(instance.get("target", "")).strip()
+    endpoint = str(instance.get("endpoint", "")).strip()
+    method = str(instance.get("method", "")).strip().upper()
+    return f"{target}|{method}|{endpoint}"
+
+
+def record_surface_instance(
+    surface_id: str,
+    instance: dict[str, Any],
+    path: str | Path | None = None,
+) -> bool:
+    """往指定攻击面条目的 instances 追加一个真实案例（去重 + 限容）。
+
+    实例结构约定（与 record_chain_instance 一致）：
+    {
+        "target": "厂商/域名",
+        "endpoint": "/api/xxx",
+        "method": "GET",
+        "verdict": "execute",
+        "priority": "high",
+        "finding": "发现摘要",
+        "date": "2026-08-05",
+    }
+
+    攻击面不存在或写入失败返回 False；存在且写入成功返回 True。
+    """
+    p = Path(path) if path else DEFAULT_SURFACES_PATH
+    with _surfaces_write_lock:
+        data = _read_surfaces_file(p)
+        if data is None:
+            return False
+        surfaces = data.setdefault("surfaces", [])
+        for item in surfaces:
+            if str(item.get("id", "")) != surface_id:
+                continue
+            instances = item.setdefault("instances", [])
+            dedup_key = _surface_instance_dedup_key(instance)
+            if dedup_key:
+                instances[:] = [
+                    old for old in instances
+                    if _surface_instance_dedup_key(old) != dedup_key
+                ]
+            instances.append(instance)
+            # 限容：保留最新 MAX_SURFACE_INSTANCES 条
+            if len(instances) > MAX_SURFACE_INSTANCES:
+                del instances[: len(instances) - MAX_SURFACE_INSTANCES]
+            data["updated"] = date.today().isoformat()
+            return _write_surfaces_file(p, data)
+        return False
+
+
+def upsert_surface(
+    new_surface: dict[str, Any],
+    path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """新增或更新一个攻击面条目，返回 (是否新增, surface_id)。
+
+    用于把真实运行中「程序化匹配未覆盖」的新攻击面沉淀为正式条目：
+    - 已存在同 id → 保留原 instances，用新内容覆盖其他字段；
+    - 不存在 → 以新条目追加（instances 置空）。
+    """
+    surface_id = str(new_surface.get("id", "")).strip()
+    if not surface_id:
+        return False, ""
+    p = Path(path) if path else DEFAULT_SURFACES_PATH
+    with _surfaces_write_lock:
+        data = _read_surfaces_file(p)
+        if data is None:
+            data = {
+                "version": 1,
+                "updated": date.today().isoformat(),
+                "description": "攻击面模式库：可前匹配、可积累。Phase2 判定端点原语后，按 signals 匹配此处攻击面，将其 base_primitives 注入 Phase3；挖洞后在 instances 追加真实案例。跨SRC共享（同 api_patterns.json）。",
+                "surfaces": [],
+            }
+        surfaces = data.setdefault("surfaces", [])
+        for item in surfaces:
+            if str(item.get("id", "")) == surface_id:
+                kept_instances = item.get("instances", [])
+                item.clear()
+                item.update(new_surface)
+                item["instances"] = kept_instances
+                data["updated"] = date.today().isoformat()
+                _write_surfaces_file(p, data)
+                return False, surface_id
+        entry = dict(new_surface)
+        entry.setdefault("instances", [])
+        surfaces.append(entry)
+        data["updated"] = date.today().isoformat()
+        _write_surfaces_file(p, data)
+        return True, surface_id

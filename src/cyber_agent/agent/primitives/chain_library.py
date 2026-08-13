@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,12 @@ from .models import ChainCandidate, PrimitiveChain, PrimitiveEndpoint
 
 # 默认链库路径（相对本模块的 data 目录）
 DEFAULT_CHAINS_PATH = Path(__file__).resolve().parent / "data" / "primitive-chains.json"
+
+# 单条链的实例上限：超过后丢弃最旧实例，避免链库无限膨胀
+MAX_CHAIN_INSTANCES = 50
+
+# 回写操作使用模块级锁，避免多线程并发写坏链库文件
+_chains_write_lock = threading.RLock()
 
 
 def load_chains(path: str | Path | None = None) -> list[PrimitiveChain]:
@@ -82,3 +90,131 @@ def build_link_report(
         "total_endpoints": len(eps_list),
         "candidates": [c.to_dict() for c in candidates],
     }
+
+
+# ═══ 链库回写（实例积累回路）═══
+
+def _read_chains_file(path: Path) -> dict[str, Any] | None:
+    """读取链库原始 JSON 结构；文件缺失/损坏返回 None。
+
+    直接操作原始 dict 而非 PrimitiveChain 模型，是为了保留
+    version/updated/description 等顶层元数据不被模型序列化丢弃。
+    """
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_chains_file(path: Path, data: dict[str, Any]) -> bool:
+    """原子写链库文件：先写 .tmp 再 replace，避免崩溃导致文件损坏。
+
+    与 session_store.py 的原子写模式保持一致。
+    """
+    try:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def _chain_instance_dedup_key(instance: dict[str, Any]) -> str:
+    """实例去重键：目标 + 端点 + 方法（同一目标同一端点的重复案例只保留一条）。"""
+    target = str(instance.get("target", "")).strip()
+    endpoint = str(instance.get("endpoint", "")).strip()
+    method = str(instance.get("method", "")).strip().upper()
+    return f"{target}|{method}|{endpoint}"
+
+
+def record_chain_instance(
+    chain_id: str,
+    instance: dict[str, Any],
+    path: str | Path | None = None,
+) -> bool:
+    """往指定链模板的 instances 追加一个真实案例（去重 + 限容）。
+
+    实例结构约定（由管线/沉淀脚本提供）：
+    {
+        "target": "厂商/域名",
+        "endpoint": "/api/xxx",
+        "method": "GET",
+        "verdict": "execute",      # 链裁决结论
+        "priority": "high",        # 优先级
+        "finding": "发现摘要",      # 验证结果
+        "date": "2026-08-05",      # 发生日期
+    }
+
+    链不存在或写入失败返回 False；链存在且写入成功返回 True。
+    """
+    p = Path(path) if path else DEFAULT_CHAINS_PATH
+    with _chains_write_lock:
+        data = _read_chains_file(p)
+        if data is None:
+            return False
+        chains = data.setdefault("chains", [])
+        for item in chains:
+            if str(item.get("id", "")) != chain_id:
+                continue
+            instances = item.setdefault("instances", [])
+            dedup_key = _chain_instance_dedup_key(instance)
+            if dedup_key:
+                instances[:] = [
+                    old for old in instances
+                    if _chain_instance_dedup_key(old) != dedup_key
+                ]
+            instances.append(instance)
+            # 限容：保留最新 MAX_CHAIN_INSTANCES 条
+            if len(instances) > MAX_CHAIN_INSTANCES:
+                del instances[: len(instances) - MAX_CHAIN_INSTANCES]
+            data["updated"] = date.today().isoformat()
+            return _write_chains_file(p, data)
+        return False
+
+
+def upsert_chain(
+    new_chain: dict[str, Any],
+    path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """新增或更新一条链模板，返回 (是否新增, chain_id)。
+
+    用于把模型在真实运行中「自创」的链沉淀为正式模板：
+    - 链库已存在同 id → 保留原 instances，用新内容覆盖其他字段；
+    - 链库不存在 → 以新条目追加（instances 置空）。
+    """
+    chain_id = str(new_chain.get("id", "")).strip()
+    if not chain_id:
+        return False, ""
+    p = Path(path) if path else DEFAULT_CHAINS_PATH
+    with _chains_write_lock:
+        data = _read_chains_file(p)
+        if data is None:
+            data = {
+                "version": 1,
+                "updated": date.today().isoformat(),
+                "description": "业务原语链库：单个业务原语(能力点)单独可能无法构成有效危害，多个原语通过业务信任串联成可利用链达成有效漏洞。Phase3 联动推理 + Phase4 验证 + 实例积累，跨SRC共享。",
+                "chains": [],
+            }
+        chains = data.setdefault("chains", [])
+        for item in chains:
+            if str(item.get("id", "")) == chain_id:
+                kept_instances = item.get("instances", [])
+                item.clear()
+                item.update(new_chain)
+                item["instances"] = kept_instances
+                data["updated"] = date.today().isoformat()
+                _write_chains_file(p, data)
+                return False, chain_id
+        entry = dict(new_chain)
+        entry.setdefault("instances", [])
+        chains.append(entry)
+        data["updated"] = date.today().isoformat()
+        _write_chains_file(p, data)
+        return True, chain_id
