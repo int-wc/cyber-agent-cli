@@ -140,7 +140,11 @@ class ChainCandidate:
         return self.chain.name
 
     def to_dict(self) -> dict[str, Any]:
-        """转为可写回/可展示的 dict。"""
+        """转为可写回/可展示的 dict。
+
+        含 instance_count：候选链在链库中积累的真实验证案例数，
+        供提示注入作为「该链已被实战验证」的证据。
+        """
         return {
             "chain_id": self.chain.chain_id,
             "name": self.chain.name,
@@ -148,6 +152,7 @@ class ChainCandidate:
             "logic": self.chain.logic,
             "gain": self.chain.gain,
             "matched_endpoints": self.matched_endpoints,
+            "instance_count": len(self.chain.instances),
         }
 
 

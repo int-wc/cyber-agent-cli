@@ -25,6 +25,10 @@ DEFAULT_SURFACES_PATH = Path(__file__).resolve().parent / "data" / "attack_surfa
 # 原语命中权重：端点原语出现在攻击面 primitives 中时额外加分
 _PRIMITIVE_HIT_WEIGHT = 2
 
+# 弱判别原语：这类原语是「大类」语义，几乎所有端点都命中（如 query_data=查询），
+# 单独命中无判别力，必须配合信号命中才入选，否则攻击面匹配会噪声爆炸。
+_WEAK_DISCRIMINATOR_PRIMITIVES = frozenset({"query_data"})
+
 # 单个攻击面的实例上限：超过后丢弃最旧实例，避免库文件无限膨胀
 MAX_SURFACE_INSTANCES = 50
 
@@ -65,6 +69,9 @@ def match_surfaces(
     for surf in surf_list:
         matched_signals = [s for s in surf.signals if str(s).lower() in hay]
         primitive_hit = ep.attr_key in surf.primitives
+        # 弱判别原语（query_data）单独命中不算入选依据，避免噪声爆炸
+        if primitive_hit and ep.attr_key in _WEAK_DISCRIMINATOR_PRIMITIVES:
+            primitive_hit = False
         score = len(matched_signals) + (_PRIMITIVE_HIT_WEIGHT if primitive_hit else 0)
         if score <= 0:
             continue

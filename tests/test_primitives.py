@@ -15,6 +15,7 @@ from cyber_agent.agent.primitives import (
     BusinessPrimitive,
     PrimitiveEndpoint,
     build_hint_report,
+    build_link_report,
     load_chains,
     load_surfaces,
     link,
@@ -378,6 +379,51 @@ class ExpandedLibraryTestCase(unittest.TestCase):
         matches = match_surfaces(ep, load_surfaces())
         ids = {m.surface.surface_id for m in matches}
         self.assertIn("sf_auth_bypass", ids)
+
+
+    def test_weak_primitive_requires_signal(self) -> None:
+        """回归：query_data（弱判别原语）单独命中不入选，避免噪声爆炸。
+
+        组件控制面端点不应命中「导出/ID查询/分页」等仅因 query_data 命中的攻击面。
+        """
+        ep = parse_line(
+            "- /apisix/admin/routes GET business_attr=query_data attr_target=db"
+        )
+        assert ep is not None
+        matches = match_surfaces(ep, load_surfaces())
+        ids = {m.surface.surface_id for m in matches}
+        self.assertIn("sf_component_admin", ids)
+        # 噪声攻击面不应出现（它们仅因 query_data 原语命中，无信号支撑）
+        self.assertNotIn("sf_export_generate_file", ids)
+        self.assertNotIn("sf_pagination_bulk", ids)
+
+    def test_chain_candidate_carries_instance_count(self) -> None:
+        """候选链 to_dict 携带 instance_count（实战验证证据）。"""
+        import json
+        import tempfile
+        import os
+        from pathlib import Path
+
+        raw = json.loads(
+            Path("src/cyber_agent/agent/primitives/data/primitive-chains.json")
+            .read_text(encoding="utf-8")
+        )
+        for c in raw["chains"]:
+            if c["id"] == "ch_ssrf_to_auth":
+                c["instances"] = [{"target": "理想汽车", "endpoint": "/api/t", "finding": "SSRF确认"}]
+        fd, tmp = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        tmp_path = Path(tmp)
+        tmp_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        self.addCleanup(lambda: tmp_path.unlink(missing_ok=True))
+
+        eps = parse_text(
+            "- /api/translateUrl POST business_attr=transfer\n- /api/login POST business_attr=auth"
+        )
+        report = build_link_report(eps, load_chains(tmp_path))
+        by_id = {c["chain_id"]: c for c in report["candidates"]}
+        self.assertEqual(by_id["ch_ssrf_to_auth"]["instance_count"], 1)
+        self.assertEqual(by_id["ch_auth_bypass_matrix"]["instance_count"], 0)
 
 
 if __name__ == "__main__":

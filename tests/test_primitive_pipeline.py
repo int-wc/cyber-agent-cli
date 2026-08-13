@@ -342,6 +342,45 @@ class FeedbackSedimentTestCase(unittest.TestCase):
             pipe._feedback_sediment([["✅ 确认 200"]])
         self.assertEqual(mock_record.call_count, 0)
 
+    def test_extract_task_target_domain(self) -> None:
+        """target 从用户输入提取域名（修复 task_target 未设置导致的空 target）。"""
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_ssrf_to_auth", "verdict": "execute", "priority": "high",
+              "exploitation_plan": "验证"}],
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment(
+                [["✅ 确认未授权 200"]],
+                user_input="对 api-app.lixiang.com 做漏洞挖掘",
+            )
+        inst = mock_record.call_args[0][1]
+        self.assertEqual(inst["target"], "api-app.lixiang.com")
+
+    def test_extract_task_target_brand(self) -> None:
+        """target 从【厂商】提取。"""
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_ssrf_to_auth", "verdict": "execute", "priority": "high"}],
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment(
+                [["✅ 确认未授权 200"]],
+                user_input="对【理想汽车】做漏洞挖掘",
+            )
+        inst = mock_record.call_args[0][1]
+        self.assertEqual(inst["target"], "理想汽车")
+
 
 if __name__ == "__main__":
     unittest.main()

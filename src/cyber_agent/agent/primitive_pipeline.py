@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -528,7 +529,7 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         renderer.print_markdown(self._final_summary)
 
         # ── 积累回路：把本次运行的链裁决实例沉淀回数据层 ──
-        self._feedback_sediment(all_results)
+        self._feedback_sediment(all_results, user_input)
 
     # ═══ 积累回路（真实运行 → 链库/候选链回写）═══
 
@@ -539,7 +540,28 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         "路由", "版本", "指纹", "flag", "凭证", "源码",
     )
 
-    def _feedback_sediment(self, all_results: list[list[str]]) -> None:
+    # 目标提取：优先域名/IP，其次【厂商】或厂商名片段
+    _TARGET_RE = re.compile(
+        r"([a-zA-Z0-9][-a-zA-Z0-9]*\.[-a-zA-Z0-9.]+(?:[:/]\S+)?)"
+        r"|(?:https?://)?(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?"
+        r"|[【\[]([^】\]]{2,40})[】\]]"
+    )
+
+    @staticmethod
+    def _extract_task_target(user_input: str) -> str:
+        """从用户任务描述中提取目标标识（域名/IP/厂商名）。
+
+        优先域名或 IP，其次【厂商名】；均未命中时取输入前 40 字符。
+        """
+        text = (user_input or "").strip()
+        if not text:
+            return ""
+        m = PrimitiveWorkflowPipeline._TARGET_RE.search(text)
+        if m:
+            return m.group(1) or m.group(2) or m.group(3) or ""
+        return text[:40].strip()
+
+    def _feedback_sediment(self, all_results: list[list[str]], user_input: str = "") -> None:
         """把本次原语工作流的链裁决实例沉淀回数据层（积累回路）。
 
         策略（避免污染正式链库）：
@@ -548,6 +570,7 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         - 链已在正式链库 → record_chain_instance 追加实例；
         - 链不在正式链库（模型自创）→ append_chain_candidate 落候选文件，
           由人工/沉淀脚本确认后再 upsert 进正式链库；
+        - 实例 target 从用户任务描述提取（域名/IP/厂商名）；
         - 开关：runtime_context["feedback_enabled"]=False 可关闭（测试/基准场景）。
         """
         if not self._chain_verdicts:
@@ -560,7 +583,7 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         )
         has_evidence = any(m in results_text for m in self._POSITIVE_EVIDENCE_MARKERS)
         known_ids = load_chain_ids()
-        target = str(self._runtime_context.get("task_target") or "")
+        target = self._extract_task_target(user_input)
         sediment_count = 0
         for verdict_item in self._chain_verdicts:
             if not isinstance(verdict_item, dict):
@@ -615,8 +638,11 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         if self._chain_candidates:
             lines.append("## 程序化链候选（原语齐备）")
             for c in self._chain_candidates[:5]:
+                # 实例证据：链库中已积累的真实验证案例数，作为「实战已验证」信号
+                inst_count = int(c.get("instance_count", 0))
+                evidence = f"（链库已有 {inst_count} 个真实验证案例）" if inst_count else ""
                 lines.append(
-                    f"- {c.get('name', c.get('chain_id', '?'))}: "
+                    f"- {c.get('name', c.get('chain_id', '?'))} {evidence}: "
                     f"{'+'.join(c.get('primitives', []))} → {c.get('gain', '')}"
                 )
         # 注入攻击面扩散的具体 curl 测试向量，供决策者直接复用
