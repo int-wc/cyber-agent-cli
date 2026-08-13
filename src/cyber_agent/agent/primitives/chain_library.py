@@ -21,6 +21,12 @@ from .models import ChainCandidate, PrimitiveChain, PrimitiveEndpoint
 # 默认链库路径（相对本模块的 data 目录）
 DEFAULT_CHAINS_PATH = Path(__file__).resolve().parent / "data" / "primitive-chains.json"
 
+# 链候选文件：管线自动沉淀的「模型自创链」先落此处，
+# 由人工/沉淀脚本确认后再 upsert 进正式链库，避免垃圾链污染。
+DEFAULT_CHAIN_CANDIDATES_PATH = (
+    Path(__file__).resolve().parent / "data" / "primitive-chains.candidates.json"
+)
+
 # 单条链的实例上限：超过后丢弃最旧实例，避免链库无限膨胀
 MAX_CHAIN_INSTANCES = 50
 
@@ -218,3 +224,58 @@ def upsert_chain(
         data["updated"] = date.today().isoformat()
         _write_chains_file(p, data)
         return True, chain_id
+
+
+def load_chain_candidates(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """读取链候选文件，返回候选链 dict 列表。文件缺失/损坏返回空列表。"""
+    p = Path(path) if path else DEFAULT_CHAIN_CANDIDATES_PATH
+    if not p.exists():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    items = raw.get("candidates", []) if isinstance(raw, dict) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def append_chain_candidate(
+    new_chain: dict[str, Any],
+    path: str | Path | None = None,
+) -> bool:
+    """把模型自创的链追加到链候选文件（按 id 去重，保留首次来源时间）。
+
+    候选链不会自动进入正式链库；由人工或沉淀脚本确认后调用
+    upsert_chain 合并。返回是否追加成功。
+    """
+    chain_id = str(new_chain.get("id", "")).strip()
+    if not chain_id:
+        return False
+    p = Path(path) if path else DEFAULT_CHAIN_CANDIDATES_PATH
+    with _chains_write_lock:
+        data = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        candidates = data.setdefault("candidates", [])
+        if any(str(c.get("id", "")) == chain_id for c in candidates):
+            return False
+        entry = dict(new_chain)
+        entry.setdefault("instances", [])
+        entry.setdefault("first_seen", date.today().isoformat())
+        candidates.append(entry)
+        data["updated"] = date.today().isoformat()
+        try:
+            tmp_path = p.with_suffix(p.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=1) + "\n",
+                encoding="utf-8",
+            )
+            tmp_path.replace(p)
+            return True
+        except OSError:
+            return False

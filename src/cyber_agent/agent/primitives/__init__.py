@@ -30,8 +30,11 @@ from .parser import (
     endpoints_to_line,
 )
 from .chain_library import (
+    DEFAULT_CHAIN_CANDIDATES_PATH,
     DEFAULT_CHAINS_PATH,
     MAX_CHAIN_INSTANCES,
+    append_chain_candidate,
+    load_chain_candidates,
     load_chains,
     load_chain_ids,
     link,
@@ -63,8 +66,11 @@ __all__ = [
     "parse_endpoint_dicts",
     "serialize_endpoints",
     "endpoints_to_line",
+    "DEFAULT_CHAIN_CANDIDATES_PATH",
     "DEFAULT_CHAINS_PATH",
     "MAX_CHAIN_INSTANCES",
+    "append_chain_candidate",
+    "load_chain_candidates",
     "load_chains",
     "load_chain_ids",
     "link",

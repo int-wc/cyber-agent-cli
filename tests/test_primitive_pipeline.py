@@ -192,7 +192,8 @@ class PrimitivePipelineFlowTestCase(unittest.TestCase):
     def _build(self, responses: list[str]):
         fake_llm = _FakeLLM(responses)
         runner = _FakeRunner()
-        runtime = {"service_name": "deepseek", "auto_decision": True}
+        # feedback_enabled=False：全流程测试不得写真实链库数据文件
+        runtime = {"service_name": "deepseek", "auto_decision": True, "feedback_enabled": False}
         pipe = _make_pipeline(runner=runner, runtime_context=runtime)
         # 替换 LLM 获取与超时调用，直接走 fake
         pipe._get_llm = MagicMock(return_value=fake_llm)
@@ -249,6 +250,97 @@ class PrimitivePipelineFlowTestCase(unittest.TestCase):
         self.assertIn("攻击面扩散者", PRIMITIVE_ROLE_PROMPTS[AgentRole.DIFFUSER])
         self.assertIn("链跃迁者", PRIMITIVE_ROLE_PROMPTS[AgentRole.JUMPER])
         self.assertIn("链裁决者", PRIMITIVE_ROLE_PROMPTS[AgentRole.REFLECTOR])
+
+
+# ═══ 积累回路（回写沉淀）═══
+
+
+class FeedbackSedimentTestCase(unittest.TestCase):
+    """_feedback_sediment：裁决链沉淀到链库/候选文件。
+
+    回写函数用 patch 隔离，不触碰真实数据文件。
+    """
+
+    def _pipe_with_verdicts(self, verdicts: list[dict], runtime: dict | None = None) -> PrimitiveWorkflowPipeline:
+        pipe = _make_pipeline(runtime_context=runtime or {})
+        pipe._chain_verdicts = verdicts
+        pipe._record_trace = MagicMock()
+        return pipe
+
+    def test_known_chain_records_instance(self) -> None:
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_ssrf_to_auth", "verdict": "execute", "priority": "high",
+              "exploitation_plan": "只读验证 transfer 端点 SSRF 可达性"}]
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment([["✅ 确认存在未授权访问 200"]])
+        self.assertEqual(mock_record.call_count, 1)
+        inst = mock_record.call_args[0][1]
+        self.assertEqual(inst["verdict"], "execute")
+        # 有正向证据 → finding 取 exploitation_plan
+        self.assertIn("SSRF", inst["finding"])
+
+    def test_unknown_chain_appends_candidate(self) -> None:
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_apisix_unauth", "verdict": "execute", "priority": "high",
+              "escalation": "未授权读路由配置", "exploitation_plan": "GET /apisix/admin/routes"}]
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.append_chain_candidate",
+            return_value=True,
+        ) as mock_cand, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment([["✅ 确认未授权 200 路由配置暴露"]])
+        self.assertEqual(mock_cand.call_count, 1)
+        chain_dict = mock_cand.call_args[0][0]
+        self.assertEqual(chain_dict["id"], "ch_apisix_unauth")
+        self.assertIn("source_plan", chain_dict)
+
+    def test_skips_non_execute_verdict(self) -> None:
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_ssrf_to_auth", "verdict": "misreport", "priority": "high"}]
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment([["xxx"]])
+        self.assertEqual(mock_record.call_count, 0)
+
+    def test_disabled_by_runtime_flag(self) -> None:
+        pipe = self._pipe_with_verdicts(
+            [{"chain_id": "ch_ssrf_to_auth", "verdict": "execute"}],
+            runtime={"feedback_enabled": False},
+        )
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record, patch(
+            "cyber_agent.agent.primitive_pipeline.load_chain_ids",
+            return_value={"ch_ssrf_to_auth"},
+        ):
+            pipe._feedback_sediment([["✅ 确认未授权 200"]])
+        self.assertEqual(mock_record.call_count, 0)
+
+    def test_empty_verdicts_noop(self) -> None:
+        pipe = self._pipe_with_verdicts([])
+        with patch(
+            "cyber_agent.agent.primitive_pipeline.record_chain_instance",
+            return_value=True,
+        ) as mock_record:
+            pipe._feedback_sediment([["✅ 确认 200"]])
+        self.assertEqual(mock_record.call_count, 0)
 
 
 if __name__ == "__main__":

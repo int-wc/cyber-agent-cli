@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,12 +32,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .pipeline import FourPillarPipeline
 from .primitives import (
     BUSINESS_ATTR_GUIDE,
+    append_chain_candidate,
     build_hint_report,
     build_link_report,
     load_chains,
+    load_chain_ids,
     load_surfaces,
     parse_endpoint_dicts,
+    record_chain_instance,
     serialize_endpoints,
+    upsert_chain,
 )
 from .roles import AgentRole, get_role_label, get_role_prompt
 
@@ -521,6 +526,80 @@ class PrimitiveWorkflowPipeline(FourPillarPipeline):
         renderer.console.print("[dim bold]📊 原语工作流执行完成[/]")
         self._final_summary = self._build_primitive_summary(all_results, iteration)
         renderer.print_markdown(self._final_summary)
+
+        # ── 积累回路：把本次运行的链裁决实例沉淀回数据层 ──
+        self._feedback_sediment(all_results)
+
+    # ═══ 积累回路（真实运行 → 链库/候选链回写）═══
+
+    # 正向证据信号：执行结果命中这些关键词视为「验证有产出」
+    _POSITIVE_EVIDENCE_MARKERS = (
+        "泄露", "未授权", "越权", "确认", "存在", "可达", "暴露",
+        "200", "401", "403", "302", "SSRF", "IDOR", "token", "内网",
+        "路由", "版本", "指纹", "flag", "凭证", "源码",
+    )
+
+    def _feedback_sediment(self, all_results: list[list[str]]) -> None:
+        """把本次原语工作流的链裁决实例沉淀回数据层（积累回路）。
+
+        策略（避免污染正式链库）：
+        - 仅处理裁决者判定 verdict=execute 的链；
+        - 执行结果含正向证据关键词才写入实例（防止「候选未验证」污染）；
+        - 链已在正式链库 → record_chain_instance 追加实例；
+        - 链不在正式链库（模型自创）→ append_chain_candidate 落候选文件，
+          由人工/沉淀脚本确认后再 upsert 进正式链库；
+        - 开关：runtime_context["feedback_enabled"]=False 可关闭（测试/基准场景）。
+        """
+        if not self._chain_verdicts:
+            return
+        enabled = bool(self._runtime_context.get("feedback_enabled", True))
+        if not enabled:
+            return
+        results_text = "\n".join(
+            body for round_ in all_results for body in round_
+        )
+        has_evidence = any(m in results_text for m in self._POSITIVE_EVIDENCE_MARKERS)
+        known_ids = load_chain_ids()
+        target = str(self._runtime_context.get("task_target") or "")
+        sediment_count = 0
+        for verdict_item in self._chain_verdicts:
+            if not isinstance(verdict_item, dict):
+                continue
+            if str(verdict_item.get("verdict", "")).strip().lower() != "execute":
+                continue
+            chain_id = str(verdict_item.get("chain_id", "")).strip()
+            if not chain_id:
+                continue
+            instance = {
+                "target": target,
+                "endpoint": str(verdict_item.get("key_endpoints") or "")[:200],
+                "method": "",
+                "verdict": "execute",
+                "priority": str(verdict_item.get("priority", "medium")),
+                "finding": str(verdict_item.get("exploitation_plan", ""))[:300]
+                if has_evidence else "候选链已裁决 execute，执行未确认正向证据",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+            }
+            if chain_id in known_ids:
+                ok = record_chain_instance(chain_id, instance)
+            else:
+                ok = append_chain_candidate(
+                    {
+                        "id": chain_id,
+                        "name": str(verdict_item.get("chain_id", chain_id)),
+                        "primitives": [],
+                        "logic": str(verdict_item.get("escalation", ""))[:300],
+                        "gain": "候选链（模型自创，待确认）",
+                        "source_plan": str(verdict_item.get("exploitation_plan", ""))[:500],
+                    }
+                )
+            if ok:
+                sediment_count += 1
+        if sediment_count:
+            self._record_trace(
+                "feedback_sediment",
+                detail=f"沉淀 {sediment_count} 条链实例（含候选）",
+            )
 
     # ═══ 辅助 ═══
     def _format_chain_plan_hint(self) -> str:
