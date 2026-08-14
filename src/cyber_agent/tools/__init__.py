@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..agent.mode import AgentMode
 from ..execution_control import ExecutionController
+from .registry import ToolFactory, ToolRegistry, default_tool_registry
 from .filesystem import (
     create_list_directory_tool,
     create_read_text_file_tool,
@@ -76,6 +77,40 @@ def resolve_command_registry(
     return normalize_command_registry(command_registry)
 
 
+# ═══ 默认工具注册表（一切皆能力：核心工具可注册/可替换/可禁用）═══
+
+def _register_default_tools(registry: ToolRegistry) -> None:
+    """把默认核心工具注册到注册表（factory 延迟构建）。
+
+    仅注册尚未注册的工具名，避免重复导入时覆盖外部注册。
+    """
+    defaults: dict[str, ToolFactory] = {
+        "scan_port": lambda **ctx: scan_port,
+        "search_web": lambda **ctx: create_search_web_tool(
+            ctx.get("execution_controller"),
+            capability_registry=ctx.get("capability_registry"),
+        ),
+        "fetch_web_page": lambda **ctx: create_web_fetch_tool(
+            ctx.get("execution_controller"),
+        ),
+        "list_directory": lambda **ctx: create_list_directory_tool(ctx["allowed_roots"]),
+        "read_text_file": lambda **ctx: create_read_text_file_tool(ctx["allowed_roots"]),
+        "write_text_file": lambda **ctx: create_write_text_file_tool(ctx["allowed_roots"]),
+        "replace_in_file": lambda **ctx: create_replace_in_file_tool(ctx["allowed_roots"]),
+        "apply_unified_patch": lambda **ctx: create_apply_unified_patch_tool(ctx["allowed_roots"]),
+        "run_shell_command": lambda **ctx: create_run_shell_command_tool(
+            ctx["allowed_roots"],
+            ctx.get("execution_controller"),
+        ),
+        "read_process_output": lambda **ctx: create_read_process_output_tool(),
+        "list_processes": lambda **ctx: create_list_processes_tool(),
+        "stop_process": lambda **ctx: create_stop_process_tool(),
+    }
+    for name, factory in defaults.items():
+        if not registry.is_registered(name):
+            registry.register(name, factory)
+
+
 def get_default_tools(
     mode: AgentMode = AgentMode.STANDARD,
     extra_allowed_paths: Iterable[Path | str] | None = None,
@@ -83,28 +118,28 @@ def get_default_tools(
     execution_controller: ExecutionController | None = None,
     capability_registry: CapabilityRegistry | None = None,
     mcp_client: MCPClient | None = None,
+    registry: ToolRegistry | None = None,
 ):
-    """返回默认启用的工具列表。"""
+    """返回默认启用的工具列表。
+
+    核心工具从 registry（默认 default_tool_registry 单例）构建，
+    支持外部 register/replace/disable 定制；动态能力、外部命令、
+    MCP 工具仍按原逻辑附加。
+    """
+    active_registry = registry or default_tool_registry
+    # 仅全局单例自动注册默认工具；显式传入的自定义 registry
+    # 由调用方完全掌控（测试隔离/定制场景）
+    if registry is None:
+        _register_default_tools(active_registry)
+
     allowed_roots = resolve_allowed_roots(mode, extra_allowed_paths)
     normalized_registry = resolve_command_registry(mode, command_registry)
 
-    tools = [
-        scan_port,
-        create_search_web_tool(
-            execution_controller,
-            capability_registry=capability_registry,
-        ),
-        create_web_fetch_tool(execution_controller),
-        create_list_directory_tool(allowed_roots),
-        create_read_text_file_tool(allowed_roots),
-        create_write_text_file_tool(allowed_roots),
-        create_replace_in_file_tool(allowed_roots),
-        create_apply_unified_patch_tool(allowed_roots),
-        create_run_shell_command_tool(allowed_roots, execution_controller),
-        create_read_process_output_tool(),
-        create_list_processes_tool(),
-        create_stop_process_tool(),
-    ]
+    tools = active_registry.build(
+        allowed_roots=allowed_roots,
+        execution_controller=execution_controller,
+        capability_registry=capability_registry,
+    )
     if normalized_registry:
         tools.append(
             create_run_registered_tool_tool(
@@ -146,6 +181,9 @@ def describe_tools(
 
 
 __all__ = [
+    "ToolFactory",
+    "ToolRegistry",
+    "default_tool_registry",
     "describe_allowed_roots",
     "describe_command_registry",
     "describe_tool_instances",
