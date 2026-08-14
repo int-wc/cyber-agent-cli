@@ -41,6 +41,7 @@ from .capability_models import *  # noqa: F403  # 向后兼容：模型已拆分
 from .capability_models import (  # 私有函数不会被 import * 导入，需要显式导入
     _extract_response_text,
     _truncate_output,
+    validate_output_against_schema,
 )
 
 
@@ -282,6 +283,7 @@ class CapabilityRegistry:
                 for item in generated_spec.get("smoke_requests", [])
                 if str(item).strip()
             ][:2],
+            output_schema=dict(generated_spec.get("output_schema", {}) or {}),
             audit_score=int(audit_result.get("score", 0)),
             audit_summary=str(audit_result.get("summary", "")).strip(),
             audit_issues=[
@@ -475,6 +477,11 @@ JSON 字段要求：
 - usage_hint: string，提示该能力适合在什么场景使用
 - quality_checklist: string[]，列出 3 到 5 条质量检查点
 - smoke_requests: string[]，列出 1 到 2 条烟雾测试输入
+- output_schema: object（仅 kind=tool 时可选，强烈建议提供），描述工具返回的
+  canonical 结构，是 JSON Schema 子集，常用字段：
+  { "type": "object", "required": ["ok"], "properties": { "ok": {"type": "boolean"},
+    "data": {"type": "object"}, "errors": {"type": "array", "items": {"type": "string"}} } }
+  handle_request 必须返回与该 schema 匹配的 JSON 字符串（平台会执行后校验）
 - tool_python_code: string，当 kind=tool 或 register_as_tool=true 时必须提供
   约束：这段代码必须定义 handle_request(request: str, context: str) -> str
 - skill_python_code: string，当 kind=skill 时必须提供
@@ -862,7 +869,19 @@ JSON 字段要求：
                     "❌ 生成工具执行失败：\n"
                     f"{_truncate_output(execution_result.combined_output)}"
                 )
-            return execution_result.stdout.strip() or "无输出。"
+            raw_output = execution_result.stdout.strip()
+            # 输出契约校验：声明了 output_schema 的能力，输出必须与之匹配，
+            # 否则返回结构化错误，提示模型用 revise_generated_capability 修订
+            schema = current_capability.output_schema or {}
+            if schema:
+                passed, message = validate_output_against_schema(raw_output, schema)
+                if not passed:
+                    return (
+                        "❌ 生成工具输出不符合声明的 output_schema：\n"
+                        f"{message}\n"
+                        "请用 revise_generated_capability 修订输出格式。"
+                    )
+            return raw_output or "无输出。"
 
         generated_capability_tool.description = capability.tool_description
         return attach_tool_risk(generated_capability_tool, "execute")

@@ -359,5 +359,97 @@ def handle_request(request: str, context: str) -> str:
         self.assertIn("inject_helper", [tool.name for tool in runner.tools])
 
 
+class OutputSchemaTestCase(unittest.TestCase):
+    """输出契约（output_schema）校验。"""
+
+    def test_validate_output_matches_schema(self) -> None:
+        """输出符合声明的 schema 时通过。"""
+        from cyber_agent.capability_models import validate_output_against_schema
+
+        schema = {
+            "type": "object",
+            "required": ["ok", "target"],
+            "properties": {
+                "ok": {"type": "boolean"},
+                "target": {"type": "string"},
+                "errors": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+        passed, message = validate_output_against_schema(
+            '{"ok": true, "target": "127.0.0.1", "errors": []}',
+            schema,
+        )
+        self.assertTrue(passed, message)
+        self.assertEqual(message, "")
+
+    def test_validate_output_missing_required_field(self) -> None:
+        """缺少必填字段时校验失败并指明字段。"""
+        from cyber_agent.capability_models import validate_output_against_schema
+
+        schema = {
+            "type": "object",
+            "required": ["ok", "target"],
+            "properties": {"ok": {"type": "boolean"}, "target": {"type": "string"}},
+        }
+        passed, message = validate_output_against_schema('{"ok": true}', schema)
+        self.assertFalse(passed)
+        self.assertIn("target", message)
+
+    def test_validate_output_wrong_type(self) -> None:
+        """字段类型不符时校验失败。"""
+        from cyber_agent.capability_models import validate_output_against_schema
+
+        schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+        }
+        passed, message = validate_output_against_schema('{"ok": "yes"}', schema)
+        self.assertFalse(passed)
+        self.assertIn("ok", message)
+
+    def test_validate_output_not_json(self) -> None:
+        """输出不是合法 JSON 时校验失败。"""
+        from cyber_agent.capability_models import validate_output_against_schema
+
+        passed, message = validate_output_against_schema("plain text, not json", {"type": "object"})
+        self.assertFalse(passed)
+        self.assertIn("JSON", message)
+
+    def test_no_schema_passes_through(self) -> None:
+        """未声明 schema 时向后兼容，直接通过。"""
+        from cyber_agent.capability_models import validate_output_against_schema
+
+        passed, message = validate_output_against_schema("任意文本", None)
+        self.assertTrue(passed)
+        self.assertEqual(message, "")
+
+    def test_runtime_tool_enforces_output_schema(self) -> None:
+        """运行时工具执行后校验输出 schema，不符返回修订提示。"""
+        with TemporaryDirectory() as temp_dir:
+            registry = CapabilityRegistry(base_dir=Path(temp_dir))
+            entrypoint_path = Path(temp_dir) / "schema_tool.py"
+            entrypoint_path.write_text(
+                "def handle_request(request, context):\n"
+                "    return '不是JSON'\n",
+                encoding="utf-8",
+            )
+            capability = GeneratedCapability(
+                name="schema_tool",
+                kind="tool",
+                register_as_tool=True,
+                description="测试输出契约。",
+                system_prompt="",
+                tool_description="测试。",
+                usage_hint="测试。",
+                entrypoint_path=str(entrypoint_path),
+                output_schema={"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}},
+            )
+            registry._capabilities["schema_tool"] = capability
+            runtime_tool = registry._build_runtime_tool(capability)
+            result = runtime_tool.invoke({"request": "x", "context": ""})
+            self.assertIn("output_schema", result)
+            self.assertIn("revise_generated_capability", result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +58,9 @@ class GeneratedCapability:
     usage_hint: str
     quality_checklist: list[str] = field(default_factory=list)
     smoke_requests: list[str] = field(default_factory=list)
+    # 输出契约：描述工具返回的 canonical 结构（JSON Schema 子集），
+    # 执行后校验，确保能力间可组合、可被下游稳定消费
+    output_schema: dict = field(default_factory=dict)
     audit_score: int = 0
     audit_summary: str = ""
     audit_issues: list[str] = field(default_factory=list)
@@ -106,6 +110,7 @@ class GeneratedCapability:
                 for item in raw_data.get("smoke_requests", [])
                 if str(item).strip()
             ],
+            output_schema=dict(raw_data.get("output_schema", {}) or {}),
             audit_score=int(raw_data.get("audit_score", 0)),
             audit_summary=str(raw_data.get("audit_summary", "")),
             audit_issues=[str(item) for item in raw_data.get("audit_issues", [])],
@@ -167,3 +172,76 @@ def _truncate_output(output: str, *, limit: int = MAX_GENERATED_OUTPUT_CHARS) ->
     if len(output) > limit:
         truncated_output += "\n... 输出过长，已截断。"
     return truncated_output
+
+
+# ═══ 输出契约校验（JSON Schema 子集）═══
+
+def validate_output_against_schema(
+    raw_output: str,
+    schema: dict | None,
+) -> tuple[bool, str]:
+    """校验工具执行输出是否符合声明的 output_schema。
+
+    支持 JSON Schema 的常用子集：type/required/properties/items。
+    输出必须是 JSON 可解析的；无 schema 声明时视为通过（向后兼容）。
+    返回 (是否通过, 校验信息)。
+    """
+    if not schema:
+        return True, ""
+    stripped = raw_output.strip()
+    if not stripped:
+        return False, "输出为空，无法校验。"
+    try:
+        value = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        return False, f"输出不是合法 JSON：{exc.msg}"
+
+    errors: list[str] = []
+    schema_type = str(schema.get("type", "")).strip()
+    if schema_type and not _json_type_matches(value, schema_type):
+        errors.append(f"顶层类型不符：期望 {schema_type}，实际 {type(value).__name__}")
+
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        for field in required:
+            if field not in value:
+                errors.append(f"缺少必填字段：{field}")
+        properties = schema.get("properties", {})
+        if isinstance(properties, dict):
+            for field, field_schema in properties.items():
+                if field not in value or not isinstance(field_schema, dict):
+                    continue
+                field_type = str(field_schema.get("type", "")).strip()
+                if field_type and not _json_type_matches(value[field], field_type):
+                    errors.append(
+                        f"字段 {field} 类型不符：期望 {field_type}，实际 {type(value[field]).__name__}"
+                    )
+    elif isinstance(value, list):
+        items_schema = schema.get("items", {})
+        if isinstance(items_schema, dict):
+            items_type = str(items_schema.get("type", "")).strip()
+            if items_type and any(not _json_type_matches(v, items_type) for v in value):
+                errors.append(f"列表元素类型不符：期望 {items_type}")
+
+    if errors:
+        return False, "；".join(errors[:5])
+    return True, ""
+
+
+def _json_type_matches(value: object, schema_type: str) -> bool:
+    """判断 JSON 值与 schema type 是否匹配。"""
+    type_map = {
+        "object": dict,
+        "array": list,
+        "string": str,
+        "number": (int, float),
+        "integer": int,
+        "boolean": bool,
+        "null": type(None),
+    }
+    expected = type_map.get(schema_type)
+    if expected is None:
+        return True
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, expected)
