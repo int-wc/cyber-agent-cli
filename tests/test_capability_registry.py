@@ -451,5 +451,71 @@ class OutputSchemaTestCase(unittest.TestCase):
             self.assertIn("revise_generated_capability", result)
 
 
+class SessionScopeTestCase(unittest.TestCase):
+    """能力会话作用域（per-session 白名单）。"""
+
+    def _make_registry(self, temp_dir: str, names: list[str]) -> CapabilityRegistry:
+        """构造带多个工具的注册表（直接注入 _capabilities 避免模型生成）。"""
+        registry = CapabilityRegistry(base_dir=Path(temp_dir))
+        for name in names:
+            entrypoint_path = Path(temp_dir) / f"{name}.py"
+            entrypoint_path.write_text(
+                f"def handle_request(request, context):\n    return 'ok:{name}'\n",
+                encoding="utf-8",
+            )
+            registry._capabilities[name] = GeneratedCapability(
+                name=name,
+                kind="tool",
+                register_as_tool=True,
+                description=f"{name} 测试能力。",
+                system_prompt="",
+                tool_description=f"{name} 测试。",
+                usage_hint="测试。",
+                entrypoint_path=str(entrypoint_path),
+            )
+        # 重置缓存，强制按当前能力重建
+        registry._dynamic_tools_cache = None
+        registry._dynamic_tools_version = -1
+        return registry
+
+    def test_no_scope_returns_all(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = self._make_registry(temp_dir, ["cap_a", "cap_b"])
+            tools = registry.get_dynamic_tools()
+            names = {t.name for t in tools}
+            self.assertIn("cap_a", names)
+            self.assertIn("cap_b", names)
+
+    def test_session_scope_filters_capabilities(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = self._make_registry(temp_dir, ["cap_a", "cap_b"])
+            registry.set_session_capabilities("sess_1", ["cap_a"])
+            tools = registry.get_dynamic_tools("sess_1")
+            names = {t.name for t in tools}
+            self.assertIn("cap_a", names)
+            self.assertNotIn("cap_b", names)
+            # 管理工具始终保留
+            self.assertIn("create_generated_capability", names)
+            # 其他会话不受影响
+            other = {t.name for t in registry.get_dynamic_tools("sess_2")}
+            self.assertIn("cap_b", other)
+
+    def test_clear_session_scope(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = self._make_registry(temp_dir, ["cap_a", "cap_b"])
+            registry.set_session_capabilities("sess_1", ["cap_a"])
+            registry.clear_session_capabilities("sess_1")
+            names = {t.name for t in registry.get_dynamic_tools("sess_1")}
+            self.assertIn("cap_b", names)
+
+    def test_session_scope_empty_disables_all_business(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = self._make_registry(temp_dir, ["cap_a"])
+            registry.set_session_capabilities("sess_1", [])
+            names = {t.name for t in registry.get_dynamic_tools("sess_1")}
+            self.assertNotIn("cap_a", names)
+            self.assertIn("create_generated_capability", names)
+
+
 if __name__ == "__main__":
     unittest.main()

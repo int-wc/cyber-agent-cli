@@ -78,6 +78,8 @@ class CapabilityRegistry:
         self._skill_prompt_mtime_cache: dict[str, float] = {}
         self._dynamic_tools_cache: list[BaseTool] | None = None
         self._dynamic_tools_version: int = 0
+        # 会话作用域：session_id → 该会话启用的能力白名单（None=全量）
+        self._session_capabilities: dict[str, set[str] | None] = {}
         self._load_capabilities()
 
     def update_llm_config(
@@ -157,29 +159,86 @@ class CapabilityRegistry:
 
         return "\n\n".join(part for part in parts if part.strip())
 
-    def get_dynamic_tools(self) -> list[BaseTool]:
-        """返回当前所有启用的动态工具与 capability 管理工具，结果按能力版本缓存。"""
+    # ── 会话作用域（per-session 能力白名单）──
+
+    def set_session_capabilities(
+        self,
+        session_id: str,
+        enabled_names: list[str] | set[str] | None,
+    ) -> None:
+        """设置某会话的能力白名单（None=全量，空集合=禁用全部）。
+
+        对标 dsh 的 scope 作用域：不同任务/会话可注入不同能力集合，
+        避免所有会话共享全部动态能力。
+        """
+        if not session_id:
+            return
+        if enabled_names is None:
+            self._session_capabilities[session_id] = None
+        else:
+            self._session_capabilities[session_id] = {str(name) for name in enabled_names}
+
+    def get_session_capabilities(self, session_id: str) -> set[str] | None:
+        """读取某会话的能力白名单（None=全量）。"""
+        return self._session_capabilities.get(session_id)
+
+    def clear_session_capabilities(self, session_id: str) -> None:
+        """清除某会话的作用域设置，恢复全量。"""
+        self._session_capabilities.pop(session_id, None)
+
+    def _resolve_session_scope(
+        self,
+        session_id: str | None,
+    ) -> set[str] | None:
+        """解析会话作用域：无 session 或未设置 → None（全量）。"""
+        if not session_id:
+            return None
+        return self._session_capabilities.get(session_id)
+
+    def get_dynamic_tools(
+        self,
+        session_id: str | None = None,
+    ) -> list[BaseTool]:
+        """返回当前启用的动态工具与 capability 管理工具，按能力版本缓存。
+
+        session_id 提供且该会话设置了白名单时，仅注入白名单内的能力
+        （对标 dsh scope 作用域）；管理工具（create/revise/list 等）始终注入。
+        """
+        scope = self._resolve_session_scope(session_id)
         current_version = sum(
             cap.revision for cap in self._capabilities.values() if cap.enabled and cap.register_as_tool
         )
-        if self._dynamic_tools_cache is not None and self._dynamic_tools_version == current_version:
+        if self._dynamic_tools_cache is None or self._dynamic_tools_version != current_version:
+            # 缓存始终全量构建，scope 过滤只在返回时做，
+            # 避免「某会话设置白名单后，其他会话拿到过滤后的缓存」
+            tools: list[BaseTool] = [
+                self._create_generated_capability_tool(),
+                self._create_revise_capability_tool(),
+                self._create_list_capabilities_tool(),
+                self._create_show_capability_tool(),
+                self._create_mark_capability_satisfied_tool(),
+            ]
+            for capability in self.list_capabilities():
+                if not capability.enabled or not capability.register_as_tool:
+                    continue
+                tools.append(self._build_runtime_tool(capability))
+            self._dynamic_tools_cache = tools
+            self._dynamic_tools_version = current_version
+
+        if scope is None:
             return self._dynamic_tools_cache
-
-        tools: list[BaseTool] = [
-            self._create_generated_capability_tool(),
-            self._create_revise_capability_tool(),
-            self._create_list_capabilities_tool(),
-            self._create_show_capability_tool(),
-            self._create_mark_capability_satisfied_tool(),
+        # 白名单模式：管理工具始终保留，仅按白名单过滤业务能力
+        manager_names = {
+            "create_generated_capability",
+            "revise_generated_capability",
+            "list_generated_capabilities",
+            "show_generated_capability",
+            "mark_generated_capability_satisfied",
+        }
+        return [
+            tool for tool in self._dynamic_tools_cache
+            if tool.name in manager_names or tool.name in scope
         ]
-        for capability in self.list_capabilities():
-            if not capability.enabled or not capability.register_as_tool:
-                continue
-            tools.append(self._build_runtime_tool(capability))
-
-        self._dynamic_tools_cache = tools
-        self._dynamic_tools_version = current_version
-        return tools
 
     def create_or_update_capability(
         self,
