@@ -517,5 +517,27 @@ class SessionScopeTestCase(unittest.TestCase):
             self.assertIn("create_generated_capability", names)
 
 
+class EnabledFieldCompatTestCase(unittest.TestCase):
+    """enabled 字段兼容：None/缺失视为默认 True。"""
+
+    def test_enabled_none_is_true(self) -> None:
+        cap = GeneratedCapability.from_dict(
+            {"name": "x", "kind": "tool", "register_as_tool": True, "enabled": None}
+        )
+        self.assertTrue(cap.enabled)
+
+    def test_enabled_missing_is_true(self) -> None:
+        cap = GeneratedCapability.from_dict(
+            {"name": "y", "kind": "tool", "register_as_tool": True}
+        )
+        self.assertTrue(cap.enabled)
+
+    def test_enabled_false_stays_false(self) -> None:
+        cap = GeneratedCapability.from_dict(
+            {"name": "z", "kind": "tool", "register_as_tool": True, "enabled": False}
+        )
+        self.assertFalse(cap.enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -118,7 +118,9 @@ class GeneratedCapability:
                 str(item) for item in raw_data.get("audit_recommendations", [])
             ],
             status=str(raw_data.get("status", "draft")),
-            enabled=bool(raw_data.get("enabled", True)),
+            # enabled 缺失或为 null 时视为默认 True（与字段默认一致），
+            # 避免历史数据 enabled=None 导致能力被意外禁用
+            enabled=bool(raw_data.get("enabled", True)) if raw_data.get("enabled") is not None else True,
             revision=int(raw_data.get("revision", 1)),
             created_at=str(raw_data.get("created_at", "")),
             updated_at=str(raw_data.get("updated_at", "")),
