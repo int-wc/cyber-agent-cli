@@ -33,6 +33,7 @@ from .context_window import (
     format_message_for_context_summary,
 )
 from .events import AgentEventType
+from .event_bus import EventBus, global_event_bus
 from .mode import AgentMode, get_mode_system_prompt
 
 if TYPE_CHECKING:
@@ -275,6 +276,7 @@ class AgentRunner:
         max_context_tokens: int | None = None,
         context_keep_recent_messages: int | None = None,
         context_summary_max_chars: int | None = None,
+        event_bus: EventBus | None = None,
     ):
         self.service = settings.normalize_service_name(service_name)
         self.model_name = settings.get_model_name(model_name, service_name=self.service)
@@ -287,6 +289,8 @@ class AgentRunner:
         self.execution_controller = execution_controller or ExecutionController()
         self.capability_registry = capability_registry
         self.file_skills = file_skills or []
+        # 事件总线：默认全局单例，测试可注入隔离实例
+        self.event_bus = event_bus or global_event_bus
         self.max_context_chars = max_context_chars or settings.max_context_chars
         self.context_keep_recent_messages = (
             context_keep_recent_messages or settings.context_keep_recent_messages
@@ -949,6 +953,16 @@ class AgentRunner:
                     from ..logging import log_error
                     log_error("event_handler", f"APPROVAL_REQUEST handler 异常", exc_info=True)
 
+            # 事件总线：外部钩子可观察审批请求
+            self.event_bus.publish(
+                AgentEventType.APPROVAL_REQUEST,
+                {
+                    "tool_name": tool_name,
+                    "tool_call": tool_call,
+                    "risk": self._get_tool_risk(tool),
+                },
+            )
+
             if approval_handler is None:
                 decision = ApprovalDecision(
                     approved=False,
@@ -1019,6 +1033,15 @@ class AgentRunner:
             except Exception:
                 from ..logging import log_error
                 log_error("event_handler", f"TOOL_RESULT handler 异常", exc_info=True)
+
+        # 事件总线：外部钩子可观察工具执行结果（拦截器可改写 content）
+        self.event_bus.publish(
+            AgentEventType.TOOL_RESULT,
+            {
+                "tool_name": tool_name,
+                "content": normalized_result,
+            },
+        )
 
         return ToolMessage(
             content=normalized_result,
@@ -1114,6 +1137,21 @@ class AgentRunner:
                                 "TOOL_CALL handler 异常",
                                 exc_info=True,
                             )
+
+                    # 事件总线：外部钩子可观察工具调用
+                    self.event_bus.publish(
+                        AgentEventType.TOOL_CALL,
+                        {
+                            "tool_calls": [
+                                {
+                                    "id": str(tc.get("id", "")),
+                                    "name": str(tc.get("name", "")),
+                                    "args": tc.get("args", {}),
+                                }
+                                for tc in ai_message.tool_calls
+                            ],
+                        },
+                    )
 
                     tool_registry = self._build_tool_registry()
                     round_tool_messages: list[ToolMessage] = []
